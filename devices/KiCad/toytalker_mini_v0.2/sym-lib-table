@@ -12,4 +12,5 @@
   (lib (name "TPS61022RWUR")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/TPS61022RWUR.kicad_sym")(options "")(descr ""))
   (lib (name "VLS6045EX-1R0N")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/VLS6045EX-1R0N.kicad_sym")(options "")(descr ""))
   (lib (name "CYA0630-1.0UH")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/CYA0630-1.0UH.kicad_sym")(options "")(descr ""))
+  (lib (name "toytalker_v02_parts")(type "KiCad")(uri "${KIPRJMOD}/easyeda_lib/toytalker_v02_parts.kicad_sym")(options "")(descr "v0.2 new parts: ZH(C265329) MX1.25(C2845379) slide-switch(C22435661), converted from EasyEDA"))
 )
