@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useOwnerId } from "../../hooks/useOwnerId";
+import { fetchWithRetry } from "../../lib/fetchWithRetry";
 import {
   SafeAreaView,
   Text,
@@ -113,7 +114,7 @@ export default function Toy() {
     if (!ownerId) return;
     (async () => {
       try {
-        const res = await fetch(`${DEVICE_SETTING_URL}/devices?owner_id=${encodeURIComponent(ownerId)}`);
+        const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/devices?owner_id=${encodeURIComponent(ownerId)}`);
         const data = await res.json();
         if (data.devices?.length > 0) {
           const devices = data.devices.map((d: any) => ({
@@ -135,7 +136,7 @@ export default function Toy() {
     if (!ownerId) return;
     (async () => {
       try {
-        const res = await fetch(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
+        const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
         const data = await res.json();
         setCharacters(data.characters ?? []);
       } catch {}
@@ -361,11 +362,11 @@ export default function Toy() {
     setCharactersLoading(true);
     setScreen("character-select");
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId!)}`);
+      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId!)}`);
       const data = await res.json();
       setCharacters(data.characters ?? []);
     } catch (e: any) {
-      Alert.alert("エラー", "キャラクター一覧の取得に失敗しました");
+      Alert.alert("エラー", `キャラクター一覧の取得に失敗しました\n(${e?.message ?? e})`);
     } finally {
       setCharactersLoading(false);
     }

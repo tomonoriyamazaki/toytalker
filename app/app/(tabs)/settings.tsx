@@ -17,6 +17,7 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
 import { useOwnerId } from "../../hooks/useOwnerId";
+import { fetchWithRetry } from "../../lib/fetchWithRetry";
 import AudioRecord from "react-native-audio-record";
 import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
@@ -236,11 +237,11 @@ export default function Settings() {
     if (!ownerId) return;
     setCharsLoading(true);
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
+      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
       const data = await res.json();
       setCharacters(data.characters ?? []);
-    } catch {
-      Alert.alert("エラー", "キャラクター一覧の取得に失敗しました");
+    } catch (e: any) {
+      Alert.alert("エラー", `キャラクター一覧の取得に失敗しました\n(${e?.message ?? e})`);
     } finally {
       setCharsLoading(false);
     }
@@ -249,14 +250,14 @@ export default function Settings() {
   const loadVoices = async () => {
     setVoicesLoading(true);
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/voices`);
+      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/voices`);
       const data = await res.json();
       const list: VoiceItem[] = data.voices ?? [];
       setVoices(list);
       // 未選択（新規作成・voice_id未設定キャラ）のときだけデフォルトを充当
       setCharVoiceId((cur) => cur || (list.find((v) => v.is_default)?.voice_id ?? list[0]?.voice_id ?? ""));
-    } catch {
-      Alert.alert("エラー", "ボイス一覧の取得に失敗しました");
+    } catch (e: any) {
+      Alert.alert("エラー", `ボイス一覧の取得に失敗しました\n(${e?.message ?? e})`);
     } finally {
       setVoicesLoading(false);
     }
@@ -265,14 +266,14 @@ export default function Settings() {
   const loadLlms = async () => {
     setLlmsLoading(true);
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/llms`);
+      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/llms`);
       const data = await res.json();
       const list: LlmItem[] = data.llms ?? [];
       setLlms(list);
       // 未選択（新規作成・llm_id未設定キャラ）のときだけデフォルトを充当
       setCharLlmId((cur) => cur || (list.find((l) => l.is_default)?.llm_id ?? list[0]?.llm_id ?? ""));
-    } catch {
-      Alert.alert("エラー", "LLM一覧の取得に失敗しました");
+    } catch (e: any) {
+      Alert.alert("エラー", `LLM一覧の取得に失敗しました\n(${e?.message ?? e})`);
     } finally {
       setLlmsLoading(false);
     }
@@ -298,11 +299,11 @@ export default function Settings() {
     if (!ownerId) return;
     setCustomVoicesLoading(true);
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/custom-voices?owner_id=${encodeURIComponent(ownerId)}`);
+      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/custom-voices?owner_id=${encodeURIComponent(ownerId)}`);
       const data = await res.json();
       setCustomVoices(data.voices ?? []);
-    } catch {
-      Alert.alert("エラー", "カスタムボイス一覧の取得に失敗しました");
+    } catch (e: any) {
+      Alert.alert("エラー", `カスタムボイス一覧の取得に失敗しました\n(${e?.message ?? e})`);
     } finally {
       setCustomVoicesLoading(false);
     }
