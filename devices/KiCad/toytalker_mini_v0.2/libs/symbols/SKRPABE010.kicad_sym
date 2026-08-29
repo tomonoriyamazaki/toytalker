@@ -7,7 +7,7 @@
     (property "Value" "SKRPABE010" (id 1) (at -5.08 -5.08 0)
       (effects (font (size 1.27 1.27)) (justify bottom left))
     )
-    (property "Footprint" "SKRPABE010:SW_SKRPABE010" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:SW_SKRPABE010" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "ALPS" (id 4) (at 0 0 0)

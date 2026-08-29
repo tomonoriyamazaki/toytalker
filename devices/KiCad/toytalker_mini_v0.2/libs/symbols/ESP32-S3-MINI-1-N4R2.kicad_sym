@@ -7,7 +7,7 @@
     (property "Value" "ESP32-S3-MINI-1-N4R2" (id 1) (at -10.16 -35.56 0)
       (effects (font (size 1.27 1.27)) (justify bottom left))
     )
-    (property "Footprint" "ESP32-S3-MINI-1-N4R2:XCVR_ESP32-S3-MINI-1-N4R2" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:XCVR_ESP32-S3-MINI-1-N4R2" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "Espressif Systems" (id 4) (at 0 0 0)

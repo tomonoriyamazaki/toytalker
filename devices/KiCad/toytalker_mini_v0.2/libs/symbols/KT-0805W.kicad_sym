@@ -7,7 +7,7 @@
     (property "Value" "KT-0805W" (id 1) (at -3.556 -3.302 0)
       (effects (font (size 1.27 1.27)) (justify bottom left))
     )
-    (property "Footprint" "KT-0805W:LED_KT-0805W" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:LED_KT-0805W" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "Hubei KENTO Elec" (id 4) (at 0 0 0)

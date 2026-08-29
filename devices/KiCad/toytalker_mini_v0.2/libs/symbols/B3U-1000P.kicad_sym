@@ -7,7 +7,7 @@
     (property "Value" "B3U-1000P" (id 1) (at -2.54 -2.54 0)
       (effects (font (size 1.27 1.27)) (justify top left))
     )
-    (property "Footprint" "B3U-1000P:SW_B3U-1000P" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:SW_B3U-1000P" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "Omron" (id 4) (at 0 0 0)

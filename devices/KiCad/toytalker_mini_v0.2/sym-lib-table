@@ -1,6 +1,9 @@
 (sym_lib_table
   (version 7)
   (lib (name "AP2112K-3.3TRG1")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/AP2112K-3.3TRG1.kicad_sym")(options "")(descr ""))
+  (lib (name "BQ25185DLHR")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/BQ25185DLHR.kicad_sym")(options "")(descr ""))
+  (lib (name "B3U-1000P")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/B3U-1000P.kicad_sym")(options "")(descr ""))
+  (lib (name "ESP32-S3-MINI-1-N4R2")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/ESP32-S3-MINI-1-N4R2.kicad_sym")(options "")(descr ""))
   (lib (name "BQ24074RGTR")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/BQ24074RGTR.kicad_sym")(options "")(descr ""))
   (lib (name "ESP32-S3-WROOM-1-N8R8")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/ESP32-S3-WROOM-1-N8R8.kicad_sym")(options "")(descr ""))
   (lib (name "KT-0805W")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/KT-0805W.kicad_sym")(options "")(descr ""))

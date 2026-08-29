@@ -7,7 +7,7 @@
     (property "Value" "AP2112K-3.3TRG1" (id 1) (at -7.6489 -11.6507 0.0)
       (effects (font (size 1.27 1.27)) (justify bottom left))
     )
-    (property "Footprint" "AP2112K-3.3TRG1:SOT95P285X140-5N" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:SOT95P285X140-5N" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "Diodes Inc." (id 4) (at 0 0 0)

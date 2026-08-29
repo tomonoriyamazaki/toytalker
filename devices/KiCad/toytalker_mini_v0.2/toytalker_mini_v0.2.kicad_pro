@@ -811,7 +811,7 @@
       {
         "filename": "toytalker_mini_v0.2.kicad_sch",
         "name": "toytalker_mini_v0.2",
-        "uuid": "00000000-0000-0000-0000-000000000000"
+        "uuid": "8b06e27d-c9ba-4aea-9c4d-1d0126478b18"
       }
     ],
     "used_designators": "",
@@ -820,7 +820,7 @@
   "sheets": [
     [
       "8b06e27d-c9ba-4aea-9c4d-1d0126478b18",
-      "Root"
+      "toytalker_mini_v0.2"
     ]
   ],
   "text_variables": {},

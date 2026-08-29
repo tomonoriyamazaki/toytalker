@@ -7,7 +7,7 @@
     (property "Value" "SPH0645LM4H-B" (id 1) (at -12.7473 -10.1926 0)
       (effects (font (size 1.27 1.27)) (justify bottom left))
     )
-    (property "Footprint" "SPH0645LM4H-B:MIC_SPH0645LM4H-B" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:MIC_SPH0645LM4H-B" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "Knowles" (id 4) (at 0 0 0)
