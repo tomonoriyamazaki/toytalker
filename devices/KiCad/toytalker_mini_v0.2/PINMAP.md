@@ -11,8 +11,8 @@ v0.1からの変更点: I2Sマイク/アンプ分離、GPIO3(ストラップ)解
 | MIC_BCLK | **48** ★ | 4(共有) | I2S0(録音)。左列下段=マイクへ最短 |
 | MIC_WS | **33** ★ | 3(共有) | |
 | MIC_DATA | **34** ★ | 9 | SPH0645 DOUT |
-| AMP_BCLK | **36** ★ | 4(共有) | I2S1(再生)。下辺=アンプへ南ルート |
-| AMP_WS | **37** ★ | 3(共有) | |
+| AMP_BCLK | **37** ★ | 4(共有) | I2S1(再生)。下辺=アンプへ南ルート(2026-08-30配線都合で36⇔37入替) |
+| AMP_WS | **36** ★ | 3(共有) | |
 | AMP_DIN | **38** ★ | 5 | MAX98357 DIN |
 | AMP_SD | **39** ★ | 6 | アンプシャットダウン |
 | LED | **40** ★ | 8 | R8→D1(S2東レーン経由) |
@@ -43,8 +43,8 @@ v0.1からの変更点: I2Sマイク/アンプ分離、GPIO3(ストラップ)解
 #define PIN_MIC_BCLK 48
 #define PIN_MIC_WS   33
 #define PIN_MIC_DATA 34
-#define PIN_AMP_BCLK 36
-#define PIN_AMP_WS   37
+#define PIN_AMP_BCLK 37
+#define PIN_AMP_WS   36
 #define PIN_AMP_DIN  38
 #define PIN_AMP_SD   39
 #define PIN_LED      40
