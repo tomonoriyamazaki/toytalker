@@ -5918,10 +5918,6 @@
 		(uuid "a915b2a5-f4d1-41ea-92a8-242033ea351a")
 	)
 	(no_connect
-		(at 153.67 132.08)
-		(uuid "c28fb963-f7a4-4476-9364-d985603ebf11")
-	)
-	(no_connect
 		(at 153.67 109.22)
 		(uuid "d3e8a6e2-5ffd-4d38-8005-b7bff3f0c7c4")
 	)
@@ -6513,7 +6509,7 @@
 		)
 		(uuid "6d0e98f6-cd9a-4305-85e2-1e0ab0614410")
 	)
-	(label "GPIO47"
+	(label "GPIO40"
 		(at 54.61 121.92 180)
 		(effects
 			(font
@@ -15563,7 +15559,7 @@
 		(at 153.67 147.32 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
@@ -15577,7 +15573,7 @@
 		(at 153.67 114.3 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
@@ -15591,7 +15587,7 @@
 		(at 153.67 116.84 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
@@ -15605,7 +15601,7 @@
 		(at 153.67 129.54 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
@@ -15619,7 +15615,7 @@
 		(at 153.67 119.38 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
@@ -15629,16 +15625,6 @@
 		(at 123.19 124.46)
 		(uuid "be0a2e17-6f70-4435-8b2c-c720a2a8598b")
 	)
-	(label "GPIO47"
-		(at 153.67 144.78 0)
-		(effects
-			(font
-				(size 1.27 1.27)
-			)
-			(justify left bottom)
-		)
-		(uuid "25635f3a-b1b1-4c89-8ced-974217898daf")
-	)
 	(no_connect
 		(at 123.19 129.54)
 		(uuid "1b2bed57-42b1-418c-8170-05486240f152")
@@ -15647,7 +15633,7 @@
 		(at 153.67 121.92 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
@@ -15661,7 +15647,7 @@
 		(at 153.67 124.46 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
@@ -15675,10 +15661,24 @@
 		(at 153.67 127.0 0)
 		(effects
 			(font
-				(size 1.27 1.27)
+				(size 1.016 1.016)
 			)
 			(justify left bottom)
 		)
 		(uuid "6598af48-6d6c-4c61-8bcc-8a8fc15d34f2")
+	)
+	(no_connect
+		(at 153.67 144.78)
+		(uuid "1eab5e47-5938-4045-8998-e78ba8f563f8")
+	)
+	(label "GPIO40"
+		(at 153.67 132.08 0)
+		(effects
+			(font
+				(size 1.016 1.016)
+			)
+			(justify left bottom)
+		)
+		(uuid "2aa10c69-608c-4e89-8469-440583135066")
 	)
 )

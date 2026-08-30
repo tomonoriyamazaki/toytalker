@@ -15,7 +15,7 @@ v0.1からの変更点: I2Sマイク/アンプ分離、GPIO3(ストラップ)解
 | AMP_WS | **37** ★ | 3(共有) | |
 | AMP_DIN | **38** ★ | 5 | MAX98357 DIN |
 | AMP_SD | **39** ★ | 6 | アンプシャットダウン |
-| LED | **47** ★ | 8 | R8→D1 |
+| LED | **40** ★ | 8 | R8→D1(S2東レーン経由) |
 | BUTTON(S2) | **35** ★ | 7 | R7経由 |
 | BOOT(S3) | **0** | 0 | ストラッピング(固定) |
 | VBAT_ADC | **1** | — | ADC1_CH0(固定。WiFi中測定可はGPIO1〜10のみ) |
@@ -47,10 +47,14 @@ v0.1からの変更点: I2Sマイク/アンプ分離、GPIO3(ストラップ)解
 #define PIN_AMP_WS   37
 #define PIN_AMP_DIN  38
 #define PIN_AMP_SD   39
-#define PIN_LED      47
+#define PIN_LED      40
 #define PIN_BUTTON   35
 #define PIN_VBAT_ADC 1
 #define PIN_BOARD_TEMP 2
 #define PIN_CHG_STAT1 13
 #define PIN_CHG_STAT2 14
 ```
+
+## ファームv0.5メモ(2026-08-30)
+- 温度は2系統読む: `temperatureRead()`(ESP32内蔵=チップ温度) と TH2(GPIO2=基板温度)。差分もログ(大=CPU負荷、両方高=環境が暑い)
+- TH1はハードウェア専用(ファームから読めない)。充電停止の推理: STAT=停止 かつ VBAT_ADC=満充電未満 かつ USB挿入 → 温度保護の可能性大
