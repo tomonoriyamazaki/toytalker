@@ -4,26 +4,29 @@
 
 v0.1からの変更点: I2Sマイク/アンプ分離、GPIO3(ストラップ)解放、電池残量ADC・充電STAT追加、ネット名誤記修正。
 
-## v0.2 割当表
+## v0.2 割当表（2026-08-30 配置最適化で改訂。旧v0.2案からの変更は★）
 
-| 信号 | GPIO | v0.1 | 変更 | 備考 |
-|---|---|---|---|---|
-| MIC_BCLK | **4** | 4(共有) | 維持 | I2S0(録音専用) |
-| MIC_WS | **5** | 3(共有) | 変更 | GPIO3(JTAGストラップ)から退避 |
-| MIC_DATA | **9** | 9 | 維持 | SPH0645 DOUT |
-| AMP_BCLK | **10** | 4(共有) | 新規 | I2S1(再生専用)。ここから同時動作可能に |
-| AMP_WS | **11** | 3(共有) | 新規 | |
-| AMP_DIN | **12** | 5 | 変更 | MAX98357 DIN |
-| AMP_SD | **6** | 6 | 維持 | アンプシャットダウン |
-| LED | **8** | 8 | 維持 | 抵抗値は増やして減光(B8) |
-| BUTTON(S2) | **7** | 7 | 維持 | |
-| BOOT(S3) | **0** | 0 | 維持 | **ネット名を「GPIO27」→「GPIO0_BOOT」に修正**(誤記) |
-| VBAT_ADC | **1** | — | 新規 | ADC1_CH0。470kΩ×2分圧+0.1µF |
-| BOARD_TEMP | **2** | — | 新規 | ADC1_CH1。NTCサーミスタTH2(10k)+10kプルアップ分圧+0.1µF。本体温度の可視化用 |
-| CHG_STAT1 | **13** | — | 新規 | BQ25185 STAT1(O.D.)+100kプルアップ→3V3 |
-| CHG_STAT2 | **14** | — | 新規 | BQ25185 STAT2(O.D.)+100kプルアップ→3V3 |
-| USB D-/D+ | 19/20 | 19/20 | 維持 | USB-Serial/JTAG |
-| (解放) | 3 | WS共有 | **未接続に** | ストラップピンをクリーンに |
+| 信号 | GPIO | v0.1 | 備考 |
+|---|---|---|---|
+| MIC_BCLK | **48** ★ | 4(共有) | I2S0(録音)。左列下段=マイクへ最短 |
+| MIC_WS | **33** ★ | 3(共有) | |
+| MIC_DATA | **34** ★ | 9 | SPH0645 DOUT |
+| AMP_BCLK | **36** ★ | 4(共有) | I2S1(再生)。下辺=アンプへ南ルート |
+| AMP_WS | **37** ★ | 3(共有) | |
+| AMP_DIN | **38** ★ | 5 | MAX98357 DIN |
+| AMP_SD | **39** ★ | 6 | アンプシャットダウン |
+| LED | **47** ★ | 8 | R8→D1 |
+| BUTTON(S2) | **35** ★ | 7 | R7経由 |
+| BOOT(S3) | **0** | 0 | ストラッピング(固定) |
+| VBAT_ADC | **1** | — | ADC1_CH0(固定。WiFi中測定可はGPIO1〜10のみ) |
+| BOARD_TEMP | **2** | — | ADC1_CH1(固定) |
+| CHG_STAT1 | **13** | — | BQ25185 STAT1+100kプルアップ |
+| CHG_STAT2 | **14** | — | BQ25185 STAT2+100kプルアップ |
+| USB D-/D+ | 19/20 | 19/20 | USB-Serial/JTAG(固定) |
+| (解放) | 3,4,5,6,7,8,9,10,11,12 | | 旧割当は全て未接続に。3はストラップ、他は将来用 |
+
+**回避ピン**: GPIO3(ストラップ)/IO26(PSRAM CS)/IO45・46(ストラップ)/TXD0・RXD0(デバッグ温存)
+※IO33〜48系はoctal PSRAM機(R8)制約の対象だが、本機N4R2(quad)は全て使用可(データシート確認済み)
 
 ## 制約検証(機械チェック済み)
 
@@ -36,16 +39,16 @@ v0.1からの変更点: I2Sマイク/アンプ分離、GPIO3(ストラップ)解
 ## ファームv0.5側の対応(Phase 4)
 
 ```cpp
-// v0.2基板 (I2S分離)
-#define PIN_MIC_BCLK 4
-#define PIN_MIC_WS   5
-#define PIN_MIC_DATA 9
-#define PIN_AMP_BCLK 10
-#define PIN_AMP_WS   11
-#define PIN_AMP_DIN  12
-#define PIN_AMP_SD   6
-#define PIN_LED      8
-#define PIN_BUTTON   7
+// v0.2基板 (2026-08-30 配置最適化ピン)
+#define PIN_MIC_BCLK 48
+#define PIN_MIC_WS   33
+#define PIN_MIC_DATA 34
+#define PIN_AMP_BCLK 36
+#define PIN_AMP_WS   37
+#define PIN_AMP_DIN  38
+#define PIN_AMP_SD   39
+#define PIN_LED      47
+#define PIN_BUTTON   35
 #define PIN_VBAT_ADC 1
 #define PIN_BOARD_TEMP 2
 #define PIN_CHG_STAT1 13
