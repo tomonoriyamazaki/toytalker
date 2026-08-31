@@ -3,7 +3,7 @@ import serial, re, os
 
 PORT = "COM3"          # あなたのポート名に変更
 BAUD = 115200
-OUT  = r"C:\Users\exodj\projects\toytalk\devices\mcu\esp32_s3\wav\record.wav"
+OUT  = r"C:\Users\exodj\projects\toytalker\devices\mcu\esp32_s3\wav\record.wav"
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 
