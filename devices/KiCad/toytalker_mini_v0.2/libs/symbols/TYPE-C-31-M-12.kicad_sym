@@ -7,7 +7,7 @@
     (property "Value" "TYPE-C-31-M-12" (id 1) (at -12.7 -13.462 0.0)
       (effects (font (size 1.27 1.27)) (justify top left))
     )
-    (property "Footprint" "TYPE-C-31-M-12:HRO_TYPE-C-31-M-12" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:HRO_TYPE-C-31-M-12" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "HRO Electronics Co., Ltd." (id 4) (at 0 0 0)

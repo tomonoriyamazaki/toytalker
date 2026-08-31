@@ -7,7 +7,7 @@
     (property "Value" "BQ25185DLHR" (id 1) (at -12.7 -15.24 0)
       (effects (font (size 1.27 1.27)) (justify bottom left))
     )
-    (property "Footprint" "BQ25185DLHR:IC_BQ25185DLHR" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:IC_BQ25185DLHR" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "Texas Instruments" (id 4) (at 0 0 0)
@@ -110,7 +110,7 @@
           (effects (font (size 1.016 1.016)))
         )
       )
-      (pin output line (at 17.78 12.7 180.0) (length 5.08)
+      (pin power_out line (at 17.78 12.7 180.0) (length 5.08)
         (name "SYS"
           (effects (font (size 1.016 1.016)))
         )

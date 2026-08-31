@@ -7,7 +7,7 @@
     (property "Value" "MAX98357AEWL_T" (id 1) (at -12.7 -19.24 0.0)
       (effects (font (size 1.27 1.27)) (justify bottom left))
     )
-    (property "Footprint" "MAX98357AEWL_T:BGA9N40P3X3_134X143X69N" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:BGA9N40P3X3_134X143X69N" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "Analog Devices" (id 4) (at 0 0 0)

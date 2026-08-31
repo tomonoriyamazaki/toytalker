@@ -1,4 +1,18 @@
 {
+  "workbench.colorCustomizations": {
+    "titleBar.activeBackground": "#33608f",
+    "titleBar.activeForeground": "#eef3f8",
+    "titleBar.inactiveBackground": "#294d73",
+    "titleBar.inactiveForeground": "#b7c5d3",
+    "activityBar.background": "#294d73",
+    "activityBar.foreground": "#eef3f8",
+    "statusBar.background": "#33608f",
+    "statusBar.foreground": "#eef3f8",
+    "editor.background": "#1a212b",
+    "sideBar.background": "#202834",
+    "panel.background": "#1a212b",
+    "terminal.background": "#1a212b"
+  },
   "files.encoding": "utf8",
   "files.autoGuessEncoding": false,
   "[markdown]": { "files.encoding": "utf8" },
