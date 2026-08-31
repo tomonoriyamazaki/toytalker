@@ -10,8 +10,7 @@
 - **スタンドアロン動作**: ESP32-S3搭載の専用基板、おもちゃ単体でWiFi経由でAWSと直接通信（設定ではスマホが必要）
 
 ## しくみ
-
-<!-- 紹介動画: GitHubのREADME編集画面に ToyTalker_PR_10mb.mp4 をドラッグ&ドロップして、生成されたURLをここに貼る -->
+https://github.com/user-attachments/assets/177e0598-6c0a-4d14-9477-36d719003d13
 
 ```
 [スマホアプリ / ESP32] ── 音声 ──> Soniox STT（直接WebSocket接続）
