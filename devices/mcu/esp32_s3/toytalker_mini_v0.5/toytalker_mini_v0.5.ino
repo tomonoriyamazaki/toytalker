@@ -17,6 +17,7 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>  // heap_caps_get_largest_free_block ([DIAG]/[MEM]計測用)
 
 // ==== デバッグ設定 ====
 #define DEBUG_MEMORY 0
@@ -907,7 +908,8 @@ struct BackchannelParams {
   String characterId;
 };
 
-void fetchBackchannelTask(void* param) {
+// 通常の関数として戻り、ローカルStringをタスク削除前に破棄する。
+void fetchBackchannel(void* param) {
   BackchannelParams* p = (BackchannelParams*)param;
   String partial = p->partialText;
   String charId = p->characterId;
@@ -1008,6 +1010,11 @@ void fetchBackchannelTask(void* param) {
     }
   }
 
+}
+
+void fetchBackchannelTask(void* param) {
+  fetchBackchannel(param);
+  // partial / charId / url / payload はここでは解放済み。
   Serial.printf("[BC] Free heap after: %d\n", ESP.getFreeHeap());
   backchannelFetching = false;
   backchannelTaskHandle = NULL;
