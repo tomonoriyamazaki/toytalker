@@ -143,6 +143,9 @@ int curSegmentId = -1;
 String responseText = "";
 uint8_t* currentPcmBuffer = NULL;
 size_t currentPcmSize = 0;
+const uint32_t TTS_SEGMENT_GAP_MS = 400;  // 文の区切りに追加する間（先頭・末尾には入れない）
+bool ttsAudioQueued = false;
+bool ttsGapPending = false;
 
 // ==== 相槌（Backchannel）状態 ====
 bool backchannelEnabled = true;
@@ -636,6 +639,8 @@ void processMetadata(WiFiClientSecure& client, uint32_t length) {
   }
 
   if (json.indexOf("\"event\":\"tts_start\"") >= 0) {
+    // 通信チャンクではなくTTSセグメント境界。実際の音声到着まで無音は追加しない。
+    ttsGapPending = ttsAudioQueued;
     int sizePos = json.indexOf("\"size\":");
     if (sizePos >= 0) {
       sizePos += 7;
@@ -812,6 +817,30 @@ void playerStop() {
   playRingTail = 0;
 }
 
+// 次のセグメントの直前に無音PCMを流す。固定領域を再利用してヒープ確保を避ける。
+bool queueTtsSegmentGap() {
+  static const uint8_t silence[1024] = {};
+  size_t remaining = (size_t)SAMPLE_RATE_TTS * TTS_SEGMENT_GAP_MS / 1000 * 2 * sizeof(int16_t);
+  while (remaining > 0) {
+    if (bargeInRequested) return false;
+    size_t n = min(remaining, sizeof(silence));
+    if (playRing) {
+      if (!playRingPush(silence, n)) return false;
+      remaining -= n;
+    } else {
+      size_t written = 0;
+      esp_err_t err = i2s_write(I2S_NUM_1, silence, n, &written, pdMS_TO_TICKS(100));
+      if (err != ESP_OK || written == 0) {
+        Serial.printf("[TTS_GAP] I2S write failed: err=%d written=%u\n", err, (unsigned)written);
+        return false;
+      }
+      remaining -= written;
+    }
+  }
+  Serial.printf("[TTS_GAP] id=%d inserted=%lums\n", curSegmentId, (unsigned long)TTS_SEGMENT_GAP_MS);
+  return true;
+}
+
 // ==== PCMデータ処理 (type=0x02) ====
 bool processPCM(WiFiClientSecure& client, uint32_t length) {
   // アンプON（PWMなし）
@@ -869,16 +898,26 @@ bool processPCM(WiFiClientSecure& client, uint32_t length) {
     monoToStereo((int16_t*)pcmData, stereo, samples);
     free(pcmData);
 
+    if (stereoBytes > 0 && ttsGapPending) {
+      if (!queueTtsSegmentGap()) {
+        free(stereo);
+        return true;  // 割り込みまたはI2Sエラーでストリームを停止
+      }
+      ttsGapPending = false;
+    }
+
     if (playRing) {
       // リングバッファへ投入（再生はplaybackTaskが担当）
       if (!playRingPush((uint8_t*)stereo, stereoBytes)) {
         free(stereo);
         return true;  // barge-in
       }
+      if (stereoBytes > 0) ttsAudioQueued = true;
     } else {
       // フォールバック: 直接再生（リングバッファ確保失敗時）
       size_t written = 0;
       i2s_write(I2S_NUM_1, (uint8_t*)stereo, stereoBytes, &written, portMAX_DELAY);
+      if (written > 0) ttsAudioQueued = true;
     }
     free(stereo);
 
@@ -1112,6 +1151,8 @@ void sendToLambdaAndPlay(const String& text) {
   Serial.println("🚀 Sending to Lambda: " + text);
   Serial.printf("💾 Free heap: %d bytes\n", ESP.getFreeHeap());
   responseText = "";
+  ttsAudioQueued = false;
+  ttsGapPending = false;
 
   if (isRecording) isRecording = false;
 
@@ -1253,7 +1294,7 @@ void sendToLambdaAndPlay(const String& text) {
       processMetadata(client, length);
     } else if (type == 0x02) {
       if (processPCM(client, length)) {
-        Serial.println("🔘 Barge-in: aborting stream");
+        Serial.println("[PCM] Playback interrupted: aborting stream");
         client.stop();
         break;
       }
