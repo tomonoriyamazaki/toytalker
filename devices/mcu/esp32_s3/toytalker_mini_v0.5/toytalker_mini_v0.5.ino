@@ -18,6 +18,8 @@
 #include <BLE2902.h>
 #include <Preferences.h>
 #include <esp_heap_caps.h>  // heap_caps_get_largest_free_block ([DIAG]/[MEM]計測用)
+#include <atomic>
+#include <esp_timer.h>
 
 // ==== デバッグ設定 ====
 #define DEBUG_MEMORY 0
@@ -146,6 +148,107 @@ size_t currentPcmSize = 0;
 const uint32_t TTS_SEGMENT_GAP_MS = 400;  // 文の区切りに追加する間（先頭・末尾には入れない）
 bool ttsAudioQueued = false;
 bool ttsGapPending = false;
+
+// 終了待ちの内訳を計測。出力は最初の録音パケット送信後にまとめる。
+// lastI2sWriteMsはDMAへのコピー完了時刻であり、スピーカーの発声終了時刻ではない。
+static std::atomic<uint32_t> lastI2sWriteMs{0};
+static std::atomic<uint32_t> playbackI2sBytes{0};
+static QueueHandle_t playbackI2sEvents = NULL;
+static constexpr size_t PLAY_DMA_COUNT = 8;
+static constexpr size_t PLAY_DMA_FRAMES = 1024;
+static constexpr size_t PLAY_I2S_EVENT_COUNT = 32;
+struct DmaTailTiming {
+  bool valid = false;
+  bool confirmed = false;
+  uint32_t blockBytes = 0;
+  uint32_t confirmAfterBytes = 0;
+  uint32_t tailPaddingUs = 0;
+  int64_t confirmedUs = 0;
+  int64_t ampOffUs = 0;
+};
+static DmaTailTiming dmaTailTiming;
+
+// 最後のバッファ内の位置を知るため、相槌・区切り無音も含む全コピー量を数える。
+esp_err_t writePlaybackI2s(const void* data, size_t len, size_t* written, TickType_t timeout) {
+  esp_err_t err = i2s_write(I2S_NUM_1, data, len, written, timeout);
+  playbackI2sBytes.fetch_add(*written, std::memory_order_relaxed);
+  return err;
+}
+
+// EOFイベントから実際のバッファサイズを取得。legacyドライバは4096を4092に丸める。
+// 監視中のイベント欠落・DMAエラー・空きバッファのスキップがあれば計測を無効にする。
+void pollPlaybackI2sEvents(bool monitoring) {
+  if (!playbackI2sEvents) return;
+  if (monitoring && uxQueueMessagesWaiting(playbackI2sEvents) >= PLAY_I2S_EVENT_COUNT) {
+    dmaTailTiming.valid = false;
+  }
+  i2s_event_t event;
+  while (xQueueReceive(playbackI2sEvents, &event, 0) == pdTRUE) {
+    if (event.type == I2S_EVENT_TX_DONE) {
+      if (monitoring && event.size != dmaTailTiming.blockBytes) dmaTailTiming.valid = false;
+      dmaTailTiming.blockBytes = event.size;
+    } else if (monitoring && (event.type == I2S_EVENT_TX_Q_OVF || event.type == I2S_EVENT_DMA_ERROR)) {
+      dmaTailTiming.valid = false;
+    }
+  }
+}
+
+void beginDmaTailTiming(bool writerStopped) {
+  dmaTailTiming = DmaTailTiming{};
+  pollPlaybackI2sEvents(false);  // 再生中の古いイベントを取り除く
+  uint32_t total = playbackI2sBytes.load(std::memory_order_relaxed);
+  uint32_t block = dmaTailTiming.blockBytes;
+  if (!writerStopped || total == 0 || block == 0 || block > PLAY_DMA_FRAMES * 4 || block % 4 || total % 4) return;
+  uint32_t used = total % block;
+  if (used == 0) used = block;
+  // 残りを埋め、他のN-1個も埋め、元のバッファに最初の1フレームを書けるまで。
+  // 再取得はドライバのDMA完了キューを待つ。IRQ時刻そのものではなく完了確認の上限時刻。
+  dmaTailTiming.confirmAfterBytes = PLAY_DMA_COUNT * block - used + 4;
+  dmaTailTiming.tailPaddingUs = (uint64_t)(block - used) * 1000000 / (SAMPLE_RATE_TTS * 4);
+  dmaTailTiming.valid = true;
+}
+static uint32_t turnTimingSequence = 0;
+struct TurnEndTiming {
+  bool pending = false;
+  bool firstReadSeen = false;
+  bool interrupted = false;
+  bool flushCompleted = false;
+  bool wsReadyAtRecord = false;
+  uint32_t turn = 0;
+  uint32_t receiveEndMs = 0;
+  uint32_t lastWriteMs = 0;
+  uint32_t parkedMs = 0;
+  uint32_t flushWriteMs = 0;
+  uint32_t flushWsMs = 0;
+  uint32_t flushEndMs = 0;
+  uint32_t ampOffMs = 0;
+  uint32_t micSetupDoneMs = 0;
+  uint32_t recordOnMs = 0;
+  uint32_t firstReadMs = 0;
+};
+static TurnEndTiming turnEndTiming;
+
+void printTurnEndTiming(uint32_t firstSendMs) {
+  if (!turnEndTiming.pending) return;
+  const TurnEndTiming& t = turnEndTiming;
+  Serial.printf("[TURN_END] turn=%lu interrupted=%d recv_end_ms=%lu last_i2s_copy_ms=%lu stop_return_ms=%lu flush_end_ms=%lu flush_ok=%d flush_write_ms=%lu flush_ws_ms=%lu\n",
+                (unsigned long)t.turn, t.interrupted, (unsigned long)t.receiveEndMs,
+                (unsigned long)t.lastWriteMs, (unsigned long)t.parkedMs,
+                (unsigned long)t.flushEndMs, t.flushCompleted,
+                (unsigned long)t.flushWriteMs, (unsigned long)t.flushWsMs);
+  Serial.printf("[TURN_END] turn=%lu amp_off_ms=%lu mic_setup_done_ms=%lu record_on_ms=%lu ws_ready=%d first_read_ms=%lu first_send_ms=%lu amp_to_mic_ms=%lu amp_to_send_ms=%lu\n",
+                (unsigned long)t.turn, (unsigned long)t.ampOffMs,
+                (unsigned long)t.micSetupDoneMs, (unsigned long)t.recordOnMs,
+                t.wsReadyAtRecord, (unsigned long)t.firstReadMs, (unsigned long)firstSendMs,
+                (unsigned long)(t.micSetupDoneMs - t.ampOffMs),
+                (unsigned long)(firstSendMs - t.ampOffMs));
+  Serial.printf("[DMA_TAIL] turn=%lu valid=%d confirmed=%d block_bytes=%lu tail_padding_us=%lu confirmed_us=%lld after_confirm_us=%lld\n",
+                (unsigned long)t.turn, dmaTailTiming.valid, dmaTailTiming.confirmed,
+                (unsigned long)dmaTailTiming.blockBytes, (unsigned long)dmaTailTiming.tailPaddingUs,
+                (long long)dmaTailTiming.confirmedUs,
+                (long long)(dmaTailTiming.valid && dmaTailTiming.confirmed ? dmaTailTiming.ampOffUs - dmaTailTiming.confirmedUs : -1));
+  turnEndTiming.pending = false;
+}
 
 // ==== 相槌（Backchannel）状態 ====
 bool backchannelEnabled = true;
@@ -503,8 +606,8 @@ void setupI2SPlay() {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
     .intr_alloc_flags = 0,
-    .dma_buf_count = 8,
-    .dma_buf_len = 1024,
+    .dma_buf_count = PLAY_DMA_COUNT,
+    .dma_buf_len = PLAY_DMA_FRAMES,
     .use_apll = true,
     .tx_desc_auto_clear = true,
     .fixed_mclk = 0
@@ -517,9 +620,15 @@ void setupI2SPlay() {
     .data_in_num = I2S_PIN_NO_CHANGE
   };
 
-  i2s_driver_install(I2S_NUM_1, &cfg, 0, NULL);
+  playbackI2sEvents = NULL;
+  if (i2s_driver_install(I2S_NUM_1, &cfg, PLAY_I2S_EVENT_COUNT, &playbackI2sEvents) != ESP_OK) {
+    // 計測用キューを確保できなければ従来の再生構成を試す。
+    playbackI2sEvents = NULL;
+    i2s_driver_install(I2S_NUM_1, &cfg, 0, NULL);
+  }
   i2s_set_pin(I2S_NUM_1, &pins);
   i2s_set_clk(I2S_NUM_1, SAMPLE_RATE_TTS, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+  playbackI2sBytes.store(0, std::memory_order_relaxed);
 }
 
 // ==== チャンク管理用グローバル変数 ====
@@ -790,7 +899,8 @@ void playbackTask(void* param) {
     size_t n = min(avail, (size_t)PLAY_WRITE_CHUNK);
     n = min(n, PLAY_RING_SIZE - t);  // 折返し前まで
     size_t written = 0;
-    i2s_write(I2S_NUM_1, playRing + t, n, &written, portMAX_DELAY);
+    writePlaybackI2s(playRing + t, n, &written, portMAX_DELAY);
+    if (written > 0) lastI2sWriteMs.store(millis(), std::memory_order_relaxed);
     playRingTail = (t + written) % PLAY_RING_SIZE;
   }
 }
@@ -829,7 +939,7 @@ bool queueTtsSegmentGap() {
       remaining -= n;
     } else {
       size_t written = 0;
-      esp_err_t err = i2s_write(I2S_NUM_1, silence, n, &written, pdMS_TO_TICKS(100));
+      esp_err_t err = writePlaybackI2s(silence, n, &written, pdMS_TO_TICKS(100));
       if (err != ESP_OK || written == 0) {
         Serial.printf("[TTS_GAP] I2S write failed: err=%d written=%u\n", err, (unsigned)written);
         return false;
@@ -916,7 +1026,8 @@ bool processPCM(WiFiClientSecure& client, uint32_t length) {
     } else {
       // フォールバック: 直接再生（リングバッファ確保失敗時）
       size_t written = 0;
-      i2s_write(I2S_NUM_1, (uint8_t*)stereo, stereoBytes, &written, portMAX_DELAY);
+      writePlaybackI2s((uint8_t*)stereo, stereoBytes, &written, portMAX_DELAY);
+      if (written > 0) lastI2sWriteMs.store(millis(), std::memory_order_relaxed);
       if (written > 0) ttsAudioQueued = true;
     }
     free(stereo);
@@ -1097,7 +1208,7 @@ bool playBackchannelIfReady() {
 
     monoToStereo((int16_t*)(backchannelPcm + offset * 2), stereo, chunkSamples);
     size_t written = 0;
-    i2s_write(I2S_NUM_1, (uint8_t*)stereo, stereoBytes, &written, portMAX_DELAY);
+    writePlaybackI2s((uint8_t*)stereo, stereoBytes, &written, portMAX_DELAY);
     free(stereo);
     offset += chunkSamples;
   }
@@ -1153,6 +1264,11 @@ void sendToLambdaAndPlay(const String& text) {
   responseText = "";
   ttsAudioQueued = false;
   ttsGapPending = false;
+
+  turnEndTiming = TurnEndTiming{};
+  dmaTailTiming = DmaTailTiming{};
+  turnEndTiming.turn = ++turnTimingSequence;
+  lastI2sWriteMs.store(0, std::memory_order_relaxed);
 
   if (isRecording) isRecording = false;
 
@@ -1309,10 +1425,14 @@ void sendToLambdaAndPlay(const String& text) {
   }
 
   unsigned long tEnd = millis();
+  turnEndTiming.pending = true;
+  turnEndTiming.receiveEndMs = tEnd;
+  turnEndTiming.interrupted = bargeInRequested;
 
   if (bargeInRequested) {
     Serial.println("🔘 Barge-in: skipping buffer flush");
     playerStop();  // 再生タスク即時停止＋リング破棄
+    turnEndTiming.parkedMs = millis();
   } else {
     // 受信完了: リングバッファの残りを出し切るまで待つ
     if (playRing) {
@@ -1325,24 +1445,58 @@ void sendToLambdaAndPlay(const String& text) {
       playerStop();  // 正常時は既に停止済み、タイムアウト時の保険
       Serial.printf("⏱️ end+[%lums] Ring buffer drained\n", millis() - tEnd);
     }
-    const size_t dmaBytes = 8 * 1024 * 2 * 2;
+    turnEndTiming.parkedMs = millis();
+    beginDmaTailTiming(!playRing || playerParked);
+    const size_t dmaBytes = PLAY_DMA_COUNT * PLAY_DMA_FRAMES * 4;
     const size_t flushChunk = 8192;
     uint8_t* silence = (uint8_t*)calloc(1, flushChunk);
     if (silence) {
       size_t remaining = dmaBytes;
       while (remaining > 0) {
         size_t toWrite = (remaining > flushChunk) ? flushChunk : remaining;
-        size_t written = 0;
-        i2s_write(I2S_NUM_1, silence, toWrite, &written, portMAX_DELAY);
-        remaining -= written;
+        uint32_t writeStartMs = millis();
+        size_t chunkWritten = 0;
+        while (chunkWritten < toWrite) {
+          size_t part = toWrite - chunkWritten;
+          size_t flushed = dmaBytes - remaining + chunkWritten;
+          if (dmaTailTiming.valid && !dmaTailTiming.confirmed) {
+            // 元の8192-byte単位とws.loopの位置を維持し、確認境界だけ書き込みを分割。
+            size_t boundary = dmaTailTiming.confirmAfterBytes - 4;
+            size_t next = flushed < boundary ? boundary : dmaTailTiming.confirmAfterBytes;
+            part = min(part, next - flushed);
+          }
+          size_t written = 0;
+          esp_err_t err = i2s_write(I2S_NUM_1, silence, part, &written, portMAX_DELAY);
+          int64_t copyDoneUs = esp_timer_get_time();
+          chunkWritten += written;
+          pollPlaybackI2sEvents(true);
+          if (err != ESP_OK || written == 0) {
+            dmaTailTiming.valid = false;
+            break;
+          }
+          if (dmaTailTiming.valid && !dmaTailTiming.confirmed && flushed + written >= dmaTailTiming.confirmAfterBytes) {
+            dmaTailTiming.confirmed = true;
+            dmaTailTiming.confirmedUs = copyDoneUs;
+          }
+        }
+        turnEndTiming.flushWriteMs += millis() - writeStartMs;
+        remaining -= chunkWritten;
+        if (chunkWritten < toWrite) break;
+        uint32_t wsStartMs = millis();
         ws.loop();  // SSL handshake進行
+        turnEndTiming.flushWsMs += millis() - wsStartMs;
       }
       free(silence);
+      turnEndTiming.flushCompleted = remaining == 0;
     }
+    turnEndTiming.flushEndMs = millis();
     Serial.printf("⏱️ end+[%lums] DMA flush\n", millis() - tEnd);
   }
 
   digitalWrite(PIN_AMP_SD, LOW);
+  dmaTailTiming.ampOffUs = esp_timer_get_time();
+  turnEndTiming.ampOffMs = millis();
+  turnEndTiming.lastWriteMs = lastI2sWriteMs.load(std::memory_order_relaxed);
   ampOn = false;
   Serial.printf("⏱️ end+[%lums] Amp off\n", millis() - tEnd);
   statsPrint();  // このターンのWiFi/再生品質サマリ
@@ -1470,6 +1624,8 @@ void startSTTRecording() {
   }
   i2sRecordReady = false;
 
+  if (turnEndTiming.pending) turnEndTiming.micSetupDoneMs = millis();
+
   if (ws.isConnected()) {
     Serial.printf("⏱️ STT [%lums] WS already connected (preconnect success!)\n", millis() - t0);
   } else if (sonioxPreconnectPending) {
@@ -1497,6 +1653,10 @@ void startSTTRecording() {
     ws.enableHeartbeat(15000, 3000, 2);
   }
   isRecording = true;
+  if (turnEndTiming.pending) {
+    turnEndTiming.recordOnMs = millis();
+    turnEndTiming.wsReadyAtRecord = ws.isConnected();
+  }
   Serial.printf("⏱️ STT [%lums] isRecording=true\n", millis() - t0);
 
   // WS接続済み（=startメッセージ送信済み）なら即「話してOK」の点灯へ。
@@ -1774,6 +1934,10 @@ void loop() {
       int16_t pcm[512];
       size_t n = 0;
       i2s_read(I2S_NUM_0, (void*)raw, sizeof(raw), &n, portMAX_DELAY);
+      if (n > 0 && turnEndTiming.pending && !turnEndTiming.firstReadSeen) {
+        turnEndTiming.firstReadMs = millis();
+        turnEndTiming.firstReadSeen = true;
+      }
       int samples = n / sizeof(int32_t);
       // SPH0645は大きな負のDCオフセットを持つ(この個体は約-13500@16bit)。
       // DCに声が埋もれてSTTが認識できないため、ゆっくり追従する平均を引いて直流除去する
@@ -1792,6 +1956,7 @@ void loop() {
       if (samples > 0) rawSample = (uint32_t)raw[0];
       bool ok = ws.sendBIN((uint8_t*)pcm, samples * sizeof(int16_t));
       if (ok) {
+        if (samples > 0) printTurnEndTiming(millis());  // 毎ターン最初の音声送信だけ。sendOkの統計リセットとは独立。
         sendOk++;
         if (sendOk == 1 && sttRestartMs > 0) {
           Serial.printf("⏱️ STT [%lums] First audio packet sent\n", millis() - sttRestartMs);
