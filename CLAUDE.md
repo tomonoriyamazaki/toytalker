@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+Claude CodeとCodexで共有するシステム概要・開発ルール。Codexはルートの [AGENTS.md](AGENTS.md) からこのファイルを参照する。共通情報はこのファイルを更新し、両ファイルへ重複して記載しない。
+
 ## システム構成
 
 子供向け音声AIおもちゃ「ToyTalker」。ユーザーが話しかけると、キャラクターが音声で返答する。
@@ -54,9 +56,33 @@ OpenAI / Google / Gemini / ElevenLabs / FishAudio / Sakura(ずんだもん) / Za
 
 ## ワークフロールール
 
+- 依頼範囲内の読み取り・調査・通常のコマンド実行・修正は、逐一確認せず進める。削除操作の前はユーザーに確認する。実行環境の権限確認が必要な場合は、その仕組みに従う。
 - 「コミットして」と言われたらコミットだけ行う。PR作成・マージ・ブランチクリーンアップは明示的な指示があるまでやらない。
 - Lambda関数を修正したら、コミット前にデプロイする。各Lambda配下の `deploy.sh` を実行（例: `cd backend/<lambda-dir> && bash deploy.sh`）。
 - PowerShellでgitコマンドを実行するとき、`Set-Location` を使わず `git` から直接実行する（パーミッション設定のパターンマッチが効かなくなるため）。
+
+## ESP32-S3ファーム開発
+
+- 対象: [toytalker_mini_v0.5.ino](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino)。ボードはESP32-S3-MINI-1-N4R2（Flash 4MB、quad PSRAM 2MB）。
+- Arduino IDE環境を維持する。ビルド確認にはArduino IDE付属のarduino-cliも利用できる。ユーザーの指示なしにPlatformIO / ESP-IDFへ移行しない。
+- 2026-09-06にビルド確認した環境はArduino ESP32コア3.3.10。利用可能なAPIやメモリ設定は、実際のインストール済みコアで確認する。
+- ビルド確認と実機確認を区別して報告する。通信・音声・メモリの安定性は、ユーザーによる実機の連続会話試験とログで確認する。
+
+### ビルド確認
+
+リポジトリルートから実行するPowerShellの例。`arduino-cli` がPATHにない場合はArduino IDE付属の実行ファイルを指定する。
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=huge_app --build-path "$env:TEMP/toytalker_v05_build" devices/mcu/esp32_s3/toytalker_mini_v0.5
+```
+
+これはビルド確認用の設定であり、書き込み時は実機のボード・ポート・Arduino IDE設定を確認する。
+
+### メモリ問題の対応記録
+
+- 相槌タスク終了前にローカルStringを解放する修正を `0d1037a` で採用。ユーザーの実機試験で、以前の8〜10ターンを超えて会話を継続できた。
+- TLSのPSRAM移行は未採用。現状の修正で通常使用を続け、再発時に検討する。
+- 原因、修正、実機ログ、未採用案は [ESP32-S3 TLSメモリ調査](docs/esp32-s3-tls-memory-investigation-2026-09-06.md) を参照。レポート冒頭の修正後の結論を優先する。
 
 ## ZakiCorp TTS（クローンボイス, β版）
 
