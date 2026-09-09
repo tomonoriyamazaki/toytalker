@@ -63,6 +63,7 @@ OpenAI / Google / Gemini / ElevenLabs / FishAudio / Sakura(ずんだもん) / Za
 
 ## ESP32-S3ファーム開発
 
+- 音声介入の開発は [v0.6](devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino)。v0.5は実機確認済みの安定版として保持する。調整・実機試験・復旧手順は [音声介入第一弾](docs/esp32-v06-voice-barge-in.md) を参照。OTAは保留。
 - 対象: [toytalker_mini_v0.5.ino](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino)。ボードはESP32-S3-MINI-1-N4R2（Flash 4MB、quad PSRAM 2MB）。
 - Arduino IDE環境を維持する。ビルド確認にはArduino IDE付属のarduino-cliも利用できる。ユーザーの指示なしにPlatformIO / ESP-IDFへ移行しない。
 - 2026-09-06にビルド確認した環境はArduino ESP32コア3.3.10。利用可能なAPIやメモリ設定は、実際のインストール済みコアで確認する。
