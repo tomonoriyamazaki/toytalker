@@ -718,7 +718,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     // システムプロンプトを追加（キャラクターの個性 + 共通指示）
     const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "long", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" });
     const backchannelHint = backchannelFired ? "\n【重要】相槌は別途再生済みです。冒頭の相槌・挨拶・オウム返しは不要です。本題から返答を始めてください。" : "";
-    const toolHint = SERPER_API_KEY ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索するときは、検索する前に短い一言（例:「調べてみるね」「ちょっと待ってね」など）を必ず添えてください。毎回違う表現にしてください。検索結果を受け取った後は「調べてきた」等の前置きは不要で、すぐに内容を伝えてください。" : "";
+    const toolHint = SERPER_API_KEY ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。\n- 検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を必ず添えてから検索してください。\n- 検索結果を受け取ったら、最初の一文字から答えの中身を話し始めてください。「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は一切つけません。\n例:「恐竜のことを調べてみるね」→（検索）→「いちばん大きい恐竜はアルゼンチノサウルスだよ！」" : "";
     const basePrompt = `あなたは子供向けの友好的な音声アシスタントです。簡潔に答えて、自然に会話を続けてください。単語の間に半角スペースを入れないでください。現在の日時は${now}です。日時を聞かれたら年は省略して簡潔に答えてください。相手が話した言語で返答してください。${backchannelHint}${toolHint}`;
     const systemPrompt = {
       role: "system",
