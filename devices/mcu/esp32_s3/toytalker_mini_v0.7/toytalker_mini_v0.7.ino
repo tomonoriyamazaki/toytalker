@@ -1804,12 +1804,22 @@ void sendToLambdaAndPlay(const String& text) {
   messagesJson += "{\"role\":\"user\",\"content\":\"" + text + "\"}";
   messagesJson += "]";
 
+  // POST precedes local backchannel playback. Tell Lambda about the ready PCM
+  // committed to play before its reply, without marking it as already played.
+  // Use the same snapshot below so late-arriving PCM cannot change the plan.
+  const bool backchannelPlanned = !bargeInRequested && backchannelReady &&
+                                 backchannelPcm && backchannelPcmSize > 0;
+  const bool backchannelForReply = backchannelFired || backchannelPlanned;
+  Serial.printf("[BC] reply_hint=%d planned=%d played=%d pcm_bytes=%u\n",
+                backchannelForReply, backchannelPlanned, (bool)backchannelFired,
+                (unsigned)(backchannelPlanned ? backchannelPcmSize : 0));
+
   String payload =
     "{\"model\":\"" + String(TTS_PROVIDER) + "\",\"voice\":\"" + String(TTS_CHARACTER) + "\","
     "\"device_id\":\"" + deviceMacAddress + "\","
     "\"session_id\":\"" + sessionId + "\","
     "\"owner_id\":\"" + deviceMacAddress + "\","
-    "\"backchannel_fired\":" + (backchannelFired ? "true" : "false") + ","
+    "\"backchannel_fired\":" + (backchannelForReply ? "true" : "false") + ","
     "\"messages\":" + messagesJson + "}";
 
   Serial.printf("📝 History count: %d\n", historyCount);
@@ -1845,7 +1855,7 @@ void sendToLambdaAndPlay(const String& text) {
   startVoiceMonitor();
 
   // 相槌再生（Lambda接続と並列）
-  if (backchannelReady && backchannelPcm && backchannelPcmSize > 0) {
+  if (backchannelPlanned) {
     Serial.println("[BC] Playing backchannel while Lambda connects...");
     playBackchannelIfReady();
   }
