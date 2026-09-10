@@ -63,10 +63,12 @@ OpenAI / Google / Gemini / ElevenLabs / FishAudio / Sakura(ずんだもん) / Za
 
 ## ESP32-S3ファーム開発
 
-- 音声介入の開発は [v0.6](devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino)。v0.5は実機確認済みの安定版として保持する。調整・実機試験・復旧手順は [音声介入第一弾](docs/esp32-v06-voice-barge-in.md) を参照。OTAは保留。
-- 対象: [toytalker_mini_v0.5.ino](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino)。ボードはESP32-S3-MINI-1-N4R2（Flash 4MB、quad PSRAM 2MB）。
+- AECの開発先は [v0.7](devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)。AEC後のRMS 1,200以上が128ms続くと停止する実験版。AEC自動停止ON、生マイクへのフォールバックは計測のみ。TLSのPSRAM移行とAEC参照待ち・STT補正の修正後、声への停止反応・再生音・再生の連続性は良好との報告。相槌後の本返答待ちに対し `SonioxPreconnect.h` でTLS/WebSocket先行接続をCore 0の専用タスクへ分離し、本文受信との並行化を追加。ソケットの所有権を完了後にloopへ戻す。2026-09-10 13:19には本文開始が大幅に速くなったとの実機報告。16ターン目の `ws_max_block_ms=2`（分離前の別ターンは1,842ms）、確保失敗0。一方、継続会話中に本文が止まる件は未解決で、この画像では `cause=aec_level` による中断を確認。検出した音の由来は未確定。感度1,200 / 128ms、STT・再生音量は維持。検出前・未接続中の音声保持は未実装。[v0.7の試験手順・実機結果・復旧](docs/esp32-v07-aec.md) を参照。
+- [v0.6](devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino) は音量方式の検証版として保持する。AECが合わない場合に大きめの声・再生音量・閾値等を調整する選択肢を残す。現在は自動停止OFF。調整・実機試験・計測結果は [音声介入第一弾](docs/esp32-v06-voice-barge-in.md) を参照。[v0.5](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino) は実機確認済みの安定版として保持する。OTAは保留。
+- ボードはESP32-S3-MINI-1-N4R2（Flash 4MB、quad PSRAM 2MB）。
 - Arduino IDE環境を維持する。ビルド確認にはArduino IDE付属のarduino-cliも利用できる。ユーザーの指示なしにPlatformIO / ESP-IDFへ移行しない。
 - 2026-09-06にビルド確認した環境はArduino ESP32コア3.3.10。利用可能なAPIやメモリ設定は、実際のインストール済みコアで確認する。
+- 2026-09-10のTLS修正時にはインストール済みコアが3.3.11 / IDF 5.5.5へ更新されていた。現在のv0.7はこの環境でビルド確認済み。起動時の `[BUILD]` で実機の版も確認する。
 - ビルド確認と実機確認を区別して報告する。通信・音声・メモリの安定性は、ユーザーによる実機の連続会話試験とログで確認する。
 
 ### ビルド確認
@@ -74,7 +76,7 @@ OpenAI / Google / Gemini / ElevenLabs / FishAudio / Sakura(ずんだもん) / Za
 リポジトリルートから実行するPowerShellの例。`arduino-cli` がPATHにない場合はArduino IDE付属の実行ファイルを指定する。
 
 ```powershell
-arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=huge_app --build-path "$env:TEMP/toytalker_v05_build" devices/mcu/esp32_s3/toytalker_mini_v0.5
+arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=no_fs,CDCOnBoot=cdc --build-path "$env:TEMP/toytalker_v07_build" devices/mcu/esp32_s3/toytalker_mini_v0.7
 ```
 
 これはビルド確認用の設定であり、書き込み時は実機のボード・ポート・Arduino IDE設定を確認する。
@@ -82,7 +84,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 ### メモリ問題の対応記録
 
 - 相槌タスク終了前にローカルStringを解放する修正を `0d1037a` で採用。ユーザーの実機試験で、以前の8〜10ターンを超えて会話を継続できた。
-- TLSのPSRAM移行は未採用。現状の修正で通常使用を続け、再発時に検討する。
+- v0.5・v0.6ではTLSのPSRAM移行は未採用。v0.7ではAEC追加後の確保失敗を受け、`TlsMemory.h` で起動時に全mbedTLS用callocをPSRAMへ固定する対策を追加した。内部RAMへはフォールバックしない。`[TLS_MEM]` の起動プローブ・失敗数・PSRAM空きと、連続会話の速度・音切れを実機確認する。
 - 原因、修正、実機ログ、未採用案は [ESP32-S3 TLSメモリ調査](docs/esp32-s3-tls-memory-investigation-2026-09-06.md) を参照。レポート冒頭の修正後の結論を優先する。
 
 ## ZakiCorp TTS（クローンボイス, β版）

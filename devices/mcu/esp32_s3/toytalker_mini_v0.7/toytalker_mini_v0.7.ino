@@ -1,5 +1,5 @@
-// toytalker_mini_v0.6 — experimental level-triggered voice barge-in
-// v0.5安定版を保持。v0.2基板で同時録音・再生と音量による割り込みを検証。AECなし。
+// toytalker_mini_v0.7 — experimental AEC voice barge-in
+// v0.5安定版・v0.6音量方式を保持。AEC後の音量で停止し、通常STTへ戻す実験版。
 // 受信(producer)とI2S再生(consumer)をFreeRTOSタスクで分離し、PSRAMリングバッファで吸収
 // LED制御はすべてdigitalWrite
 
@@ -8,7 +8,7 @@
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
-#include <driver/i2s.h>
+#include <driver/i2s_std.h>
 #include <esp_wifi.h>
 #include <esp_mac.h>  // esp_read_mac (BLEアドバタイズ名用)
 #include <BLEDevice.h>
@@ -24,6 +24,11 @@
 #include "VoiceLevelMeter.h"
 #include "BargeInFlag.h"
 #include "ChunkedBodyDecoder.h"
+#include "AecMonitor.h"
+#include "TlsMemory.h"
+#include "SttMicFilter.h"
+#include "SonioxPreconnect.h"
+#include <esp_arduino_version.h>
 
 // ==== デバッグ設定 ====
 #define DEBUG_MEMORY 0
@@ -150,6 +155,7 @@ void logMemoryCheckpoint(const char* stage) {
                 stage, intact,
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  tls_memory::printStats(stage);
 }
 
 
@@ -170,6 +176,8 @@ volatile bool wifiGotIP = false;
 
 // ==== Soniox STT 状態 ====
 WebSocketsClient ws;
+static SonioxPreconnect sonioxPreconnect;
+static bool sonioxPlaybackPhase = false; // loop-only; worker never changes UI/STT state
 String partialText = "";
 String sonioxFinalBuf = "";
 String lastFinalText = "";
@@ -184,6 +192,8 @@ bool micInstalled = false;
 // 再生監視タスクは自身のraw[320]を使用し、ここには触れない。
 static int32_t sttRaw[512];
 static int16_t sttPcm[512];
+static SttMicFilter sttMicFilter;
+static bool sttInputFirstBlock = true;
 unsigned long sttRestartMs = 0;  // STT再開計測用
 
 // ==== TTS 受信状態 ====
@@ -198,6 +208,64 @@ static std::atomic<uint32_t> ttsTurnStartMs{0};
 static std::atomic<bool> ttsFirstWriteLogged{false};
 static bool ttsFirstPcmLogged = false;  // loopのみ
 static uint32_t ttsRingWaitMs = 0;      // producerのみ
+static uint32_t sonioxServiceMaxMs = 0;
+
+String sonioxStartMessage() {
+  return "{\"api_key\":\"" + sonioxKey + "\","
+         "\"model\":\"" + sonioxModel + "\","
+         "\"audio_format\":\"pcm_s16le\",\"sample_rate\":16000,\"num_channels\":1,"
+         "\"enable_partial_results\":true,\"enable_endpoint_detection\":true,"
+         "\"language_hints\":[\"ja\",\"en\"]}";
+}
+
+bool sonioxIsConnected() {
+  return !sonioxPreconnect.ownsClient() && ws.isConnected();
+}
+
+void finishSonioxPreconnect() {
+  SonioxPreconnect::Result result;
+  if (!sonioxPreconnect.takeResult(result, webSocketEvent)) return;
+  Serial.printf("[WS_PRECONNECT] elapsed_ms=%lu ready=%d cancelled=%d stack_free=%lu\n",
+                (unsigned long)result.elapsedMs, result.ready, result.cancelled, (unsigned long)result.stackFree);
+  sonioxPreconnectPending = false;
+  if (result.ready) sonioxConnectionReady(); // start message was already sent by the worker
+}
+
+void prepareSonioxDuringPlayback() {
+  sonioxPlaybackPhase = true;
+  finishSonioxPreconnect();
+  if (sonioxPreconnect.ownsClient()) return;
+  ws.disconnect();
+  ws.beginSSL(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket");
+  ws.onEvent(webSocketEvent);
+  ws.enableHeartbeat(15000, 3000, 2);
+  sonioxPreconnectPending = true;
+  const bool background = sonioxPreconnect.start(sonioxStartMessage());
+  Serial.printf("[WS_PRECONNECT] started background=%d core=0\n", background);
+}
+
+// During playback, connect/start runs on Core 0 while loop keeps receiving TTS.
+// Connected-client polling and all application callbacks stay on loop.
+void serviceSoniox(const char* stage) {
+  finishSonioxPreconnect();
+  if (sonioxPreconnect.ownsClient()) return;
+  if (sonioxPlaybackPhase && !ws.isConnected() && sonioxPreconnect.available()) {
+    if (bargeInRequested) return; // STT restart will decide how to reconnect
+    if (sonioxPreconnect.start(sonioxStartMessage())) {
+      sonioxPreconnectPending = true;
+      return;
+    }
+  }
+  const uint32_t started = millis();
+  const bool connectedBefore = ws.isConnected();
+  ws.loop();
+  const uint32_t elapsed = millis() - started;
+  if (elapsed > sonioxServiceMaxMs) sonioxServiceMaxMs = elapsed;
+  if (elapsed >= 50) {
+    Serial.printf("[WS_TIMING] stage=%s blocked_ms=%lu connected_before=%d connected_after=%d\n",
+                  stage, (unsigned long)elapsed, connectedBefore, ws.isConnected());
+  }
+}
 
 void logFirstTtsWrite() {
   if (!ttsFirstWriteLogged.exchange(true)) {
@@ -210,10 +278,14 @@ void logFirstTtsWrite() {
 // lastI2sWriteMsはDMAへのコピー完了時刻であり、スピーカーの発声終了時刻ではない。
 static std::atomic<uint32_t> lastI2sWriteMs{0};
 static std::atomic<uint32_t> playbackI2sBytes{0};
-static QueueHandle_t playbackI2sEvents = NULL;
+static i2s_chan_handle_t micRx = nullptr;
+static i2s_chan_handle_t playbackTx = nullptr;
+static AecMonitor aecMonitor;  // internal SRAM: ISR capture queues must not be in PSRAM
+static portMUX_TYPE playbackDmaMux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t playbackDmaSize = 0, playbackDmaOverflows = 0;
+static uint32_t lastPlaybackDmaOverflows = 0;
 static constexpr size_t PLAY_DMA_COUNT = 8;
-static constexpr size_t PLAY_DMA_FRAMES = 1024;
-static constexpr size_t PLAY_I2S_EVENT_COUNT = 32;
+static constexpr size_t PLAY_DMA_FRAMES = AEC_TX_SAMPLES; // actual 1023 frames / 4092 bytes
 struct DmaTailTiming {
   bool valid = false;
   bool confirmed = false;
@@ -225,29 +297,60 @@ struct DmaTailTiming {
 };
 static DmaTailTiming dmaTailTiming;
 
+bool IRAM_ATTR onMicDma(i2s_chan_handle_t, i2s_event_data_t* event, void*) {
+  aecMonitor.captureRx(event);
+  return false;
+}
+bool IRAM_ATTR onPlaybackDma(i2s_chan_handle_t, i2s_event_data_t* event, void*) {
+  portENTER_CRITICAL_ISR(&playbackDmaMux);
+  playbackDmaSize = event->size;
+  portEXIT_CRITICAL_ISR(&playbackDmaMux);
+  aecMonitor.captureTx(event);
+  return false;
+}
+bool IRAM_ATTR onPlaybackDmaOverflow(i2s_chan_handle_t, i2s_event_data_t*, void*) {
+  portENTER_CRITICAL_ISR(&playbackDmaMux);
+  ++playbackDmaOverflows;
+  portEXIT_CRITICAL_ISR(&playbackDmaMux);
+  return false;
+}
+
+uint32_t i2sTimeoutMs(TickType_t ticks) {
+  return ticks == portMAX_DELAY ? UINT32_MAX : ticks * portTICK_PERIOD_MS;
+}
+esp_err_t readMicI2s(void* data, size_t len, size_t* bytes, TickType_t timeout) {
+  *bytes = 0;
+  return micRx ? i2s_channel_read(micRx, data, len, bytes, i2sTimeoutMs(timeout)) : ESP_ERR_INVALID_STATE;
+}
+esp_err_t releaseI2sChannel(i2s_chan_handle_t& channel) {
+  if (!channel) return ESP_OK;
+  esp_err_t err = i2s_channel_disable(channel);
+  if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) return err;
+  err = i2s_del_channel(channel);
+  if (err == ESP_OK) channel = nullptr;
+  return err;
+}
+
 // 最後のバッファ内の位置を知るため、相槌・区切り無音も含む全コピー量を数える。
 esp_err_t writePlaybackI2s(const void* data, size_t len, size_t* written, TickType_t timeout) {
-  esp_err_t err = i2s_write(I2S_NUM_1, data, len, written, timeout);
+  *written = 0;
+  esp_err_t err = playbackTx ? i2s_channel_write(playbackTx, data, len, written, i2sTimeoutMs(timeout))
+                            : ESP_ERR_INVALID_STATE;
   playbackI2sBytes.fetch_add(*written, std::memory_order_relaxed);
   return err;
 }
 
-// EOFイベントから実際のバッファサイズを取得。legacyドライバは4096を4092に丸める。
-// 監視中のイベント欠落・DMAエラー・空きバッファのスキップがあれば計測を無効にする。
+// 新APIのEOF callbackから実バッファサイズと空きキュー溢れを取得する。
+// 音声参照のcapture欠落は別途 [AEC_STATS] で扱う。
 void pollPlaybackI2sEvents(bool monitoring) {
-  if (!playbackI2sEvents) return;
-  if (monitoring && uxQueueMessagesWaiting(playbackI2sEvents) >= PLAY_I2S_EVENT_COUNT) {
+  portENTER_CRITICAL(&playbackDmaMux);
+  uint32_t bytes = playbackDmaSize;
+  uint32_t overflows = playbackDmaOverflows;
+  portEXIT_CRITICAL(&playbackDmaMux);
+  if (monitoring && (bytes != dmaTailTiming.blockBytes || overflows != lastPlaybackDmaOverflows))
     dmaTailTiming.valid = false;
-  }
-  i2s_event_t event;
-  while (xQueueReceive(playbackI2sEvents, &event, 0) == pdTRUE) {
-    if (event.type == I2S_EVENT_TX_DONE) {
-      if (monitoring && event.size != dmaTailTiming.blockBytes) dmaTailTiming.valid = false;
-      dmaTailTiming.blockBytes = event.size;
-    } else if (monitoring && (event.type == I2S_EVENT_TX_Q_OVF || event.type == I2S_EVENT_DMA_ERROR)) {
-      dmaTailTiming.valid = false;
-    }
-  }
+  dmaTailTiming.blockBytes = bytes;
+  lastPlaybackDmaOverflows = overflows;
 }
 
 void beginDmaTailTiming(bool writerStopped) {
@@ -623,9 +726,10 @@ void monoToStereo(int16_t* mono, int16_t* stereo, size_t samples) {
 }
 
 // ==== I2S 録音設定 (STT) ====
-// 第一弾: マイク上の絶対音量。再生PCMとの直接比較でもAECでもない。
+// AEC未使用/初期化失敗時の比較用: マイク上の絶対音量。
 constexpr bool VOICE_BARGE_ENABLED = true;
-constexpr bool VOICE_BARGE_DETECT_ONLY = true;   // 3200でも再生音で誤停止。再生音の除去を検証するまで計測のみ
+constexpr bool VOICE_BARGE_DETECT_ONLY = true;   // AECが使えない場合の生マイクは計測のみ。AECの停止設定はAecBargeGate.h。
+static_assert(VOICE_BARGE_DETECT_ONLY, "raw microphone fallback must remain detect-only when AEC is unavailable");
 // 比較試験はこの1か所で選ぶ。ReleaseDuringPlaybackが約8ターン正常だった設定。
 enum class VoiceRxTestMode {
   ReleaseDuringPlayback,  // RX 8枚。再生前にドライバを解放、STT前に再確保
@@ -646,6 +750,9 @@ constexpr int MIC_DMA_COUNT =
 constexpr int MIC_DMA_FRAMES = 512;  // 1枚32ms。割り込み周期・サンプル形式は変えない
 // モノラル32bitのデータ領域。管理領域は別途必要。通常STTも同じ設定を使う。
 constexpr uint32_t MIC_DMA_DATA_BYTES = MIC_DMA_COUNT * MIC_DMA_FRAMES * sizeof(int32_t);
+static_assert(!AEC_ENABLED || (VOICE_RX_RESET_AFTER_PLAYBACK && MIC_DMA_FRAMES == AEC_MIC_SAMPLES &&
+                              SAMPLE_RATE_STT == 16000 && SAMPLE_RATE_TTS == 24000),
+              "AEC capture requires per-turn RX reset, 512-sample RX and 16/24 kHz clocks");
 constexpr uint32_t VOICE_BARGE_RMS = 3200;       // 試験値: 再生のみ持続最大2388、近距離の声4049
 constexpr uint32_t VOICE_BARGE_HOLD_MS = 120;
 constexpr uint32_t VOICE_BARGE_WARMUP_MS = 500;
@@ -673,10 +780,32 @@ struct VoiceLevelSummary {
 static VoiceLevelSummary voiceLevelSummary;
 
 void voiceMonitorTask(void*) {
-  int32_t raw[VOICE_BARGE_FRAME_SAMPLES];
+  static int32_t raw[VOICE_BARGE_FRAME_SAMPLES];
   static VoiceLevelMeter<VOICE_BARGE_HOLD_FRAMES> levels;  // 計測履歴は固定領域。動的確保なし
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    if (aecMonitor.ready()) {
+      while (voiceMonitorEnabled.load()) {
+        const bool triggered = aecMonitor.pump();
+        if (triggered && voiceMonitorEnabled.load() && !bargeInRequested) {
+          const uint32_t atMs = millis();
+          if (!AEC_BARGE_DETECT_ONLY) {
+            voiceTriggerMs.store(atMs);
+            digitalWrite(PIN_AMP_SD, LOW);
+            bargeInRequested = true;
+            // Signal only: loop owns sockets, playback cancellation and channel lifetime.
+            aecMonitor.stopCapture();
+            voiceMonitorEnabled.store(false);
+          }
+          aecMonitor.printTrigger(atMs);
+        }
+        vTaskDelay(pdMS_TO_TICKS(1));
+      }
+      aecMonitor.finish();
+      Serial.printf("[AEC] stopped stack_free=%u\n", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+      xSemaphoreGive(voiceStopped);
+      continue;
+    }
     VoiceLevelGate gate;
     levels.reset();
     uint32_t seenSamples = 0, lastLog = millis(), maxRms = 0;
@@ -684,7 +813,7 @@ void voiceMonitorTask(void*) {
     bool triggered = false;
     while (voiceMonitorEnabled.load()) {
       size_t bytes = 0;
-      esp_err_t err = i2s_read(I2S_NUM_0, raw, sizeof(raw), &bytes, pdMS_TO_TICKS(40));
+      esp_err_t err = readMicI2s(raw, sizeof(raw), &bytes, pdMS_TO_TICKS(40));
       if (!voiceMonitorEnabled.load()) break;
       if (err != ESP_OK || bytes != sizeof(raw)) {
         gate.reset();
@@ -748,16 +877,19 @@ void voiceMonitorTask(void*) {
 
 void initVoiceMonitor() {
   if (!VOICE_BARGE_ENABLED) return;
+  aecMonitor.init();
   voiceStopped = xSemaphoreCreateBinary();
   if (!voiceStopped) {
+    aecMonitor.release();
     Serial.println("[VOICE] semaphore allocation failed; button only");
     return;
   }
-  if (xTaskCreatePinnedToCore(voiceMonitorTask, "voice_level", 4096, NULL, 2,
+  if (xTaskCreatePinnedToCore(voiceMonitorTask, "voice_aec", 8192, NULL, 2,
                               &voiceTaskHandle, 1) != pdPASS) {
     vSemaphoreDelete(voiceStopped);
     voiceStopped = NULL;
     voiceTaskHandle = NULL;
+    aecMonitor.release();
     Serial.println("[VOICE] task allocation failed; button only");
   }
 }
@@ -768,8 +900,10 @@ void startVoiceMonitor() {
   voiceLevelSummary = VoiceLevelSummary{};
   voiceLevelSummary.generation = micInstallGeneration;
   voiceTriggerMs.store(0);
+  if (aecMonitor.ready()) aecMonitor.start(micInstallGeneration);
   voiceMonitorEnabled.store(true);
   xTaskNotifyGive(voiceTaskHandle);
+  if (aecMonitor.ready()) return;
   Serial.printf("[VOICE] monitor start rms=%lu hold_ms=%lu warmup_ms=%lu detect_only=%d mic_generation=%lu\n",
                 (unsigned long)VOICE_BARGE_RMS, (unsigned long)VOICE_BARGE_HOLD_MS,
                 (unsigned long)VOICE_BARGE_WARMUP_MS, VOICE_BARGE_DETECT_ONLY,
@@ -778,13 +912,15 @@ void startVoiceMonitor() {
 
 void stopVoiceMonitor() {
   if (!voiceMonitorRunning) return;
+  aecMonitor.stopCapture();
   voiceMonitorEnabled.store(false);
-  // i2s_readは40msの有限待ち。停止確認前にSTT側から同じRXを読まない。
+  // AECの遅延録音は待たずに捨てる。処理中の1フレーム完了を待ってSTTへ戻す。
   xSemaphoreTake(voiceStopped, portMAX_DELAY);
   voiceMonitorRunning = false;
 }
 
 void printVoiceLevelSummary() {
+  if (!voiceMonitorRunning) aecMonitor.printSummary();
   if (voiceMonitorRunning || !voiceLevelSummary.pending) return;
   const auto& s = voiceLevelSummary;
   Serial.printf("[VOICE_LEVEL] generation=%lu peak_rms=%lu sustained_rms=%lu hold_ms=%lu armed_frames=%lu windows=%lu threshold=%lu detect_only=%d read_errors=%lu\n",
@@ -801,7 +937,7 @@ bool pauseMicForPlaybackTest() {
   // 呼び出し元はSTT送信停止後、監視開始前。読み取り中のタスクはいない。
   stopVoiceMonitor();
   uint32_t freeBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-  esp_err_t err = VOICE_RX_RELEASE_WHEN_PAUSED ? i2s_driver_uninstall(I2S_NUM_0) : i2s_stop(I2S_NUM_0);
+  esp_err_t err = VOICE_RX_RELEASE_WHEN_PAUSED ? releaseI2sChannel(micRx) : i2s_channel_disable(micRx);
   if (err != ESP_OK) {
     Serial.printf("[VOICE_TEST] mic pause/release failed=%d\n", err);
     return false;
@@ -823,7 +959,7 @@ bool pauseMicForPlaybackTest() {
 void resetMicAfterPlaybackTest() {
   if (!VOICE_RX_RESET_AFTER_PLAYBACK || !micInstalled) return;
   stopVoiceMonitor();
-  esp_err_t err = i2s_driver_uninstall(I2S_NUM_0);
+  esp_err_t err = releaseI2sChannel(micRx);
   if (err != ESP_OK) {
     Serial.printf("[VOICE_TEST] rx_reset_after_playback=0 err=%d generation=%lu\n",
                   err, (unsigned long)micInstallGeneration);
@@ -838,42 +974,36 @@ void resetMicAfterPlaybackTest() {
 
 void setupI2SRecord() {
   if (micInstalled) return;
-  i2s_config_t cfg = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-    .sample_rate = SAMPLE_RATE_STT,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
-    .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
-    .intr_alloc_flags = 0,
-    .dma_buf_count = MIC_DMA_COUNT,
-    .dma_buf_len = MIC_DMA_FRAMES,
-    .use_apll = false,  // ESP32-S3の標準クロックを使用（このSoCはI2S APLL非対応）
-    .tx_desc_auto_clear = false,
-    .fixed_mclk = 0
-  };
-
-  i2s_pin_config_t pins = {
-    .bck_io_num = PIN_MIC_BCLK,
-    .ws_io_num = PIN_MIC_WS,
-    .data_out_num = I2S_PIN_NO_CHANGE,
-    .data_in_num = PIN_MIC_DATA
-  };
-
-  esp_err_t err = i2s_driver_install(I2S_NUM_0, &cfg, 0, NULL);
+  i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+  chan.dma_desc_num = MIC_DMA_COUNT;
+  chan.dma_frame_num = MIC_DMA_FRAMES;
+  esp_err_t err = i2s_new_channel(&chan, nullptr, &micRx);
   if (err != ESP_OK) {
-    Serial.printf("[VOICE] mic install failed=%d\n", err);
+    Serial.printf("[VOICE] mic channel allocation failed=%d\n", err);
     return;
   }
-  err = i2s_set_pin(I2S_NUM_0, &pins);
-  if (err == ESP_OK) err = i2s_start(I2S_NUM_0);
+  i2s_std_config_t cfg = {};
+  cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_STT);
+  cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO);
+  cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+  cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+  cfg.gpio_cfg.bclk = (gpio_num_t)PIN_MIC_BCLK;
+  cfg.gpio_cfg.ws = (gpio_num_t)PIN_MIC_WS;
+  cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
+  cfg.gpio_cfg.din = (gpio_num_t)PIN_MIC_DATA;
+  err = i2s_channel_init_std_mode(micRx, &cfg);
+  i2s_event_callbacks_t callbacks = {};
+  callbacks.on_recv = onMicDma;
+  if (err == ESP_OK) err = i2s_channel_register_event_callback(micRx, &callbacks, nullptr);
+  if (err == ESP_OK) err = i2s_channel_enable(micRx);
   if (err != ESP_OK) {
-    i2s_driver_uninstall(I2S_NUM_0);
-    Serial.printf("[VOICE] mic start failed=%d\n", err);
+    i2s_del_channel(micRx); micRx = nullptr;
+    Serial.printf("[VOICE] mic initialization failed=%d\n", err);
     return;
   }
   micInstalled = true;
   ++micInstallGeneration;
-  Serial.printf("[VOICE_TEST] mic_ready dma_count=%d dma_frames=%d dma_data_bytes=%lu internal_free=%lu max_blk=%lu generation=%lu\n",
+  Serial.printf("[VOICE_TEST] mic_ready driver=std dma_count=%d dma_frames=%d dma_data_bytes=%lu internal_free=%lu max_blk=%lu generation=%lu\n",
                 MIC_DMA_COUNT, MIC_DMA_FRAMES, (unsigned long)MIC_DMA_DATA_BYTES,
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -885,45 +1015,36 @@ bool setupI2SPlay() {
   pinMode(PIN_AMP_SD, OUTPUT);
   digitalWrite(PIN_AMP_SD, LOW);
   delay(10);
-
-  i2s_config_t cfg = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
-    .sample_rate = SAMPLE_RATE_TTS,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
-    .communication_format = (i2s_comm_format_t)(I2S_COMM_FORMAT_I2S | I2S_COMM_FORMAT_I2S_MSB),
-    .intr_alloc_flags = 0,
-    .dma_buf_count = PLAY_DMA_COUNT,
-    .dma_buf_len = PLAY_DMA_FRAMES,
-    .use_apll = false,  // ESP32-S3の標準クロックを使用（このSoCはI2S APLL非対応）
-    .tx_desc_auto_clear = true,
-    .fixed_mclk = 0
-  };
-
-  i2s_pin_config_t pins = {
-    .bck_io_num = PIN_AMP_BCLK,
-    .ws_io_num = PIN_AMP_WS,
-    .data_out_num = PIN_AMP_DIN,
-    .data_in_num = I2S_PIN_NO_CHANGE
-  };
-
-  playbackI2sEvents = NULL;
-  esp_err_t err = i2s_driver_install(I2S_NUM_1, &cfg, PLAY_I2S_EVENT_COUNT, &playbackI2sEvents);
+  if (playbackTx) return false;
+  i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+  chan.dma_desc_num = PLAY_DMA_COUNT;
+  chan.dma_frame_num = PLAY_DMA_FRAMES;
+  chan.auto_clear_after_cb = true;  // callback copies the played signal BEFORE it is cleared
+  chan.auto_clear_before_cb = false;
+  // Previous TX channel is deleted, so no callback can race this reset.
+  playbackDmaSize = playbackDmaOverflows = lastPlaybackDmaOverflows = 0;
+  esp_err_t err = i2s_new_channel(&chan, &playbackTx, nullptr);
   if (err != ESP_OK) {
-    // 計測用キューを確保できなければ従来の再生構成を試す。
-    playbackI2sEvents = NULL;
-    err = i2s_driver_install(I2S_NUM_1, &cfg, 0, NULL);
-  }
-  if (err != ESP_OK) {
-    Serial.printf("[VOICE] playback install failed=%d\n", err);
+    Serial.printf("[VOICE] playback allocation failed=%d\n", err);
     return false;
   }
-  err = i2s_set_pin(I2S_NUM_1, &pins);
-  if (err == ESP_OK) err = i2s_set_clk(I2S_NUM_1, SAMPLE_RATE_TTS, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+  i2s_std_config_t cfg = {};
+  cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_TTS);
+  cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO);
+  cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+  cfg.gpio_cfg.bclk = (gpio_num_t)PIN_AMP_BCLK;
+  cfg.gpio_cfg.ws = (gpio_num_t)PIN_AMP_WS;
+  cfg.gpio_cfg.dout = (gpio_num_t)PIN_AMP_DIN;
+  cfg.gpio_cfg.din = I2S_GPIO_UNUSED;
+  err = i2s_channel_init_std_mode(playbackTx, &cfg);
+  i2s_event_callbacks_t callbacks = {};
+  callbacks.on_sent = onPlaybackDma;
+  callbacks.on_send_q_ovf = onPlaybackDmaOverflow;
+  if (err == ESP_OK) err = i2s_channel_register_event_callback(playbackTx, &callbacks, nullptr);
+  if (err == ESP_OK) err = i2s_channel_enable(playbackTx);
   if (err != ESP_OK) {
-    i2s_driver_uninstall(I2S_NUM_1);
-    playbackI2sEvents = NULL;
-    Serial.printf("[VOICE] playback configuration failed=%d\n", err);
+    i2s_del_channel(playbackTx); playbackTx = nullptr;
+    Serial.printf("[VOICE] playback initialization failed=%d\n", err);
     return false;
   }
   playbackI2sBytes.store(0, std::memory_order_relaxed);
@@ -1027,6 +1148,8 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
         String segmentText = json.substring(p, e);
         responseText += segmentText;
         Serial.printf("[SEGMENT] Text: %s\n", segmentText.c_str());
+        Serial.printf("[LATENCY] segment_text_ms=%lu\n",
+                      (unsigned long)(millis() - ttsTurnStartMs.load()));
       }
     }
     int idPos = json.indexOf("\"id\":");
@@ -1044,6 +1167,8 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
       sizePos += 7;
       currentPcmSize = json.substring(sizePos, json.indexOf("}", sizePos)).toInt();
       Serial.printf("[TTS_START] id=%d, size=%d\n", curSegmentId, currentPcmSize);
+      Serial.printf("[LATENCY] segment=%d tts_header_ms=%lu\n", curSegmentId,
+                    (unsigned long)(millis() - ttsTurnStartMs.load()));
     }
   }
 
@@ -1348,7 +1473,7 @@ bool processPCM(WiFiClientSecure& client, uint32_t length) {
     totalPlayed += stereoBytes;
     remaining -= bytesRead;
     uint32_t wsStart = millis();
-    ws.loop();  // SSL handshake進行
+    serviceSoniox("pcm_receive");
     wsMs += millis() - wsStart;
   }
 
@@ -1560,11 +1685,13 @@ void lambdaConnectAndSendTask(void* param) {
   Serial.printf("[DIAG] pre-connect free=%u max_blk=%u\n",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  tls_memory::printStats("lambda_pre_connect");
   p->client->setInsecure();
   uint32_t connectStart = millis();
   bool connected = p->client->connect(LAMBDA_HOST, 443);
   Serial.printf("[LATENCY] lambda_connect_ms=%lu ok=%d\n",
                 (unsigned long)(millis() - connectStart), connected);
+  tls_memory::printStats(connected ? "lambda_connected" : "lambda_failed");
   if (!connected) {
     Serial.printf("[DIAG] connect() FAILED, post free=%u max_blk=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
@@ -1604,6 +1731,7 @@ void sendToLambdaAndPlay(const String& text) {
   ttsFirstWriteLogged.store(false);
   ttsFirstPcmLogged = false;
   ttsRingWaitMs = 0;
+  sonioxServiceMaxMs = 0;
   Serial.println("🚀 Sending to Lambda: " + text);
   Serial.printf("💾 Free heap: %d bytes\n", ESP.getFreeHeap());
   responseText = "";
@@ -1638,14 +1766,14 @@ void sendToLambdaAndPlay(const String& text) {
   timerAlarm(ledTimer, 30000, true, 0);
 
   // I2S切り替え
-  // 比較モードではRXを停止/解放。通常のv0.6では常設して監視タスクへ引き継ぐ。
+  // 比較モードではRXを停止/解放。Monitorモードでは監視タスクへ引き継ぐ。
   if (!pauseMicForPlaybackTest()) {
     clearBackchannelCache();
     startSTTRecording();
     return;
   }
-  Serial.printf("[VOICE_TEST] playback rx_paused=%d rx_released=%d detect_only=%d\n",
-                micPausedForPlayback, micReleasedForPlayback, VOICE_BARGE_DETECT_ONLY);
+  Serial.printf("[VOICE_TEST] playback rx_paused=%d rx_released=%d raw_detect_only=%d aec_detect_only=%d\n",
+                micPausedForPlayback, micReleasedForPlayback, VOICE_BARGE_DETECT_ONLY, AEC_BARGE_DETECT_ONLY);
   if (!setupI2SPlay()) {
     clearBackchannelCache();
     resetMicAfterPlaybackTest();
@@ -1659,12 +1787,8 @@ void sendToLambdaAndPlay(const String& text) {
   playerStart();  // 再生タスク起動（リングバッファ初期化）
   Serial.printf("⏱️ [%lums] I2S switched\n", millis() - t0);
 
-  // Soniox WebSocket切断→即再接続開始（再生中にSSL handshakeを進める）
-  ws.disconnect();
-  ws.beginSSL(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket");
-  ws.onEvent(webSocketEvent);
-  ws.enableHeartbeat(15000, 3000, 2);
-  sonioxPreconnectPending = true;
+  // 接続タスクへ所有権を渡し、相槌・本返答の受信と並列に準備する。
+  prepareSonioxDuringPlayback();
   Serial.printf("⏱️ [%lums] WS reconnect started (preconnect during playback)\n", millis() - t0);
 
   // ペイロード組み立て
@@ -1737,8 +1861,7 @@ void sendToLambdaAndPlay(const String& text) {
     setLEDMode(LED_OFF);
     playerStop();
     resetMicAfterPlaybackTest();
-    i2s_stop(I2S_NUM_1);
-    i2s_driver_uninstall(I2S_NUM_1);
+    releaseI2sChannel(playbackTx);
     if (ampOn) { digitalWrite(PIN_AMP_SD, LOW); ampOn = false; }
     clearBackchannelCache();
     startSTTRecording();
@@ -1784,7 +1907,7 @@ void sendToLambdaAndPlay(const String& text) {
       break;
     }
 
-    ws.loop();  // SSL handshake進行
+    serviceSoniox("binary_header");
 
     if (type == 0x01) {
       if (!processMetadata(client, length)) {
@@ -1818,7 +1941,7 @@ void sendToLambdaAndPlay(const String& text) {
       playerStreamEnd = true;
       unsigned long drainStart = millis();
       while (!bargeInRequested && playerActive && (millis() - drainStart < 30000)) {
-        ws.loop();  // SSL handshake進行
+        serviceSoniox("playback_drain");
         delay(10);
       }
       playerStop();  // 正常時は既に停止済み、タイムアウト時の保険
@@ -1846,7 +1969,7 @@ void sendToLambdaAndPlay(const String& text) {
             part = min(part, next - flushed);
           }
           size_t written = 0;
-          esp_err_t err = i2s_write(I2S_NUM_1, silence, part, &written, portMAX_DELAY);
+          esp_err_t err = i2s_channel_write(playbackTx, silence, part, &written, UINT32_MAX);
           int64_t copyDoneUs = esp_timer_get_time();
           chunkWritten += written;
           pollPlaybackI2sEvents(true);
@@ -1863,7 +1986,7 @@ void sendToLambdaAndPlay(const String& text) {
         remaining -= chunkWritten;
         if (chunkWritten < toWrite) break;
         uint32_t wsStartMs = millis();
-        ws.loop();  // SSL handshake進行
+        serviceSoniox("dma_flush");
         turnEndTiming.flushWsMs += millis() - wsStartMs;
       }
       free(silence);
@@ -1882,6 +2005,10 @@ void sendToLambdaAndPlay(const String& text) {
   turnEndTiming.ampOffMs = millis();
   turnEndTiming.lastWriteMs = lastI2sWriteMs.load(std::memory_order_relaxed);
   ampOn = false;
+  Serial.printf("[TURN_STOP] cause=%s ws_max_block_ms=%lu\n",
+                responseFailed ? "stream_error" : bargeInRequested ?
+                (voiceTriggerMs.load() ? "aec_level" : "button") : "completed",
+                (unsigned long)sonioxServiceMaxMs);
   Serial.printf("⏱️ end+[%lums] Amp off\n", millis() - tEnd);
   statsPrint();  // このターンのWiFi/再生品質サマリ
 
@@ -1893,8 +2020,7 @@ void sendToLambdaAndPlay(const String& text) {
   Serial.printf("⏱️ end+[%lums] Cleanup done\n", millis() - tEnd);
 
   resetMicAfterPlaybackTest();
-  i2s_stop(I2S_NUM_1);
-  i2s_driver_uninstall(I2S_NUM_1);
+  releaseI2sChannel(playbackTx);
   Serial.printf("⏱️ end+[%lums] I2S uninstalled\n", millis() - tEnd);
 
   startSTTRecording();
@@ -1907,34 +2033,30 @@ void logLoopStack(const char* stage) {
                 (unsigned)uxTaskGetStackHighWaterMark(NULL));
 }
 
+// Runs on loop only, including completion handed back from the connect worker.
+void sonioxConnectionReady() {
+  if (sttRestartMs > 0) {
+    Serial.printf("⏱️ STT [%lums] WS ready (from restart)\n", millis() - sttRestartMs);
+  }
+  Serial.println("✅ Connected to Soniox!");
+  logLoopStack("soniox_ready");
+  Serial.println("📤 Sent start message to Soniox");
+  sonioxPreconnectPending = false;
+  if (isRecording) {
+    timerAlarm(ledTimer, 0, false, 0);
+    setLEDMode(LED_ON);
+  }
+}
+
 void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
-      if (sttRestartMs > 0) {
-        Serial.printf("⏱️ STT [%lums] WS actually connected (from restart)\n", millis() - sttRestartMs);
-      }
-      Serial.println("✅ Connected to Soniox!");
-      logLoopStack("soniox_connected");
       {
-        String startMsg =
-          "{\"api_key\":\"" + sonioxKey + "\","
-          "\"model\":\"" + sonioxModel + "\","
-          "\"audio_format\":\"pcm_s16le\","
-          "\"sample_rate\":16000,"
-          "\"num_channels\":1,"
-          "\"enable_partial_results\":true,"
-          "\"enable_endpoint_detection\":true,"
-          "\"language_hints\":[\"ja\",\"en\"]"
-          "}";
-        ws.sendTXT(startMsg);
-        logLoopStack("soniox_start_sent");
-        Serial.println("📤 Sent start message to Soniox");
-        sonioxPreconnectPending = false;
-        if (isRecording) {
-          // 録音準備完了 = 点灯（話してOK）。録音中はタイマー停止（必須ではないが念のため）
-          // 再生中のpreconnect時(isRecording=false)はLEDを変えない
-          timerAlarm(ledTimer, 0, false, 0);
-          setLEDMode(LED_ON);
+        String startMsg = sonioxStartMessage();
+        if (ws.sendTXT(startMsg)) sonioxConnectionReady();
+        else {
+          Serial.println("[STT] start message failed");
+          ws.disconnect();
         }
       }
       // isRecordingはstartSTTRecordingで設定（再生中のpreconnect時に録音開始を防ぐ）
@@ -2004,6 +2126,8 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 void startSTTRecording() {
   unsigned long t0 = millis();
   sttRestartMs = t0;
+  sonioxPlaybackPhase = false;
+  finishSonioxPreconnect();
   statsReset();  // このターンの品質計測を開始
   Serial.println("🎙️ Starting STT recording...");
   logMemoryCheckpoint("before_recording");
@@ -2026,7 +2150,7 @@ void startSTTRecording() {
     Serial.println("[VOICE_TEST] mic reinstalled for STT");
   }
   if (micPausedForPlayback) {
-    esp_err_t err = i2s_start(I2S_NUM_0);
+    esp_err_t err = i2s_channel_enable(micRx);
     if (err != ESP_OK) {
       isRecording = false;
       Serial.printf("[VOICE_TEST] mic resume failed=%d; recording disabled\n", err);
@@ -2035,28 +2159,34 @@ void startSTTRecording() {
     micPausedForPlayback = false;
     Serial.println("[VOICE_TEST] mic resumed for STT");
   }
-  // 再生音が残ったRXキューを捨てる。第一弾では検出前の音声は送らない。
+  sttMicFilter.reset();
+  sttInputFirstBlock = true;
+  // 再生音が残ったRXキューを捨てる。検出前の音声引き継ぎは未実装。
   for (int i = 0; i < 8; ++i) {
     size_t bytes = 0;
-    i2s_read(I2S_NUM_0, sttRaw, sizeof(sttRaw), &bytes, 0);
+    readMicI2s(sttRaw, sizeof(sttRaw), &bytes, 0);
     if (!bytes) break;
   }
 
   if (turnEndTiming.pending) turnEndTiming.micSetupDoneMs = millis();
   logLoopStack("before_stt_connect");
 
-  if (ws.isConnected()) {
+  if (sonioxIsConnected()) {
     Serial.printf("⏱️ STT [%lums] WS already connected (preconnect success!)\n", millis() - t0);
-  } else if (sonioxPreconnectPending) {
+  } else if (sonioxPreconnectPending || sonioxPreconnect.ownsClient()) {
     Serial.printf("⏱️ STT [%lums] WS not yet connected, waiting...\n", millis() - t0);
     // preconnectが進行中なので、ws.loop()で完了を待つ
     unsigned long wsWaitStart = millis();
-    while (!ws.isConnected() && (millis() - wsWaitStart < 5000)) {
-      ws.loop();
+    while (!sonioxIsConnected() && (millis() - wsWaitStart < 5000)) {
+      serviceSoniox("recording_connect");
       delay(1);
     }
-    if (ws.isConnected()) {
+    if (sonioxIsConnected()) {
       Serial.printf("⏱️ STT [%lums] WS connected after wait\n", millis() - t0);
+    } else if (sonioxPreconnect.ownsClient()) {
+      // connect() is still using ws: keep ownership with the worker. loop will
+      // collect completion later; never reset/delete its in-flight socket.
+      Serial.println("[WS_PRECONNECT] still running; socket retained until completion");
     } else {
       Serial.printf("⏱️ STT [%lums] WS still not connected, starting fresh\n", millis() - t0);
       sonioxPreconnectPending = false;
@@ -2074,18 +2204,17 @@ void startSTTRecording() {
   isRecording = true;
   if (voiceTriggerMs.load() != 0) {
     Serial.printf("[VOICE] trigger_to_record_ms=%lu ws_ready=%d\n",
-                  (unsigned long)(millis() - voiceTriggerMs.load()), ws.isConnected());
-    voiceTriggerMs.store(0);
+                  (unsigned long)(millis() - voiceTriggerMs.load()), sonioxIsConnected());
   }
   if (turnEndTiming.pending) {
     turnEndTiming.recordOnMs = millis();
-    turnEndTiming.wsReadyAtRecord = ws.isConnected();
+    turnEndTiming.wsReadyAtRecord = sonioxIsConnected();
   }
   Serial.printf("⏱️ STT [%lums] isRecording=true\n", millis() - t0);
 
   // WS接続済み（=startメッセージ送信済み）なら即「話してOK」の点灯へ。
   // 未接続ならゆっくり点滅のまま、CONNECTEDイベント側で点灯に切り替わる
-  if (ws.isConnected()) {
+  if (sonioxIsConnected()) {
     if (ledTimer) timerAlarm(ledTimer, 0, false, 0);
     setLEDMode(LED_ON);
   }
@@ -2209,14 +2338,16 @@ void startNormalOperation() {
 void setup() {
   Serial.begin(921600);
   delay(100);
-  Serial.println("\n🚀 ToyTalker Mini v0.6");
+  Serial.println(AEC_BARGE_DETECT_ONLY ? "\n🚀 ToyTalker Mini v0.7 (AEC evaluation / detect only)"
+                                     : "\n🚀 ToyTalker Mini v0.7 (AEC barge-in trial)");
+  Serial.printf("[BUILD] arduino=%s idf=%s\n", ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
   esp_err_t allocHookResult = heap_caps_register_failed_alloc_callback(recordAllocationFailure);
   Serial.printf("[ALLOC_FAIL] hook_install_err=%d\n", allocHookResult);
-  Serial.printf("[VOICE_TEST] mode=%s rx_dma_count=%d rx_dma_frames=%d detect_only=%d\n",
+  Serial.printf("[VOICE_TEST] mode=%s rx_dma_count=%d rx_dma_frames=%d raw_detect_only=%d aec_detect_only=%d\n",
                 VOICE_RX_PAUSE_DURING_PLAYBACK ? (VOICE_RX_RELEASE_WHEN_PAUSED ? "release_rx" : "pause_rx")
                                              : (VOICE_RX_RESET_AFTER_PLAYBACK ? "monitor_reset_each_turn"
                                                 : (VOICE_RX_TEST_MODE == VoiceRxTestMode::MonitorSmallDma ? "monitor_small_dma" : "monitor_original_dma")),
-                MIC_DMA_COUNT, MIC_DMA_FRAMES, VOICE_BARGE_DETECT_ONLY);
+                MIC_DMA_COUNT, MIC_DMA_FRAMES, VOICE_BARGE_DETECT_ONLY, AEC_BARGE_DETECT_ONLY);
 
   WiFi.onEvent(WiFiEvent);
 
@@ -2243,13 +2374,22 @@ void setup() {
   pinMode(PIN_AMP_SD, OUTPUT);
   digitalWrite(PIN_AMP_SD, LOW);
 
+  if (!tls_memory::init()) {
+    Serial.println("[TLS_MEM] startup stopped before network connections");
+    for (;;) delay(1000);
+  }
   initVoiceMonitor();
+  Serial.printf("[WS_PRECONNECT] worker_ready=%d stack_bytes=8192 core=0\n", sonioxPreconnect.init(ws));
 
   // 再生ジッタバッファ初期化（PSRAM）+ 再生専用タスク起動
   playRing = (uint8_t*)ps_malloc(PLAY_RING_SIZE);
   if (playRing) {
-    xTaskCreatePinnedToCore(playbackTask, "player", 8192, NULL, 2, &playerTaskHandle, 0);
-    Serial.printf("🔊 Playback jitter buffer ready (%d KB)\n", PLAY_RING_SIZE / 1024);
+    if (xTaskCreatePinnedToCore(playbackTask, "player", 8192, NULL, 2, &playerTaskHandle, 0) == pdPASS) {
+      Serial.printf("🔊 Playback jitter buffer ready (%d KB)\n", PLAY_RING_SIZE / 1024);
+    } else {
+      free(playRing); playRing = nullptr; playerTaskHandle = nullptr;
+      Serial.println("[PLAYER] task allocation failed; direct playback mode");
+    }
   } else {
     Serial.println("⚠️ playRing ps_malloc failed → direct playback mode");
   }
@@ -2317,7 +2457,10 @@ void handleButtonLongPress() {
       buttonLongPressTriggered = true;
       if (currentMode == MODE_NORMAL) {
         Serial.println("🔘 Long press detected - Entering BLE mode");
-        if (isRecording) { ws.disconnect(); isRecording = false; }
+        isRecording = false;
+        sonioxPlaybackPhase = false;
+        if (sonioxPreconnect.ownsClient()) sonioxPreconnect.cancel();
+        else ws.disconnect();
         WiFi.disconnect(true);
         startBLE();
       }
@@ -2331,6 +2474,7 @@ void handleButtonLongPress() {
 // ==== LOOP ====
 void loop() {
   if (currentMode == MODE_BLE_PROV) {
+    finishSonioxPreconnect(); // collect cancelled job without touching a running socket
     handleButtonLongPress();
     if (!bleDeviceConnected && oldBleDeviceConnected) {
       delay(500);
@@ -2341,7 +2485,7 @@ void loop() {
     return;
   }
 
-  ws.loop();
+  serviceSoniox("recording_loop");
   handleButtonLongPress();
 
   // ボタンデバウンス
@@ -2355,33 +2499,26 @@ void loop() {
   lastButtonReading = reading;
 
   // 録音データ送信
-  if (isRecording && wifiGotIP && ws.isConnected()) {
+  if (isRecording && wifiGotIP && sonioxIsConnected()) {
     static uint32_t lastSend = 0;
     static uint32_t sendOk = 0, sendFail = 0;
     static uint32_t lastStats = 0;
-    static int16_t micPeak = 0;  // v0.2基板検証用: マイク信号が生きているかの確認(無音でも数十、声で数千〜)
+    static uint16_t micPeak = 0;  // -32768の絶対値32768も表現する
     static int32_t rawMin = INT32_MAX, rawMax = INT32_MIN;  // 生データの振れ幅(DCオフセットとクロストークの判別用)
     static uint32_t rawSample = 0;
     if (millis() - lastSend > 5) {
       auto& raw = sttRaw;
       auto& pcm = sttPcm;
       size_t n = 0;
-      i2s_read(I2S_NUM_0, (void*)raw, sizeof(raw), &n, portMAX_DELAY);
+      readMicI2s((void*)raw, sizeof(raw), &n, portMAX_DELAY);
       if (n > 0 && turnEndTiming.pending && !turnEndTiming.firstReadSeen) {
         turnEndTiming.firstReadMs = millis();
         turnEndTiming.firstReadSeen = true;
       }
       int samples = n / sizeof(int32_t);
-      // SPH0645は大きな負のDCオフセットを持つ(この個体は約-13500@16bit)。
-      // DCに声が埋もれてSTTが認識できないため、ゆっくり追従する平均を引いて直流除去する
-      static int32_t micDc = 0;
+      sttMicFilter.convert(raw, pcm, samples);
       for (int i = 0; i < samples; i++) {
-        int32_t s = raw[i] >> 14;
-        micDc += (s - micDc) >> 10;  // 時定数 約64ms@16kHz
-        int32_t v = s - micDc;
-        if (v > 32767) v = 32767; else if (v < -32768) v = -32768;
-        pcm[i] = (int16_t)v;
-        int16_t a = pcm[i] >= 0 ? pcm[i] : -pcm[i];
+        uint32_t a = pcm[i] >= 0 ? int32_t(pcm[i]) : -int32_t(pcm[i]);
         if (a > micPeak) micPeak = a;
         if (raw[i] < rawMin) rawMin = raw[i];
         if (raw[i] > rawMax) rawMax = raw[i];
@@ -2390,8 +2527,19 @@ void loop() {
       bool ok = ws.sendBIN((uint8_t*)pcm, samples * sizeof(int16_t));
       if (ok) {
         if (samples > 0) {
-          printTurnEndTiming(millis());  // 毎ターン最初の音声送信だけ。sendOkの統計リセットとは独立。
+          const uint32_t sentAtMs = millis();
+          const uint32_t triggerAtMs = voiceTriggerMs.exchange(0);
+          if (triggerAtMs != 0) {
+            Serial.printf("[VOICE] trigger_to_first_send_ms=%lu\n", (unsigned long)(sentAtMs - triggerAtMs));
+          }
+          printTurnEndTiming(sentAtMs);  // 毎ターン最初の音声送信だけ。sendOkの統計リセットとは独立。
           printVoiceLevelSummary();
+          if (sttInputFirstBlock) {
+            Serial.printf("[STT_INPUT] first_block_samples=%d dc=%ld clips=%lu zero_samples=%lu\n", samples,
+                          (long)sttMicFilter.dc(), (unsigned long)sttMicFilter.clips(),
+                          (unsigned long)sttMicFilter.zeros());
+            sttInputFirstBlock = false;
+          }
         }
         sendOk++;
         if (sendOk == 1 && sttRestartMs > 0) {
