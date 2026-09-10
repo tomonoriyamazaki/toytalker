@@ -34,3 +34,6 @@ fp-info-cache
 *- コピー*
 *.ino.backup
 .theia/
+
+# 個人メモ（取引先名などを含みうる打ち合わせ準備。公開リポジトリに含めない）
+docs/*meeting-prep*.md
