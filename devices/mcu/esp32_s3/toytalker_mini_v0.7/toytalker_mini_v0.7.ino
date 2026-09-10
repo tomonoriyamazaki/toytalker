@@ -900,7 +900,9 @@ void startVoiceMonitor() {
   voiceLevelSummary = VoiceLevelSummary{};
   voiceLevelSummary.generation = micInstallGeneration;
   voiceTriggerMs.store(0);
-  if (aecMonitor.ready()) aecMonitor.start(micInstallGeneration);
+  // Also allow retry after a previous turn's DSP handle recreation failed.
+  // start() is harmless when AEC storage was unavailable at initialization.
+  aecMonitor.start(micInstallGeneration);
   voiceMonitorEnabled.store(true);
   xTaskNotifyGive(voiceTaskHandle);
   if (aecMonitor.ready()) return;

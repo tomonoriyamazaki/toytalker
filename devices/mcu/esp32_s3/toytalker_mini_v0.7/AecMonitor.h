@@ -12,6 +12,7 @@
 #include "VoiceLevelMeter.h"
 
 constexpr bool AEC_ENABLED = true;  // false: new I2S driver + original level monitor, for comparison
+constexpr bool AEC_RESET_EACH_TURN = true; // compare against the old retained filter state
 constexpr uint32_t AEC_MIC_SAMPLES = 512;   // FD API: 32 ms at 16 kHz
 static_assert(AEC_MIC_SAMPLES == AEC_BARGE_FRAME_SAMPLES, "barge-in hold must match AEC frame size");
 constexpr uint32_t AEC_TX_SAMPLES = 1023;   // 4092-byte stereo DMA buffer at 24 kHz
@@ -45,24 +46,17 @@ class AecMonitor {
       buffer = static_cast<int16_t*>(heap_caps_aligned_alloc(16, AEC_MIC_SAMPLES * sizeof(int16_t),
                                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
-    if (history_ && pending_ && buffers_[0] && buffers_[1] && buffers_[2]) {
-      aec_config_t config = {};
-      config.mic_num = config.ref_num = config.out_num = 1;
-      config.filter_length = 4;
-      config.sample_rate = 16000;
-      config.caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
-      config.mode = AEC_MODE_FD_LOW_COST;
-      config.nlp_level = AEC_NLP_LEVEL_NORMAL;
-      handle_ = aec_create_from_config(&config);
-    }
-    if (!handle_ || aec_get_chunksize(handle_) != AEC_MIC_SAMPLES) {
+    if (storageReady()) handle_ = createHandle();
+    if (!handle_) {
       Serial.println("[AEC] init failed or unsupported frame size; raw level monitor only");
       release();
       return false;
     }
-    Serial.printf("[AEC] ready=1 mode=FD_LOW_COST nlp=NORMAL frame=%lu max_ref_wait_ms=%lu ref_advance_ms=%ld detect_only=%d barge_rms=%lu barge_hold_ms=%lu\n",
+    Serial.printf("[AEC] ready=1 mode=FD_LOW_COST nlp=NORMAL frame=%lu max_ref_wait_ms=%lu ref_advance_ms=%ld detect_only=%d barge_rms=%lu barge_hold_ms=%lu min_retained_pct=%lu clip_recovery_ms=%lu reset_each_turn=%d\n",
                   (unsigned long)AEC_MIC_SAMPLES, (unsigned long)AEC_MIC_HOLD_MS, (long)AEC_REFERENCE_ADVANCE_MS,
-                  AEC_BARGE_DETECT_ONLY, (unsigned long)AEC_BARGE_RMS, (unsigned long)AEC_BARGE_HOLD_MS);
+                  AEC_BARGE_DETECT_ONLY, (unsigned long)AEC_BARGE_RMS, (unsigned long)AEC_BARGE_HOLD_MS,
+                  (unsigned long)AEC_BARGE_MIN_RETAINED_PERCENT, (unsigned long)AEC_BARGE_CLIP_RECOVERY_MS,
+                  AEC_RESET_EACH_TURN);
     Serial.printf("[AEC_MEM] internal_delta=%ld psram_delta=%ld internal_free=%lu max_blk=%lu\n",
                   (long)internalBefore - (long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   (long)psramBefore - (long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
@@ -80,8 +74,31 @@ class AecMonitor {
   }
   bool ready() const { return handle_ != nullptr; }
   void start(uint32_t generation) {
-    if (!ready()) return;
-    // Previous turn's channels have been deleted; its task has acknowledged stop.
+    if (!storageReady()) return;
+    // The previous monitor task has acknowledged stop, and capture is disabled.
+    // Input time/history restarts each turn, so the library's adaptive filter
+    // and buffered audio must start a new session too. No public reset API is
+    // exposed by the installed SDK; only recreate the DSP handle, not capture storage.
+    const int64_t resetStarted = esp_timer_get_time();
+    const bool recreate = !handle_ || (AEC_RESET_EACH_TURN && turnStarted_);
+    if (recreate) {
+      if (handle_) aec_destroy(handle_);
+      handle_ = createHandle();
+    }
+    turnStarted_ = true;
+    Serial.printf("[AEC_RESET] generation=%lu enabled=%d recreated=%d ready=%d elapsed_us=%lu internal_free=%lu psram_free=%lu\n",
+                  (unsigned long)generation, AEC_RESET_EACH_TURN, recreate, ready(),
+                  (unsigned long)(esp_timer_get_time() - resetStarted),
+                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                  (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!ready()) {
+      // Keep reusable storage and retry next turn; caller uses detect-only raw
+      // monitoring this turn. Do not reuse a possibly contaminated old instance.
+      summaryPending_ = false;
+      Serial.println("[AEC] turn reset failed; raw level monitor only, retry next turn");
+      return;
+    }
+    // No old DMA callback can publish while capture is disabled.
     rx_.reset(); tx_.reset();
     rxSequence_ = txSequence_ = 0;
     history_->reset(); pending_->head = pending_->tail = 0;
@@ -159,10 +176,11 @@ class AecMonitor {
     return triggered;
   }
   void printTrigger(uint32_t atMs) {
-    Serial.printf("[AEC_TRIGGER] generation=%lu mic=%lu ref=%lu out=%lu threshold=%lu hold_ms=%lu audio_age_ms=%lu detect_only=%d at_ms=%lu\n",
+    Serial.printf("[AEC_TRIGGER] generation=%lu mic=%lu ref=%lu out=%lu threshold=%lu hold_ms=%lu audio_age_ms=%lu detect_only=%d at_ms=%lu window_retained_pct=%.1f\n",
                   (unsigned long)generation_, (unsigned long)stats_.micRms, (unsigned long)stats_.refRms,
                   (unsigned long)stats_.outRms, (unsigned long)AEC_BARGE_RMS, (unsigned long)AEC_BARGE_HOLD_MS,
-                  (unsigned long)triggerAudioAgeMs_, AEC_BARGE_DETECT_ONLY, (unsigned long)atMs);
+                  (unsigned long)triggerAudioAgeMs_, AEC_BARGE_DETECT_ONLY, (unsigned long)atMs,
+                  retainedPercent());
   }
   void printSummary() {
     if (!summaryPending_) return;
@@ -179,8 +197,41 @@ class AecMonitor {
                   (unsigned long)capture_.errors(), (unsigned long)stats_.clips,
                   (unsigned long)stats_.cpuMaxUs, (unsigned long)stats_.slowFrames,
                   (unsigned long)(pending_->head - pending_->tail));
+    Serial.printf("[AEC_GATE] residual_reject_windows=%lu clip_frames=%lu recovery_frames=%lu min_retained_pct=%lu clip_recovery_ms=%lu\n",
+                  (unsigned long)bargeGate_.residualRejects(), (unsigned long)bargeGate_.clipFrames(),
+                  (unsigned long)bargeGate_.recoveryFrames(), (unsigned long)AEC_BARGE_MIN_RETAINED_PERCENT,
+                  (unsigned long)AEC_BARGE_CLIP_RECOVERY_MS);
+    // Deferred until STT's first send; extra logs must not delay the handoff.
+    // Oldest first; turn-wide peaks cannot explain a trigger's four frames.
+    if (bargeGate_.fired()) {
+      for (uint32_t i = 0; i < AEC_BARGE_HOLD_FRAMES; ++i)
+        Serial.printf("[AEC_GATE_FRAME] index=%lu mic=%lu out=%lu\n", (unsigned long)i,
+                      (unsigned long)bargeGate_.micFrame(i), (unsigned long)bargeGate_.outFrame(i));
+    }
   }
  private:
+  bool storageReady() const {
+    return history_ && pending_ && buffers_[0] && buffers_[1] && buffers_[2];
+  }
+  static aec_handle_t* createHandle() {
+    aec_config_t config = {};
+    config.mic_num = config.ref_num = config.out_num = 1;
+    config.filter_length = 4;
+    config.sample_rate = 16000;
+    config.caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+    config.mode = AEC_MODE_FD_LOW_COST;
+    config.nlp_level = AEC_NLP_LEVEL_NORMAL;
+    aec_handle_t* handle = aec_create_from_config(&config);
+    if (handle && aec_get_chunksize(handle) != AEC_MIC_SAMPLES) {
+      aec_destroy(handle);
+      return nullptr;
+    }
+    return handle;
+  }
+  double retainedPercent() const {
+    return bargeGate_.micEnergy() ? 100.0 * sqrt(double(bargeGate_.outEnergy()) /
+                                                double(bargeGate_.micEnergy())) : NAN;
+  }
   static int64_t referenceFirstTick(int64_t micEndUs) {
     return (micEndUs - 32000 + int64_t(AEC_REFERENCE_ADVANCE_MS) * 1000) * 48;
   }
@@ -266,7 +317,7 @@ class AecMonitor {
     }
     const int64_t finishedUs = esp_timer_get_time();
     const uint32_t ageMs = uint32_t((finishedUs - mic.endUs) / 1000);
-    const bool triggered = bargeGate_.feed(stats_.outRms, armed, mic.clips, ageMs);
+    const bool triggered = bargeGate_.feed(stats_.micRms, stats_.outRms, armed, mic.clips, ageMs);
     if (triggered) triggerAudioAgeMs_ = ageMs;
     uint32_t elapsed = uint32_t(finishedUs - started);
     if (elapsed > stats_.cpuMaxUs) stats_.cpuMaxUs = elapsed;
@@ -293,5 +344,5 @@ class AecMonitor {
   uint64_t windowMicEnergy_ = 0, windowOutEnergy_ = 0;
   int64_t firstAudioUs_ = 0;
   int32_t dc_ = 0;
-  bool dcReady_ = false, summaryPending_ = false;
+  bool dcReady_ = false, summaryPending_ = false, turnStarted_ = false;
 };

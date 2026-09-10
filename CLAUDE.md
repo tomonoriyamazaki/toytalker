@@ -63,7 +63,7 @@ OpenAI / Google / Gemini / ElevenLabs / FishAudio / Sakura(ずんだもん) / Za
 
 ## ESP32-S3ファーム開発
 
-- AECの開発先は [v0.7](devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)。AEC後のRMS 1,200以上が128ms続くと停止する実験版。AEC自動停止ON、生マイクへのフォールバックは計測のみ。TLSのPSRAM移行とAEC参照待ち・STT補正の修正後、声への停止反応・再生音・再生の連続性は良好との報告。相槌後の本返答待ちに対し `SonioxPreconnect.h` でTLS/WebSocket先行接続をCore 0の専用タスクへ分離し、本文受信との並行化を追加。ソケットの所有権を完了後にloopへ戻す。2026-09-10 13:19には本文開始が大幅に速くなったとの実機報告。16ターン目の `ws_max_block_ms=2`（分離前の別ターンは1,842ms）、確保失敗0。一方、継続会話中に本文が止まる件は未解決で、この画像では `cause=aec_level` による中断を確認。検出した音の由来は未確定。感度1,200 / 128ms、STT・再生音量は維持。検出前・未接続中の音声保持は未実装。[v0.7の試験手順・実機結果・復旧](docs/esp32-v07-aec.md) を参照。
+- AECの開発先は [v0.7](devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)。AEC自動停止ON、生マイクへのフォールバックは計測のみ。TLSのPSRAM移行、AEC参照待ち・STT補正、Soniox先行接続の別タスク化で、声への停止反応・再生音・本文開始速度は改善報告あり（保存点 `dd77e42`）。13:19の無発声での誤検出に対し、RMS 1,200 / 128msに出力/入力RMS比25%以上と飽和後256msの保護を追加。18:26の再生音による停止の疑いを受け、`AEC_RESET_EACH_TURN=true` で、時刻・参照履歴だけでなくAEC本体も毎ターン再作成する比較版を追加した。18:43に「自分の声で停止し、再生音では停止しない」と改善報告。10ターン目の検出→録音29ms、初回送信62ms、AEC欠落・確保失敗0を確認。状態持越しが原因だったとの確定ではなく、本文開始が重いという懸念は残る。画像には初期化・本文開始の時間がなく、`[AEC_RESET] elapsed_us / ready` と要求開始から `first_tts_i2s_ms` までのログで切り分ける。初期化コスト・再学習・長時間の安定性も比較する。検出前・未接続中の音声保持は未実装。[v0.7の試験手順・実機結果・復旧](docs/esp32-v07-aec.md) を参照。
 - [v0.6](devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino) は音量方式の検証版として保持する。AECが合わない場合に大きめの声・再生音量・閾値等を調整する選択肢を残す。現在は自動停止OFF。調整・実機試験・計測結果は [音声介入第一弾](docs/esp32-v06-voice-barge-in.md) を参照。[v0.5](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino) は実機確認済みの安定版として保持する。OTAは保留。
 - ボードはESP32-S3-MINI-1-N4R2（Flash 4MB、quad PSRAM 2MB）。
 - Arduino IDE環境を維持する。ビルド確認にはArduino IDE付属のarduino-cliも利用できる。ユーザーの指示なしにPlatformIO / ESP-IDFへ移行しない。

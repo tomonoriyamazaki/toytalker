@@ -108,32 +108,103 @@ constexpr bool aecBargeRejectsPeaksAndFiresOncePerTurn() {
   AecBargeGate gate;
   // Quiet playback can peak above threshold, but must not trigger on single frames.
   for (int i = 0; i < 20; ++i)
-    if (gate.feed(i % 4 == 0 ? 1900 : 800, true, 0, 125)) return false;
+    if (gate.feed(3000, i % 4 == 0 ? 1900 : 800, true, 0, 125)) return false;
   for (int i = 0; i < 3; ++i)
-    if (gate.feed(AEC_BARGE_RMS, true, 0, 125)) return false;
-  if (!gate.feed(AEC_BARGE_RMS, true, 0, 125) || !gate.fired()) return false;
+    if (gate.feed(3000, AEC_BARGE_RMS, true, 0, 125)) return false;
+  if (!gate.feed(3000, AEC_BARGE_RMS, true, 0, 125) || !gate.fired()) return false;
   for (int i = 0; i < 10; ++i)
-    if (gate.feed(1700, true, 0, 125)) return false;
+    if (gate.feed(3000, 1700, true, 0, 125)) return false;
   gate.reset(); // next turn must be able to interrupt again
   for (int i = 0; i < 3; ++i)
-    if (gate.feed(1700, true, 0, 125)) return false;
-  return gate.feed(1700, true, 0, 125);
+    if (gate.feed(3000, 1700, true, 0, 125)) return false;
+  return gate.feed(3000, 1700, true, 0, 125);
 }
 
 constexpr bool aecBargeBreaksOnInvalidAudio() {
-  for (int invalid = 0; invalid < 4; ++invalid) {
+  for (int invalid = 0; invalid < 3; ++invalid) {
     AecBargeGate gate;
     for (int i = 0; i < 3; ++i)
-      if (gate.feed(2000, true, 0, 125)) return false;
+      if (gate.feed(3000, 2000, true, 0, 125)) return false;
     if (invalid == 0) gate.breakRun(); // missing reference or clock/sequence discontinuity
-    else if (gate.feed(9000, invalid != 1, invalid == 2 ? 1 : 0,
-                       invalid == 3 ? AEC_BARGE_MAX_AGE_MS + 1 : 125)) return false;
+    else if (gate.feed(3000, 9000, invalid != 1, 0,
+                       invalid == 2 ? AEC_BARGE_MAX_AGE_MS + 1 : 125)) return false;
     for (int i = 0; i < 3; ++i)
-      if (gate.feed(2000, true, 0, 125)) return false;
-    if (!gate.feed(2000, true, 0, AEC_BARGE_MAX_AGE_MS)) return false;
+      if (gate.feed(3000, 2000, true, 0, 125)) return false;
+    if (!gate.feed(3000, 2000, true, 0, AEC_BARGE_MAX_AGE_MS)) return false;
   }
   return true;
 }
 
 static_assert(aecBargeRejectsPeaksAndFiresOncePerTurn(), "AEC output requires four continuous frames and resets per turn");
-static_assert(aecBargeBreaksOnInvalidAudio(), "unarmed, clipped, stale or missing audio cannot complete a barge-in hold");
+static_assert(aecBargeBreaksOnInvalidAudio(), "unarmed, stale or missing audio cannot complete a barge-in hold");
+
+constexpr bool aecBargeRejectsStronglyCancelledAudioAndThenAcceptsVoice() {
+  AecBargeGate gate;
+  // Repeat the single observed false-trigger frame as a synthetic window.
+  // The screenshot does not contain the other three real candidate frames.
+  for (int i = 0; i < 12; ++i)
+    if (gate.feed(5822, 1304, true, 0, 82)) return false;
+  if (gate.residualRejects() != 9 || gate.fired()) return false;
+  // All new voice frames must eventually replace the rejected residual window.
+  bool triggered = false;
+  for (int i = 0; i < 4; ++i) triggered |= gate.feed(3000, 2000, true, 0, 82);
+  return triggered && gate.fired();
+}
+
+constexpr bool aecBargeUsesWindowEnergyAndIncludesRatioBoundary() {
+  AecBargeGate gate;
+  for (int i = 0; i < 3; ++i)
+    if (gate.feed(8000, 2000, true, 0, 82)) return false;
+  if (!gate.feed(8000, 2000, true, 0, 82)) return false; // exactly 25% RMS
+  gate.reset();
+  for (int i = 0; i < 8; ++i)
+    if (gate.feed(8000, 1999, true, 0, 82)) return false; // just below
+  gate.reset();
+  if (gate.feed(8000, 1500, true, 0, 82)) return false;
+  for (int i = 0; i < 2; ++i)
+    if (gate.feed(3000, 1500, true, 0, 82)) return false;
+  // One echo-dominant frame does not reject an otherwise eligible whole window.
+  if (!gate.feed(3000, 1500, true, 0, 82)) return false;
+  if (gate.micFrame(0) != 8000 || gate.micFrame(3) != 3000) return false;
+  gate.reset();
+  for (int i = 0; i < 3; ++i)
+    if (gate.feed(32768, 32768, true, 0, 82)) return false;
+  return gate.feed(32768, 32768, true, 0, 82); // 64-bit window energy
+}
+
+constexpr bool aecBargeWaitsForCleanAudioAfterClipping() {
+  AecBargeGate gate;
+  for (int i = 0; i < 3; ++i)
+    if (gate.feed(3000, 2000, true, 0, 82)) return false;
+  if (gate.feed(30000, 20000, true, 1, 82)) return false;
+  for (int i = 0; i < 4; ++i)
+    if (gate.feed(3000, 2000, true, 0, 82)) return false;
+  // Another clipped frame restarts recovery, even during an unarmed interval.
+  if (gate.feed(30000, 20000, false, 1, 82)) return false;
+  gate.breakRun();
+  for (int i = 0; i < 20; ++i)
+    if (gate.feed(3000, 2000, true, 0, AEC_BARGE_MAX_AGE_MS + 1)) return false;
+  constexpr uint32_t cleanFrames = 16000 * AEC_BARGE_CLIP_RECOVERY_MS / 1000 /
+                                   AEC_BARGE_FRAME_SAMPLES;
+  for (uint32_t i = 0; i < cleanFrames; ++i)
+    if (gate.feed(3000, 2000, true, 0, 82)) return false;
+  for (int i = 0; i < 3; ++i)
+    if (gate.feed(3000, 2000, true, 0, 82)) return false;
+  return gate.feed(3000, 2000, true, 0, 82) && gate.clipFrames() == 2 &&
+         gate.recoveryFrames() == cleanFrames + 4;
+}
+
+constexpr bool aecBargeClearsRecoveryAndWindowAtNextTurn() {
+  AecBargeGate gate;
+  gate.feed(30000, 20000, true, 1, 82);
+  gate.reset();
+  for (int i = 0; i < 3; ++i)
+    if (gate.feed(3000, 2000, true, 0, 82)) return false;
+  return gate.feed(3000, 2000, true, 0, 82) && gate.clipFrames() == 0 &&
+         gate.recoveryFrames() == 0 && gate.residualRejects() == 0;
+}
+
+static_assert(aecBargeRejectsStronglyCancelledAudioAndThenAcceptsVoice(), "residual rejection must not latch out later speech");
+static_assert(aecBargeUsesWindowEnergyAndIncludesRatioBoundary(), "relative gate uses one whole window without overflow");
+static_assert(aecBargeWaitsForCleanAudioAfterClipping(), "clipping recovery counts clean fresh samples, not wall time or stale frames");
+static_assert(aecBargeClearsRecoveryAndWindowAtNextTurn(), "recovery and diagnostic state must not leak into another turn");
