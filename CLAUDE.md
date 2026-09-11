@@ -101,10 +101,12 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 ### 起動
 
-ログオン時にタスクスケジューラ (`TTS-AutoStart`) が自動起動。手動起動は不要。
-- スクリプト: `C:\Users\exodj\projects\tts-models\faster-qwen3-tts\scripts\start-tts-service.ps1`
-- APIサーバー + ngrok起動 → URL変更時はLambda環境変数 (`ZAKICORP_TTS_URL`) を5つ自動更新
-- ログ: `scripts\tts-service.log` / トースト通知(BurntToast)
+2026-09-11にタスクスケジューラ (`TTS-AutoStart`) をOS起動30秒後の非対話実行（S4U、通常権限）へ変更。ログオン不要。監視は現在稼働中で、既存API/ngrokの引継ぎと外部ヘルス確認に成功。OS再起動後の音声生成確認は未実施。
+- 実装・登録: `tools/tts-service/supervisor.py` / `tools/tts-service/install.ps1`
+- 実際の配置: `.local/tts-service/`（Git対象外、登録時のコピー）。再適用は保守時間にタスクを停止してから登録する。
+- APIサーバー + ngrokを監視し、プロセス終了後に再起動。モデル準備・公開ヘルス確認後、URL変更時にLambda環境変数 (`ZAKICORP_TTS_URL`) を5つ更新。
+- ログ: `.local/tts-service/logs/`。既存の認証ファイルを参照し、画面通知に依存しない。
+- 元のTTSリポジトリの`setup-tasks.ps1`を実行するとログオン起動に戻る。[適用・検証・復旧手順](docs/tts-boot-recovery.md)を参照。
 
 ### ngrok URL変更時のLambda更新対象
 

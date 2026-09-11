@@ -20,6 +20,8 @@ bundle.js
 
 # Claude Code local settings
 .claude/settings.local.json
+.local/
+tools/tts-service/__pycache__/
 
 # KiCad temporary files
 *_autosave-*
