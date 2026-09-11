@@ -40,6 +40,66 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 
 完了判定には、非対話タスクでの動作確認に加えて、作業保存後にPCを再起動し、ログオンせずスマホでクローン音声の応答を確認する。再起動はこのインストーラーでは実行しない。API/ngrok終了からの復旧の実機試験は音声利用を中断するため、利用していない時間に行う。
 
+## 自動起動しなかったときの手動手順
+
+管理者PowerShellを開く。以下はPCを再起動せず、TTS・ngrokの起動状態を確認・復旧する手順。
+
+### 1. 状態とログを確認する
+
+```powershell
+$ttsRuntime = 'C:\Users\exodj\projects\toytalker\.local\tts-service'
+Get-ScheduledTask -TaskName TTS-AutoStart | Select-Object TaskName, State
+Get-ScheduledTaskInfo -TaskName TTS-AutoStart | Select-Object LastRunTime, LastTaskResult
+Get-Content "$ttsRuntime\logs\supervisor.log" -Tail 30
+```
+
+`Running`は監視プログラムの稼働を示し、音声生成成功そのものを示すわけではない。初回起動前はログファイルがまだ存在しない場合がある。
+
+### 2. タスクを手動で起動する
+
+停止中なら次を実行する。Disabledなら先に有効化する。
+
+```powershell
+Enable-ScheduledTask -TaskName TTS-AutoStart
+Start-ScheduledTask -TaskName TTS-AutoStart
+```
+
+モデルロードを待ち、ログに`api ready`と`Service ready; public health and Lambda URLs verified`が出るか確認する。タスクがすでにRunningの場合は重複実行されないため、この操作では再起動にならない。
+
+### 3. ヘルスと音声を確認する
+
+```powershell
+Invoke-RestMethod 'http://127.0.0.1:8000/health' -TimeoutSec 10
+Invoke-RestMethod 'http://127.0.0.1:4040/api/tunnels' -TimeoutSec 10
+Get-Content "$ttsRuntime\logs\supervisor.log" -Tail 30
+```
+
+8000番への接続失敗はAPI未起動・準備中など、4040番への接続失敗はngrok未起動などの手掛かり。接続できても公開トンネルやAWS更新に失敗することがあるため、監視ログも合わせて見る。最後にスマホでクローン音声の会話を試す。
+
+監視が新しく起動したプロセスの出力は`logs/api.log`と`logs/ngrok.log`。引き継いだ既存プロセスの過去の出力はこれらには保存されない。エラーが続く場合はログを確認し、PC再起動を繰り返さない。
+
+### 4. タスクが使えない場合の一時的な直接起動
+
+タスク自体が実行できない場合は、ログオンしたPowerShellから同じ監視プログラムを直接実行できる。先にタスクを無効化・停止し、二つの監視が同時に動かないようにする。停止時に音声が中断する可能性があるため、会話していないときに行う。
+
+```powershell
+Disable-ScheduledTask -TaskName TTS-AutoStart
+Stop-ScheduledTask -TaskName TTS-AutoStart
+Get-ScheduledTask -TaskName TTS-AutoStart | Select-Object State
+# Runningでなくなったことを確認してから次へ進む
+$ttsConfig = Get-Content "$ttsRuntime\config.json" -Raw | ConvertFrom-Json
+& $ttsConfig.python -u "$ttsRuntime\supervisor.py" --config "$ttsRuntime\config.json"
+```
+
+このコマンドは監視を続けるため終了しない。PowerShellを開いたまま使い、状態確認は別のウィンドウで行う。一時対応を終えるときはCtrl+Cで直接起動した監視を終了させてから、タスクを有効化・起動する。残っているAPI/ngrokは監視が引き継ぐ。
+
+```powershell
+Enable-ScheduledTask -TaskName TTS-AutoStart
+Start-ScheduledTask -TaskName TTS-AutoStart
+```
+
+配置ファイル自体が失われている場合はこの直接起動もできないため、登録手順または以下の元タスクへの復元を使う。プローブには稼働中のTTSが必要なので、完全停止状態でプローブだけを繰り返しても起動はしない。
+
 ## 戻し方
 
 管理者PowerShellで監視タスクを停止し、保存したXMLを再登録する。停止時にタスク配下の子プロセスも終了する可能性があるため、音声利用していない時間に行う。
