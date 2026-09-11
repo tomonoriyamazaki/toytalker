@@ -110,6 +110,8 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 ### ngrok URL変更時のLambda更新対象
 
+Windows更新は自動更新を受け入れる運用。2026-09-12に一時停止を解除し、アクティブ時間を手動で07:00〜翌01:00（時間外01:00〜07:00）へ設定済み。Proへの変更・恒久的な手動更新化は進めない。[Windows更新の設定・調査記録](docs/windows-update-restart-control.md)を参照。
+
 1. `toytalk-stream-handler-lambda` (app TTS)
 2. `toytalk-api-stream-for-esp32-lambda` (ESP32 TTS)
 3. `toytalker-backchannel-for-app-lambda` (app 相槌)
