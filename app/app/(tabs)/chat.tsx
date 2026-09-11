@@ -1013,7 +1013,11 @@ export default function Chat() {
       if (isListening) stopSTT();
     }
 
-    try {
+    // 会話POSTは一過性のネットワーク障害(接続確立失敗)で落ちることがあるため、
+    // 何も受信していなければ新規XHRで最大 MAX_RETRIES 回まで再送する(合計 MAX_RETRIES+1 試行)。
+    const MAX_RETRIES = 2;
+    const RETRY_BACKOFF_MS = [500, 1500];
+    const attempt = (attemptNo: number) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", STREAM_URL, true);
       xhr.setRequestHeader("Content-Type", "application/json");
@@ -1121,10 +1125,30 @@ export default function Chat() {
         if (chunk) processChunk(chunk);
       };
       xhr.onerror = () => {
-        setLog((L) => [...L, `XHR error`]);
+        // 何も受信していない＝接続確立/送信段階の失敗。一過性なら新規XHRで再送する。
+        // 受信開始後の失敗は再送しない(既に再生した音声・表示した文が二重になるため)。
+        const receivedNothing = lastIndex === 0;
+        if (receivedNothing && attemptNo <= MAX_RETRIES) {
+          const wait = RETRY_BACKOFF_MS[attemptNo - 1] ?? 1500;
+          setLog((L) => [...L, `XHR error → retry ${attemptNo}/${MAX_RETRIES} in ${wait}ms`]);
+          setTimeout(() => {
+            try {
+              attempt(attemptNo + 1);
+            } catch (e: any) {
+              setLog((L) => [...L, `Error: ${e?.message ?? e}`]);
+              sendingRef.current = false;
+            }
+          }, wait);
+          return;
+        }
+        setLog((L) => [
+          ...L,
+          receivedNothing ? `XHR error (gave up after ${attemptNo} attempts)` : `XHR error (mid-stream)`,
+        ]);
         sendingRef.current = false;
       };
       xhr.ontimeout = () => {
+        // 30s待った後なので再送しない
         setLog((L) => [...L, `XHR timeout`]);
         sendingRef.current = false;
       };
@@ -1167,8 +1191,12 @@ export default function Chat() {
         request_at: new Date().toISOString(),
         backchannel_fired: backchannelFiredRef.current,
       };
-      console.log("🚀 payload to Lambda:", JSON.stringify(payload, null, 2));
+      console.log("🚀 payload to Lambda:", JSON.stringify(payload, null, 2), attemptNo > 1 ? `(attempt ${attemptNo})` : "");
       xhr.send(JSON.stringify(payload));
+    };
+
+    try {
+      attempt(1);
     } catch (e: any) {
       setLog((L) => [...L, `Error: ${e?.message ?? e}`]);
       sendingRef.current = false;
