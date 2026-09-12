@@ -21,7 +21,14 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 ### TTSプロバイダー
 
 複数プロバイダーをプラガブルに切替可能（DynamoDB `toytalker-voices` で管理）:
-OpenAI / Google / Gemini / ElevenLabs / FishAudio / Sakura(ずんだもん) / ZakiCorp(自前クローンボイス, β版)
+OpenAI / Google / Gemini / ElevenLabs / Cartesia / FishAudio / Sakura(ずんだもん) / ZakiCorp(自前クローンボイス, β版)
+
+Cartesiaの設定・有効化手順は [Cartesia TTS導入](docs/cartesia-tts.md) を参照。
+
+### コスト記録の方針
+
+- 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。相槌はデフォルトON。
+- LLMのツール呼び出しは、外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。無料ツール（デバイス設定変更など）はLLMトークンに含まれるので何もしない。[ツールコスト記録](docs/search-cost-tracking.md) を参照。
 
 ### Lambda一覧
 

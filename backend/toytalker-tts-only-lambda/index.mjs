@@ -4,7 +4,8 @@
 //       アプリの「読み上げ」専用機能のためのLambda。音声はサーバー側に保存しない。
 // 入力: { text, voice_id, owner_id? }
 // 出力: mp3 音声バイナリ（Content-Type: audio/mpeg, ヘッダ X-Audio-Format=mp3。全プロバイダーmp3統一）
-// Env: OPENAI_API_KEY, GOOGLE_API_KEY, ELEVENLABS_API_KEY, FISHAUDIO_API_KEY, SAKURA_API_KEY, ZAKICORP_API_KEY, ZAKICORP_TTS_URL
+// Env: OPENAI_API_KEY, GOOGLE_API_KEY, ELEVENLABS_API_KEY, FISHAUDIO_API_KEY, SAKURA_API_KEY, ZAKICORP_API_KEY, ZAKICORP_TTS_URL,
+//      CARTESIA_API_KEY, CARTESIA_DEFAULT_VOICE_ID (任意: CARTESIA_LANGUAGE 既定 "ja")
 import OpenAI from "openai";
 import { Mp3Encoder } from "@breezystack/lamejs";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -26,6 +27,7 @@ const TTS_TABLE = {
   Google:     { ttsVendor: "google",     ttsModel: "google-tts" },
   Gemini:     { ttsVendor: "gemini",     ttsModel: "gemini-2.5-flash-preview-tts" },
   ElevenLabs: { ttsVendor: "elevenlabs", ttsModel: "eleven_turbo_v2_5" },
+  Cartesia:   { ttsVendor: "cartesia",   ttsModel: "sonic-3.6" },
   FishAudio:  { ttsVendor: "fishaudio",  ttsModel: "fishaudio" },
   Sakura:     { ttsVendor: "sakura",     ttsModel: "sakura" },
   ZakiCorp:   { ttsVendor: "zakicorp",   ttsModel: "zakicorp-tts" },
@@ -38,6 +40,7 @@ function normalizeModelKey(k) {
   if (s.includes("google"))      return "Google";
   if (s.includes("gemini"))      return "Gemini";
   if (s.includes("elevenlabs"))  return "ElevenLabs";
+  if (s.includes("cartesia"))    return "Cartesia";
   if (s.includes("fishaudio") || s.includes("fish")) return "FishAudio";
   if (s.includes("sakura"))      return "Sakura";
   if (s.includes("zakicorp") || s.includes("qwen")) return "ZakiCorp";
@@ -61,7 +64,7 @@ function applyLineBreakPauses(raw) {
 // ===== TTS プロバイダー（toytalk-stream-handler-lambda から流用。base64返却）=====
 
 // 全プロバイダーで出力をmp3に統一する。
-// ネイティブmp3対応(OpenAI/Google/ElevenLabs/FishAudio)は直接mp3を要求し、
+// ネイティブmp3対応(OpenAI/Google/ElevenLabs/Cartesia/FishAudio)は直接mp3を要求し、
 // PCM/WAVのみ(Gemini/ZakiCorp/Sakura)は lamejs でmp3エンコードする。
 const MP3_KBPS = 128;
 
@@ -204,6 +207,26 @@ async function ttsToBase64ElevenLabs(text, { model = "eleven_turbo_v2_5", voiceI
   );
   if (!resp.ok) throw new Error(`ElevenLabs TTS failed: ${resp.status} ${await resp.text()}`);
   // mp3 バイナリをそのまま base64 化
+  return Buffer.from(await resp.arrayBuffer()).toString("base64");
+}
+
+// Cartesia TTS → base64(mp3) ネイティブmp3出力を要求
+const CARTESIA_API_VERSION = "2026-08-14";
+async function ttsToBase64Cartesia(text, { model = "sonic-3.6", voiceId } = {}) {
+  const key = process.env.CARTESIA_API_KEY;
+  if (!key) throw new Error("CARTESIA_API_KEY is not set");
+  const id = voiceId || process.env.CARTESIA_DEFAULT_VOICE_ID;
+  if (!id) throw new Error("Cartesia voice ID is not set (CARTESIA_DEFAULT_VOICE_ID)");
+  const resp = await fetch("https://api.cartesia.ai/tts/bytes", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${key}`, "Cartesia-Version": CARTESIA_API_VERSION, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model_id: model, transcript: text, voice: { id },
+      language: process.env.CARTESIA_LANGUAGE || "ja",
+      output_format: { container: "mp3", sample_rate: 44100, bit_rate: MP3_KBPS * 1000 },
+    }),
+  });
+  if (!resp.ok) throw new Error(`Cartesia TTS failed: ${resp.status} ${await resp.text()}`);
   return Buffer.from(await resp.arrayBuffer()).toString("base64");
 }
 
@@ -433,6 +456,8 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
       b64 = result.b64;
     } else if (cfg.ttsVendor === "elevenlabs") {
       b64 = await ttsToBase64ElevenLabs(ttsText, { model: cfg.ttsModel, voiceId: voice });
+    } else if (cfg.ttsVendor === "cartesia") {
+      b64 = await ttsToBase64Cartesia(ttsText, { model: cfg.ttsModel, voiceId: voice === "default" ? undefined : voice });
     } else if (cfg.ttsVendor === "fishaudio") {
       b64 = await ttsToBase64FishAudio(ttsText, { referenceId: voice });
     } else if (cfg.ttsVendor === "sakura") {

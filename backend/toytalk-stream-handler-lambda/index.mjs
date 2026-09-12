@@ -1,6 +1,7 @@
   // Node.js 18+ / ESM（index.mjs）
   // Handler: index.handler
-  // Env: OPENAI_API_KEY, GOOGLE_API_KEY, ELEVENLABS_API_KEY, FISHAUDIO_API_KEY, ZAKICORP_API_KEY, ZAKICORP_TTS_URL
+  // Env: OPENAI_API_KEY, GOOGLE_API_KEY, ELEVENLABS_API_KEY, FISHAUDIO_API_KEY, ZAKICORP_API_KEY, ZAKICORP_TTS_URL,
+  //      CARTESIA_API_KEY, CARTESIA_DEFAULT_VOICE_ID (任意: CARTESIA_LANGUAGE 既定 "ja")
   import OpenAI from "openai";
   import { createHash } from "node:crypto";
   import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
@@ -37,6 +38,12 @@
       url: item.link ?? "",
     }));
   }
+
+  // 外部の有料APIを呼ぶツールの課金情報。ここに無いツール（デバイス設定変更など）は無料扱いで、
+  // かかるLLMトークンはLLM側に含まれる。単価は toytalker-api-unit-prices の `${provider}#tool` 行。
+  const PAID_TOOLS = {
+    web_search: { provider: "serper", model: "google-search" },
+  };
 
   const WEB_SEARCH_TOOL = {
     name: "web_search",
@@ -115,7 +122,7 @@
     }
   }
 
-  function calcCostJpy({ providerApiType, tokensIn, tokensOut, characters, utf8Bytes, mora, pcmBytes, userMessageChars, usdJpyRate }) {
+  function calcCostJpy({ providerApiType, tokensIn, tokensOut, characters, utf8Bytes, mora, pcmBytes, userMessageChars, requests, usdJpyRate }) {
     const price = cachedPrices?.[providerApiType];
     if (!price) return null;
     const margin = cachedMargin || 1.5;
@@ -155,18 +162,21 @@
       const audioTokens = Math.round(speechSec * (30000 / 3600));
       costUsd += audioTokens * Number(price.unit_price_input);
       costUsd += textTokens * Number(price.unit_price_output);
+    } else if (inputUnit === "requests") {
+      // Web検索(Serper)など回数課金
+      costUsd += (requests ?? 0) * Number(price.unit_price_input);
     }
 
     const costJpy = costUsd * usdJpyRate * margin;
     return { costJpy, usdJpyRate, unitPriceUsd: Number(price.unit_price_input), margin };
   }
 
-  async function addUsage({ ownerId, deviceId, date, apiType, provider, model, costJpy, tokensIn, tokensOut, ttsCharacters, sttCharacters, usdJpyRate, unitPriceUsd, margin }) {
+  async function addUsage({ ownerId, deviceId, date, apiType, provider, model, costJpy, tokensIn, tokensOut, ttsCharacters, sttCharacters, requestCount, usdJpyRate, unitPriceUsd, margin }) {
     if (!costJpy || costJpy <= 0) return;
     const sk = `${date}#${deviceId}#${apiType}`;
     try {
       const addParts = ["cost_jpy :cost", "requests :one"];
-      const vals = { ":cost": costJpy, ":one": 1, ":p": provider, ":m": model, ":r": usdJpyRate ?? 0, ":u": unitPriceUsd ?? 0, ":mg": margin };
+      const vals = { ":cost": costJpy, ":one": requestCount ?? 1, ":p": provider, ":m": model, ":r": usdJpyRate ?? 0, ":u": unitPriceUsd ?? 0, ":mg": margin };
       if (tokensIn)      { addParts.push("tokens_in :tin");       vals[":tin"]  = tokensIn; }
       if (tokensOut)     { addParts.push("tokens_out :tout");     vals[":tout"] = tokensOut; }
       if (ttsCharacters) { addParts.push("tts_characters :ttsc"); vals[":ttsc"] = ttsCharacters; }
@@ -203,6 +213,7 @@
     Google:     { ttsVendor: "google",     ttsModel: "google-tts" },
     Gemini:     { ttsVendor: "gemini",     ttsModel: "gemini-2.5-flash-preview-tts" },
     ElevenLabs: { ttsVendor: "elevenlabs", ttsModel: "eleven_turbo_v2_5" },
+    Cartesia:   { ttsVendor: "cartesia",   ttsModel: "sonic-3.6" },
     FishAudio:  { ttsVendor: "fishaudio",  ttsModel: "fishaudio" },
     Sakura:     { ttsVendor: "sakura",     ttsModel: "sakura" },
     ZakiCorp:   { ttsVendor: "zakicorp",   ttsModel: "zakicorp-tts" },
@@ -458,6 +469,46 @@
     return pcm16ToWavBase64(pcmB64, 24000, 1);
   }
 
+  // Cartesia TTS 共通: /tts/bytes を呼び、要求した形式の音声バイナリをBufferで返す
+  const CARTESIA_API_VERSION = "2026-08-14";
+  async function ttsBytesCartesia(text, { model, voiceId, outputFormat }) {
+    const key = process.env.CARTESIA_API_KEY;
+    if (!key) throw new Error("CARTESIA_API_KEY is not set");
+    const id = voiceId || process.env.CARTESIA_DEFAULT_VOICE_ID;
+    if (!id) throw new Error("Cartesia voice ID is not set (CARTESIA_DEFAULT_VOICE_ID)");
+
+    const resp = await fetch("https://api.cartesia.ai/tts/bytes", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${key}`,
+        "Cartesia-Version": CARTESIA_API_VERSION,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model_id: model,
+        transcript: text,
+        voice: { id },
+        language: process.env.CARTESIA_LANGUAGE || "ja",
+        output_format: outputFormat,
+      }),
+    });
+
+    if (!resp.ok) {
+      const errorText = await resp.text();
+      throw new Error(`Cartesia TTS failed: ${resp.status} ${errorText}`);
+    }
+    return Buffer.from(await resp.arrayBuffer());
+  }
+
+  // Cartesia TTS → base64(WAV)
+  async function ttsToBase64Cartesia(text, { model = "sonic-3.6", voiceId } = {}) {
+    const pcmBuffer = await ttsBytesCartesia(text, {
+      model, voiceId,
+      outputFormat: { container: "raw", encoding: "pcm_s16le", sample_rate: 24000 },
+    });
+    return pcm16ToWavBase64(pcmBuffer.toString("base64"), 24000, 1);
+  }
+
   // Fish Audio TTS → base64(WAV)
   async function ttsToBase64FishAudio(text, { referenceId = "6fdaebea7db042129f03ecb0a57ea7b6" } = {}) {
     const key = process.env.FISHAUDIO_API_KEY;
@@ -502,6 +553,16 @@
     // ElevenLabsのvoiceIdは英数字とハイフンで構成される
     const isElevenLabsVoiceId = typeof cand === "string" && /^[a-zA-Z0-9]{20,}$/.test(cand);
     const voiceId = isElevenLabsVoiceId ? cand : "hMK7c1GPJmptCzI4bQIu"; // デフォルト: Sameno
+    return { model: cfg.ttsModel, voiceId };
+  }
+
+  // Cartesia voice ID 解決
+  function resolveCartesiaTtsFromBody(body, cfg) {
+    const t = body?.tts || {};
+    const cand = t.voiceId || body?.voiceId || body?.voice;
+    // CartesiaのvoiceIdはUUID形式
+    const isCartesiaVoiceId = typeof cand === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(cand);
+    const voiceId = isCartesiaVoiceId ? cand : undefined; // 未指定時は環境変数 CARTESIA_DEFAULT_VOICE_ID を使う
     return { model: cfg.ttsModel, voiceId };
   }
 
@@ -686,6 +747,7 @@
       if (s.includes("google"))      return "Google";
       if (s.includes("gemini"))      return "Gemini";
       if (s.includes("elevenlabs"))  return "ElevenLabs";
+      if (s.includes("cartesia"))    return "Cartesia";
       if (s.includes("fishaudio") || s.includes("fish")) return "FishAudio";
       if (s.includes("sakura"))      return "Sakura";
       if (s.includes("zakicorp") || s.includes("qwen")) return "ZakiCorp";
@@ -722,6 +784,7 @@
     let firstTtsMarked = false;
     let llmTokensIn = 0, llmTokensOut = 0;
     let ttsInputChars = 0;
+    const toolCalls = {};  // ツール名→成功回数。PAID_TOOLSに載っているものだけ課金対象
     let ttsPcmBytes = 0;
     let geminiTtsAudioTokens = 0;
 
@@ -945,6 +1008,11 @@
           if (voice) e.voiceId = voice;
           b64 = await ttsToBase64ElevenLabs(t, e);
           fmt = "wav";
+        } else if (cfg.ttsVendor === "cartesia") {
+          const c = resolveCartesiaTtsFromBody(body, cfg);
+          if (voice && voice !== "default") c.voiceId = voice;
+          b64 = await ttsToBase64Cartesia(t, c);
+          fmt = "wav";
         } else if (cfg.ttsVendor === "fishaudio") {
           const f = resolveFishAudioTtsFromBody(body);
           if (voice) f.referenceId = voice;
@@ -987,6 +1055,7 @@
           if (delta.name === "web_search") {
             try {
               toolResult = await searchWeb(delta.args.query);
+              toolCalls.web_search = (toolCalls.web_search ?? 0) + 1;
               console.log(`[ToolCall] search returned ${toolResult.length} results`);
             } catch (e) {
               console.error(`[ToolCall] search error:`, e);
@@ -1093,6 +1162,19 @@
           }
         }
 
+        // ツール（外部の有料APIを呼ぶものだけ回数課金で記録。無料ツールはLLMトークンに含まれる）
+        const toolUsage = [];
+        let toolCostTotal = 0;
+        for (const [toolName, count] of Object.entries(toolCalls)) {
+          const paid = PAID_TOOLS[toolName];
+          if (!paid || count <= 0) continue;
+          const c = calcCostJpy({ providerApiType: `${paid.provider}#tool`, requests: count, usdJpyRate });
+          if (!c) continue;
+          await addUsage({ ownerId, deviceId, date, apiType: "tool", provider: paid.provider, model: paid.model, costJpy: c.costJpy, requestCount: count, usdJpyRate: c.usdJpyRate, unitPriceUsd: c.unitPriceUsd, margin: c.margin });
+          toolUsage.push({ tool: toolName, provider: paid.provider, requests: count, cost: c.costJpy });
+          toolCostTotal += c.costJpy;
+        }
+
         // ログ保存（計算済みコスト付き）
         await saveLog({
           "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
@@ -1104,13 +1186,15 @@
           llm_tokens_in: llmTokensIn, llm_tokens_out: llmTokensOut,
           tts_provider: cfg.ttsVendor, tts_input_units: ttsInputChars, tts_input_unit_type: "characters",
           stt_provider: null, stt_input_units: null, stt_input_unit_type: null,
+          tool_usage: toolUsage,
           duration_ms: Date.now() - requestAt,
           character_id: characterId ?? "default",
           voice_id: voice,
           cost_stt: sttCost?.costJpy ?? 0,
           cost_llm: llmCost?.costJpy ?? 0,
           cost_tts: ttsCostResult?.costJpy ?? 0,
-          cost_total: (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + (ttsCostResult?.costJpy ?? 0),
+          cost_tool: toolCostTotal,
+          cost_total: (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + (ttsCostResult?.costJpy ?? 0) + toolCostTotal,
         });
       }
     } catch (err) {

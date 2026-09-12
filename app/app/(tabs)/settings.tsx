@@ -174,14 +174,15 @@ export default function Settings() {
     return `${y}年${parseInt(m)}月`;
   };
 
-  const API_LABELS: Record<string, string> = { llm: "LLM（言語モデル）", tts: "TTS（音声合成）", stt: "STT（音声認識）" };
+  const API_LABELS: Record<string, string> = { llm: "LLM（言語モデル）", tts: "TTS（音声合成）", stt: "STT（音声認識）", tool: "ツール（外部API）" };
+  const API_TYPES = ["stt", "llm", "tts", "tool"];
 
   const CHART_COLORS: Record<string, string> = {
-    stt: "#34C759", llm: "#007AFF", tts: "#FF9500",
+    stt: "#34C759", llm: "#007AFF", tts: "#FF9500", tool: "#8E8E93",
     // プロバイダ別の色
     openai: "#10A37F", google: "#4285F4", gemini: "#886FBF",
     anthropic: "#D97706", elevenlabs: "#F472B6", fishaudio: "#6366F1",
-    sakura: "#EC4899", soniox: "#34C759",
+    sakura: "#EC4899", soniox: "#34C759", cartesia: "#0EA5E9", serper: "#8E8E93",
   };
 
   type PieSlice = { label: string; value: number; color: string };
@@ -757,6 +758,13 @@ export default function Settings() {
                       if (!sliceMap[key]) sliceMap[key] = { label: key, value: 0, color: CHART_COLORS[provider] ?? CHART_COLORS.tts };
                       sliceMap[key].value += c.tts.cost;
                     }
+                    for (const t of c.tool?.items ?? []) {
+                      if (!t.cost) continue;
+                      const provider = t.provider ?? "tool";
+                      const key = `ツール(${provider})`;
+                      if (!sliceMap[key]) sliceMap[key] = { label: key, value: 0, color: CHART_COLORS[provider] ?? CHART_COLORS.tool };
+                      sliceMap[key].value += t.cost;
+                    }
                   }
                   const slices = Object.values(sliceMap).sort((a, b) => b.value - a.value);
                   return <PieChart slices={slices} />;
@@ -801,6 +809,13 @@ export default function Settings() {
                             <Text style={s.detailCostValue}>{formatCost(c.tts.cost)} 円</Text>
                           </View>
                         )}
+                        {(c.tool?.items ?? []).map((t: any, j: number) => (
+                          <View key={j} style={s.detailCostRow}>
+                            <Text style={s.detailCostLabel}>ツール</Text>
+                            <Text style={s.detailCostSub}>{t.provider} / {t.tool} {t.requests}回</Text>
+                            <Text style={s.detailCostValue}>{formatCost(t.cost)} 円</Text>
+                          </View>
+                        ))}
                       </View>
                       <View style={s.detailTotalRow}>
                         <Text style={s.detailTotalLabel}>合計</Text>
@@ -873,7 +888,7 @@ export default function Settings() {
                           </View>
                           {isExpanded && (
                             <View style={s.usageDailyList}>
-                              {["stt", "llm", "tts"].map((t) =>
+                              {API_TYPES.map((t) =>
                                 info[t] ? (
                                   <View key={t} style={s.usageDailyRow}>
                                     <Text style={s.usageDailyDate}>{API_LABELS[t] ?? t}</Text>
@@ -892,7 +907,7 @@ export default function Settings() {
                 {/* 日別グラフ */}
                 {(() => {
                   const dailyTotals: Record<string, number> = {};
-                  for (const apiType of ["stt", "llm", "tts"]) {
+                  for (const apiType of API_TYPES) {
                     for (const d of byApi[apiType]?.daily ?? []) {
                       dailyTotals[d.date] = (dailyTotals[d.date] ?? 0) + (d.cost ?? 0);
                     }
@@ -922,7 +937,7 @@ export default function Settings() {
 
                 {/* API種別カード */}
                 <Text style={[s.sectionTitle, { marginTop: 16 }]}>API種別</Text>
-                {["stt", "llm", "tts"].map((apiType) => {
+                {API_TYPES.map((apiType) => {
                   const data = byApi[apiType];
                   if (!data) return null;
                   const isExpanded = expandedApi === apiType;

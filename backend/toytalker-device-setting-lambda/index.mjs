@@ -517,11 +517,15 @@ export const handler = async (event) => {
           lastUserContent = item.content;
         } else if (item.role === "assistant") {
           const hasCost = item.cost_total != null;
-          let stt, llm, tts, total;
+          let stt, llm, tts, tool = null, total;
           if (hasCost) {
             stt = { cost: item.cost_stt ?? 0, characters: lastUserContent?.length ?? 0 };
             llm = { cost: item.cost_llm ?? 0, tokens_in: item.llm_tokens_in, tokens_out: item.llm_tokens_out, provider: item.llm_provider, model: item.llm_model };
             tts = { cost: item.cost_tts ?? 0, characters: item.tts_input_units, provider: item.tts_provider, model: item.tts_provider };
+            // ツール（外部有料API。2026-09-12以降のログのみ。無ければnull）
+            if (Array.isArray(item.tool_usage) && item.tool_usage.length > 0) {
+              tool = { cost: item.cost_tool ?? 0, items: item.tool_usage };
+            }
             total = item.cost_total;
           } else {
             const costs = calcCostFromLog(item, lastUserContent, usdJpyRate);
@@ -535,7 +539,7 @@ export const handler = async (event) => {
             user_message: lastUserContent,
             assistant_message: item.content,
             character_id: item.character_id ?? "default",
-            stt, llm, tts, total,
+            stt, llm, tts, tool, total,
           });
           lastUserContent = null;
         }

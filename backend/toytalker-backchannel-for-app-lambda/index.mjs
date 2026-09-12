@@ -1,6 +1,7 @@
 // Node.js 18+ / ESM（index.mjs）
 // Handler: index.handler
-// Env: ANTHROPIC_API_KEY, SAKURA_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, FISHAUDIO_API_KEY, ZAKICORP_API_KEY, ZAKICORP_TTS_URL
+// Env: ANTHROPIC_API_KEY, SAKURA_API_KEY, GOOGLE_API_KEY, OPENAI_API_KEY, ELEVENLABS_API_KEY, FISHAUDIO_API_KEY, ZAKICORP_API_KEY, ZAKICORP_TTS_URL,
+//      CARTESIA_API_KEY, CARTESIA_DEFAULT_VOICE_ID (任意: CARTESIA_LANGUAGE 既定 "ja")
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
@@ -28,6 +29,7 @@ const TTS_TABLE = {
   Google:     { ttsVendor: "google",     ttsModel: "google" },
   Gemini:     { ttsVendor: "gemini",     ttsModel: "gemini-2.5-flash-preview-tts" },
   ElevenLabs: { ttsVendor: "elevenlabs", ttsModel: "eleven_turbo_v2_5" },
+  Cartesia:   { ttsVendor: "cartesia",   ttsModel: "sonic-3.6" },
   FishAudio:  { ttsVendor: "fishaudio",  ttsModel: "fishaudio" },
   Sakura:     { ttsVendor: "sakura",     ttsModel: "sakura" },
   ZakiCorp:   { ttsVendor: "zakicorp",   ttsModel: "zakicorp-tts" },
@@ -41,6 +43,7 @@ function normalizeModelKey(k) {
   if (s.includes("google"))      return "Google";
   if (s.includes("gemini"))      return "Gemini";
   if (s.includes("elevenlabs"))  return "ElevenLabs";
+  if (s.includes("cartesia"))    return "Cartesia";
   if (s.includes("fishaudio") || s.includes("fish")) return "FishAudio";
   if (s.includes("sakura"))      return "Sakura";
   if (s.includes("zakicorp") || s.includes("qwen")) return "ZakiCorp";
@@ -245,6 +248,27 @@ async function ttsToBase64ElevenLabs(text, { model = "eleven_turbo_v2_5", voiceI
   return pcm16ToWavBase64(pcmBuf.toString("base64"), 24000, 1);
 }
 
+// Cartesia TTS → base64(WAV)
+const CARTESIA_API_VERSION = "2026-08-14";
+async function ttsToBase64Cartesia(text, { model = "sonic-3.6", voiceId } = {}) {
+  const key = process.env.CARTESIA_API_KEY;
+  if (!key) throw new Error("CARTESIA_API_KEY is not set");
+  const id = voiceId || process.env.CARTESIA_DEFAULT_VOICE_ID;
+  if (!id) throw new Error("Cartesia voice ID is not set (CARTESIA_DEFAULT_VOICE_ID)");
+  const resp = await fetch("https://api.cartesia.ai/tts/bytes", {
+    method: "POST",
+    headers: { "Authorization": `Bearer ${key}`, "Cartesia-Version": CARTESIA_API_VERSION, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model_id: model, transcript: text, voice: { id },
+      language: process.env.CARTESIA_LANGUAGE || "ja",
+      output_format: { container: "raw", encoding: "pcm_s16le", sample_rate: 24000 },
+    }),
+  });
+  if (!resp.ok) throw new Error(`Cartesia TTS failed: ${resp.status} ${await resp.text()}`);
+  const pcmBuf = Buffer.from(await resp.arrayBuffer());
+  return pcm16ToWavBase64(pcmBuf.toString("base64"), 24000, 1);
+}
+
 async function ttsToBase64FishAudio(text, { referenceId = "e58b0d7efca34eb38d5c4985e9e1e3e6" } = {}) {
   const key = process.env.FISHAUDIO_API_KEY;
   if (!key) throw new Error("FISHAUDIO_API_KEY is not set");
@@ -290,6 +314,7 @@ async function generateTTS(text, vendor, voice) {
     case "google":     return ttsToBase64Google(text, { voiceName: voice });
     case "gemini":     return ttsToBase64Gemini(text, { voiceName: voice || "Kore" });
     case "elevenlabs": return ttsToBase64ElevenLabs(text, { voiceId: voice });
+    case "cartesia":   return ttsToBase64Cartesia(text, { voiceId: voice });
     case "fishaudio":  return ttsToBase64FishAudio(text, { referenceId: voice });
     case "zakicorp":   return ttsToBase64ZakiCorp(text, { speaker: voice || "vivian" });
     default:           return ttsToBase64Sakura(text, { model: "zundamon" });
