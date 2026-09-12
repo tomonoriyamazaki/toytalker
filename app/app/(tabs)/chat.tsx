@@ -25,7 +25,6 @@ import Voice, {
   SpeechPartialResultsEvent,
 } from "@react-native-voice/voice";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { Menu, Provider } from "react-native-paper";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
@@ -1125,17 +1124,18 @@ export default function Chat() {
         if (chunk) processChunk(chunk);
       };
       xhr.onerror = () => {
-        // 何も受信していない＝接続確立/送信段階の失敗。一過性なら新規XHRで再送する。
+        // 未受信でもサーバーが処理済みの可能性はある。再送は最大2回に制限する。
         // 受信開始後の失敗は再送しない(既に再生した音声・表示した文が二重になるため)。
         const receivedNothing = lastIndex === 0;
         if (receivedNothing && attemptNo <= MAX_RETRIES) {
           const wait = RETRY_BACKOFF_MS[attemptNo - 1] ?? 1500;
-          setLog((L) => [...L, `XHR error → retry ${attemptNo}/${MAX_RETRIES} in ${wait}ms`]);
+          setLog((L) => [...L, `通信に失敗しました。接続を再試行しています（${attemptNo}/${MAX_RETRIES}）…`]);
           setTimeout(() => {
             try {
               attempt(attemptNo + 1);
             } catch (e: any) {
-              setLog((L) => [...L, `Error: ${e?.message ?? e}`]);
+              console.warn("Conversation retry failed:", e);
+              setLog((L) => [...L, "会話の送信処理に失敗しました。もう一度お試しください。"]);
               sendingRef.current = false;
             }
           }, wait);
@@ -1143,13 +1143,15 @@ export default function Chat() {
         }
         setLog((L) => [
           ...L,
-          receivedNothing ? `XHR error (gave up after ${attemptNo} attempts)` : `XHR error (mid-stream)`,
+          receivedNothing
+            ? "再試行しましたが、通信に失敗しました。通信環境を確認して、もう一度お試しください。"
+            : "応答の受信が途中で切れました。通信環境を確認して、もう一度お話しください。",
         ]);
         sendingRef.current = false;
       };
       xhr.ontimeout = () => {
         // 30s待った後なので再送しない
-        setLog((L) => [...L, `XHR timeout`]);
+        setLog((L) => [...L, "応答の受信が30秒以内に完了しなかったため、通信を終了しました。もう一度お試しください。"]);
         sendingRef.current = false;
       };
 
@@ -1198,7 +1200,8 @@ export default function Chat() {
     try {
       attempt(1);
     } catch (e: any) {
-      setLog((L) => [...L, `Error: ${e?.message ?? e}`]);
+      console.warn("Conversation send failed:", e);
+      setLog((L) => [...L, "会話の送信処理に失敗しました。もう一度お試しください。"]);
       sendingRef.current = false;
     }
   };
