@@ -8,6 +8,7 @@
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
+#include "StreamCompletion.h"
 #include <driver/i2s_std.h>
 #include <esp_wifi.h>
 #include <esp_mac.h>  // esp_read_mac (BLEアドバタイズ名用)
@@ -118,7 +119,7 @@ BargeInFlag bargeInRequested;
 volatile bool sonioxPreconnectPending = false;  // 再生中の先行WS接続が進行中か
 
 void IRAM_ATTR onBargeInButton() {
-  bargeInRequested.setFromISR();
+  bargeInRequested.setFromISR(PIN_AMP_SD);
 }
 
 // 確保失敗フックでは固定領域への記録だけ行う。Serialやheap APIを呼ばない。
@@ -1055,6 +1056,7 @@ bool setupI2SPlay() {
 
 // ==== HTTP chunked body: one decoder per response ====
 static ChunkedBodyDecoder lambdaBody;
+static StreamCompletion lambdaCompletion;
 struct LambdaReadRuntime {
   uint32_t now() { return millis(); }
   void idle() { delay(1); }
@@ -1140,6 +1142,16 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
 
   String json = String(jsonBuf);
   Serial.printf("[META] %s\n", jsonBuf);
+
+  // Parse the top-level event, not text that happens to contain an event name.
+  JsonDocument eventFilter;
+  eventFilter["event"] = true;
+  JsonDocument eventDoc;
+  if (deserializeJson(eventDoc, jsonBuf, length, DeserializationOption::Filter(eventFilter))) {
+    free(jsonBuf);
+    return false;
+  }
+  lambdaCompletion.metadata(eventDoc["event"] | "");
 
   if (json.indexOf("\"event\":\"segment\"") >= 0) {
     int p = json.indexOf("\"text\":\"");
@@ -1382,7 +1394,7 @@ bool processPCM(WiFiClientSecure& client, uint32_t length) {
   // アンプON（PWMなし）
   if (!ampOn) {
     pinMode(PIN_AMP_SD, OUTPUT);
-    digitalWrite(PIN_AMP_SD, HIGH);
+    if (!bargeInRequested.enableAmp(PIN_AMP_SD)) return false;
     delay(50);
     ampOn = true;
   }
@@ -1739,7 +1751,7 @@ void sendToLambdaAndPlay(const String& text) {
   responseText = "";
   ttsAudioQueued = false;
   ttsGapPending = false;
-  bargeInRequested = false;
+  bargeInRequested.beginTurn();
 
   turnEndTiming = TurnEndTiming{};
   dmaTailTiming = DmaTailTiming{};
@@ -1846,9 +1858,8 @@ void sendToLambdaAndPlay(const String& text) {
   // アンプON（PWMなし）
   if (!ampOn) {
     pinMode(PIN_AMP_SD, OUTPUT);
-    digitalWrite(PIN_AMP_SD, HIGH);
-    delay(50);
-    ampOn = true;
+    ampOn = bargeInRequested.enableAmp(PIN_AMP_SD);
+    if (ampOn) delay(50);
     Serial.printf("⏱️ [%lums] Amp ready\n", millis() - t0);
   }
 
@@ -1891,6 +1902,7 @@ void sendToLambdaAndPlay(const String& text) {
   if (headersOk) Serial.println("📨 BINARY STREAM START (Chunked)");
 
   lambdaBody.reset();
+  lambdaCompletion.reset();
 
   setLEDMode(LED_BLINKING);
 
@@ -1902,6 +1914,10 @@ void sendToLambdaAndPlay(const String& text) {
       break;
     }
     if (read != 5) {
+      if (lambdaCompletion.canDrainAfterClose(read, lambdaBody.error(), bargeInRequested)) {
+        Serial.println("[STREAM_END] done=1 http_complete=0 reason=connection_closed; draining audio");
+        break;
+      }
       if (!bargeInRequested) Serial.printf("[STREAM_ERROR] binary header incomplete: %u/5 bytes\n", (unsigned)read);
       responseFailed = !bargeInRequested;
       break;
@@ -1928,6 +1944,7 @@ void sendToLambdaAndPlay(const String& text) {
         break;
       }
     } else if (type == 0x02) {
+      lambdaCompletion.pcmStarted();
       if (!processPCM(client, length)) {
         responseFailed = !bargeInRequested;
         break;
@@ -1936,6 +1953,8 @@ void sendToLambdaAndPlay(const String& text) {
   }
 
   unsigned long tEnd = millis();
+  Serial.printf("[STREAM_END] done=%d server_error=%d http_complete=%d failed=%d\n",
+                lambdaCompletion.doneSeen(), lambdaCompletion.errorSeen(), lambdaBody.done(), responseFailed);
   turnEndTiming.pending = true;
   turnEndTiming.receiveEndMs = tEnd;
   turnEndTiming.interrupted = bargeInRequested || responseFailed;
@@ -2214,6 +2233,13 @@ void startSTTRecording() {
     ws.enableHeartbeat(15000, 3000, 2);
   }
   isRecording = true;
+  const auto buttonTiming = bargeInRequested.buttonTiming();
+  if (buttonTiming.pressedUs != 0) {
+    const int64_t recordUs = esp_timer_get_time();
+    Serial.printf("[BUTTON] irq_to_mute_us=%lu irq_to_record_ms=%lu ws_ready=%d\n",
+                  (unsigned long)(buttonTiming.mutedUs - buttonTiming.pressedUs),
+                  (unsigned long)((recordUs - buttonTiming.pressedUs) / 1000), sonioxIsConnected());
+  }
   if (voiceTriggerMs.load() != 0) {
     Serial.printf("[VOICE] trigger_to_record_ms=%lu ws_ready=%d\n",
                   (unsigned long)(millis() - voiceTriggerMs.load()), sonioxIsConnected());
@@ -2349,10 +2375,18 @@ void startNormalOperation() {
 // ==== SETUP ====
 void setup() {
   Serial.begin(921600);
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  // Debug output must not stall audio/STT when the PC stops reading USB.
+  // Drop bytes on a full queue or contended lock instead of waiting.
+  Serial.setTxTimeoutMs(0);
+#endif
   delay(100);
   Serial.println(AEC_BARGE_DETECT_ONLY ? "\n🚀 ToyTalker Mini v0.7 (AEC evaluation / detect only)"
                                      : "\n🚀 ToyTalker Mini v0.7 (AEC barge-in trial)");
   Serial.printf("[BUILD] arduino=%s idf=%s\n", ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
+#if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
+  Serial.println("[SERIAL] hwcdc_tx_timeout_ms=0 drop_on_backpressure=1");
+#endif
   esp_err_t allocHookResult = heap_caps_register_failed_alloc_callback(recordAllocationFailure);
   Serial.printf("[ALLOC_FAIL] hook_install_err=%d\n", allocHookResult);
   Serial.printf("[VOICE_TEST] mode=%s rx_dma_count=%d rx_dma_frames=%d raw_detect_only=%d aec_detect_only=%d\n",
@@ -2381,10 +2415,10 @@ void setup() {
 
   // ボタン初期化 + barge-in用割り込み
   pinMode(PIN_BUTTON, INPUT_PULLUP);
-  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), onBargeInButton, FALLING);
 
   pinMode(PIN_AMP_SD, OUTPUT);
   digitalWrite(PIN_AMP_SD, LOW);
+  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), onBargeInButton, FALLING);
 
   if (!tls_memory::init()) {
     Serial.println("[TLS_MEM] startup stopped before network connections");
@@ -2540,6 +2574,11 @@ void loop() {
       if (ok) {
         if (samples > 0) {
           const uint32_t sentAtMs = millis();
+          const auto buttonTiming = bargeInRequested.buttonTiming(true);
+          if (buttonTiming.pressedUs != 0) {
+            Serial.printf("[BUTTON] irq_to_first_send_ms=%lu\n",
+                          (unsigned long)((esp_timer_get_time() - buttonTiming.pressedUs) / 1000));
+          }
           const uint32_t triggerAtMs = voiceTriggerMs.exchange(0);
           if (triggerAtMs != 0) {
             Serial.printf("[VOICE] trigger_to_first_send_ms=%lu\n", (unsigned long)(sentAtMs - triggerAtMs));

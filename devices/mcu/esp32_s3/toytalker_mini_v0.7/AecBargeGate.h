@@ -3,7 +3,7 @@
 
 // Experimental values from the 2026-09-10 quiet / speaking comparison.
 // These guards reduce false stops; they are not a speech classifier.
-constexpr bool AEC_BARGE_DETECT_ONLY = false;
+constexpr bool AEC_BARGE_DETECT_ONLY = false; // Cartesia-based tuning: voice interruption enabled.
 constexpr uint32_t AEC_BARGE_RMS = 1200;
 constexpr uint32_t AEC_BARGE_FRAME_SAMPLES = 512;
 constexpr uint32_t AEC_BARGE_HOLD_MS = 128;

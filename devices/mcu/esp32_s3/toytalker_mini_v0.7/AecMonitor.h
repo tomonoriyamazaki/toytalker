@@ -8,11 +8,22 @@
 #include <new>
 #include "AecCapture.h"
 #include "AecSignal.h"
+#include "AecMicHeadroom.h"
+#include "AecGateEnergy.h"
 #include "AecBargeGate.h"
 #include "VoiceLevelMeter.h"
 
 constexpr bool AEC_ENABLED = true;  // false: new I2S driver + original level monitor, for comparison
 constexpr bool AEC_RESET_EACH_TURN = true; // compare against the old retained filter state
+// Build the comparison with -DTOYTALKER_AEC_NLP_LEVEL=1 (AGGR).
+// Default remains NORMAL; only this parameter differs between the A/B builds.
+#ifndef TOYTALKER_AEC_NLP_LEVEL
+#define TOYTALKER_AEC_NLP_LEVEL 0
+#endif
+static_assert(TOYTALKER_AEC_NLP_LEVEL == 0 || TOYTALKER_AEC_NLP_LEVEL == 1,
+              "AEC comparison supports NORMAL(0) and AGGR(1) only");
+constexpr aec_nlp_level_t AEC_NLP_LEVEL = static_cast<aec_nlp_level_t>(TOYTALKER_AEC_NLP_LEVEL);
+constexpr const char* AEC_NLP_LABEL = TOYTALKER_AEC_NLP_LEVEL == 0 ? "NORMAL" : "AGGR";
 constexpr uint32_t AEC_MIC_SAMPLES = 512;   // FD API: 32 ms at 16 kHz
 static_assert(AEC_MIC_SAMPLES == AEC_BARGE_FRAME_SAMPLES, "barge-in hold must match AEC frame size");
 constexpr uint32_t AEC_TX_SAMPLES = 1023;   // 4092-byte stereo DMA buffer at 24 kHz
@@ -25,11 +36,14 @@ constexpr int32_t AEC_REFERENCE_ADVANCE_MS = 16; // causal margin for filter, no
 class AecMonitor {
   struct RxBlock { int64_t endUs; uint32_t sequence; int32_t data[AEC_MIC_SAMPLES]; };
   struct TxBlock { int64_t endUs; uint32_t sequence; int16_t data[AEC_TX_SAMPLES]; };
-  struct MicBlock { int64_t endUs; uint32_t sequence, clips; bool continuous; int16_t data[AEC_MIC_SAMPLES]; };
+  struct MicBlock { int64_t endUs; uint32_t sequence, clips, preScaleClips; bool continuous; int16_t data[AEC_MIC_SAMPLES]; };
   struct Pending { MicBlock blocks[8]; uint32_t head = 0, tail = 0; };
   using History = aec_signal::ReferenceHistory<AEC_TX_SAMPLES, 16>;
   struct Stats {
     uint32_t paired = 0, missing = 0, pendingDrops = 0, clockResets = 0, clips = 0;
+    uint32_t preScaleClips = 0;
+    uint32_t gateMicRms = 0, gateOutRms = 0, dcRejectedFrames = 0;
+    int32_t micMean = 0, outMean = 0;
     uint32_t cpuMaxUs = 0, slowFrames = 0, micRms = 0, refRms = 0, outRms = 0;
     uint64_t micEnergy = 0, outEnergy = 0;
   };
@@ -52,8 +66,8 @@ class AecMonitor {
       release();
       return false;
     }
-    Serial.printf("[AEC] ready=1 mode=FD_LOW_COST nlp=NORMAL frame=%lu max_ref_wait_ms=%lu ref_advance_ms=%ld detect_only=%d barge_rms=%lu barge_hold_ms=%lu min_retained_pct=%lu clip_recovery_ms=%lu reset_each_turn=%d\n",
-                  (unsigned long)AEC_MIC_SAMPLES, (unsigned long)AEC_MIC_HOLD_MS, (long)AEC_REFERENCE_ADVANCE_MS,
+    Serial.printf("[AEC] ready=1 mode=FD_LOW_COST nlp=%s frame=%lu max_ref_wait_ms=%lu ref_advance_ms=%ld detect_only=%d barge_rms=%lu barge_hold_ms=%lu min_retained_pct=%lu clip_recovery_ms=%lu reset_each_turn=%d\n",
+                  AEC_NLP_LABEL, (unsigned long)AEC_MIC_SAMPLES, (unsigned long)AEC_MIC_HOLD_MS, (long)AEC_REFERENCE_ADVANCE_MS,
                   AEC_BARGE_DETECT_ONLY, (unsigned long)AEC_BARGE_RMS, (unsigned long)AEC_BARGE_HOLD_MS,
                   (unsigned long)AEC_BARGE_MIN_RETAINED_PERCENT, (unsigned long)AEC_BARGE_CLIP_RECOVERY_MS,
                   AEC_RESET_EACH_TURN);
@@ -109,8 +123,10 @@ class AecMonitor {
     generation_ = generation; lastLog_ = millis(); summaryPending_ = false;
     windowMicEnergy_ = windowOutEnergy_ = 0; windowMicMax_ = windowOutMax_ = 0;
     capture_.start();
-    Serial.printf("[AEC] monitor start generation=%lu detect_only=%d max_ref_wait_ms=%lu barge_rms=%lu barge_hold_ms=%lu\n",
-                  (unsigned long)generation_, AEC_BARGE_DETECT_ONLY, (unsigned long)AEC_MIC_HOLD_MS,
+    Serial.printf("[AEC_INPUT] divisor=%ld gate_rms_multiplier=%ld\n",
+                  (long)aec_mic::divisor, (long)aec_mic::divisor);
+    Serial.printf("[AEC] monitor start generation=%lu nlp=%s detect_only=%d max_ref_wait_ms=%lu barge_rms=%lu barge_hold_ms=%lu\n",
+                  (unsigned long)generation_, AEC_NLP_LABEL, AEC_BARGE_DETECT_ONLY, (unsigned long)AEC_MIC_HOLD_MS,
                   (unsigned long)AEC_BARGE_RMS, (unsigned long)AEC_BARGE_HOLD_MS);
   }
   void stopCapture() { capture_.stop(); }
@@ -176,6 +192,7 @@ class AecMonitor {
     return triggered;
   }
   void printTrigger(uint32_t atMs) {
+    printGateAc();
     Serial.printf("[AEC_TRIGGER] generation=%lu mic=%lu ref=%lu out=%lu threshold=%lu hold_ms=%lu audio_age_ms=%lu detect_only=%d at_ms=%lu window_retained_pct=%.1f\n",
                   (unsigned long)generation_, (unsigned long)stats_.micRms, (unsigned long)stats_.refRms,
                   (unsigned long)stats_.outRms, (unsigned long)AEC_BARGE_RMS, (unsigned long)AEC_BARGE_HOLD_MS,
@@ -185,6 +202,9 @@ class AecMonitor {
   void printSummary() {
     if (!summaryPending_) return;
     summaryPending_ = false;
+    printGateAc();
+    Serial.printf("[AEC_INPUT] divisor=%ld pre_scale_clips=%lu actual_clips=%lu\n",
+                  (long)aec_mic::divisor, (unsigned long)stats_.preScaleClips, (unsigned long)stats_.clips);
     Serial.printf("[AEC_LEVEL] generation=%lu mic_peak=%lu mic_sustained=%lu out_peak=%lu out_sustained=%lu hold_ms=128 windows=%lu reduction_db=%.1f detect_only=%d gate_fired=%d\n",
                   (unsigned long)generation_, (unsigned long)micLevels_.peakRms(),
                   (unsigned long)micLevels_.sustainedRms(), (unsigned long)outLevels_.peakRms(),
@@ -210,6 +230,12 @@ class AecMonitor {
     }
   }
  private:
+  void printGateAc() const {
+    Serial.printf("[AEC_GATE_AC] mic_total=%lu out_total=%lu mic_ac=%lu out_ac=%lu mic_mean=%ld out_mean=%ld dc_rejected_frames=%lu\n",
+                  (unsigned long)stats_.micRms, (unsigned long)stats_.outRms,
+                  (unsigned long)stats_.gateMicRms, (unsigned long)stats_.gateOutRms,
+                  (long)stats_.micMean, (long)stats_.outMean, (unsigned long)stats_.dcRejectedFrames);
+  }
   bool storageReady() const {
     return history_ && pending_ && buffers_[0] && buffers_[1] && buffers_[2];
   }
@@ -220,7 +246,7 @@ class AecMonitor {
     config.sample_rate = 16000;
     config.caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
     config.mode = AEC_MODE_FD_LOW_COST;
-    config.nlp_level = AEC_NLP_LEVEL_NORMAL;
+    config.nlp_level = AEC_NLP_LEVEL;
     aec_handle_t* handle = aec_create_from_config(&config);
     if (handle && aec_get_chunksize(handle) != AEC_MIC_SAMPLES) {
       aec_destroy(handle);
@@ -272,15 +298,16 @@ class AecMonitor {
       }
       if (pending_->head - pending_->tail >= 8) { ++pending_->tail; ++stats_.pendingDrops; }
       auto& dest = pending_->blocks[pending_->head % 8];
-      dest.endUs = rxClock_.endUs(); dest.sequence = b->sequence; dest.clips = 0;
+      dest.endUs = rxClock_.endUs(); dest.sequence = b->sequence; dest.clips = dest.preScaleClips = 0;
       dest.continuous = continuous;
       for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) {
         int32_t value = b->data[i] >> 14;
         if (!dcReady_) { dc_ = value; dcReady_ = true; }
         dc_ += (value - dc_) >> 10;
         int32_t centered = value - dc_;
-        if (centered > 32767 || centered < -32768) ++dest.clips;
-        dest.data[i] = aec_signal::saturate(centered);
+        if (aec_mic::previouslyClipped(centered)) ++dest.preScaleClips;
+        if (aec_mic::clipped(centered)) ++dest.clips;
+        dest.data[i] = aec_mic::sample(centered);
       }
       ++pending_->head; rx_.pop();
     }
@@ -302,7 +329,17 @@ class AecMonitor {
     if (firstAudioUs_) aec_process(handle_, in, ref, out);
     else for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) out[i] = in[i];
     uint64_t mi = energy(in), re = energy(ref), ou = energy(out);
-    stats_.micRms = rms(mi); stats_.refRms = rms(re); stats_.outRms = rms(ou);
+    stats_.micRms = aec_mic::gateRms(rms(mi)); stats_.refRms = rms(re);
+    stats_.outRms = aec_mic::gateRms(rms(ou));
+    aec_gate_energy::Moments micMoments, outMoments;
+    for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) {
+      micMoments.feed(in[i]); outMoments.feed(out[i]);
+    }
+    stats_.gateMicRms = aec_mic::gateRms(rms(micMoments.acEnergy()));
+    stats_.gateOutRms = aec_mic::gateRms(rms(outMoments.acEnergy()));
+    stats_.micMean = micMoments.mean() * aec_mic::divisor;
+    stats_.outMean = outMoments.mean() * aec_mic::divisor;
+    stats_.preScaleClips += mic.preScaleClips;
     ++stats_.paired; stats_.clips += mic.clips;
     bool armed = firstAudioUs_ && mic.endUs - 32000 >= firstAudioUs_ + int64_t(AEC_BARGE_WARMUP_MS) * 1000;
     micLevels_.feed(stats_.micRms, armed); outLevels_.feed(stats_.outRms, armed);
@@ -317,7 +354,9 @@ class AecMonitor {
     }
     const int64_t finishedUs = esp_timer_get_time();
     const uint32_t ageMs = uint32_t((finishedUs - mic.endUs) / 1000);
-    const bool triggered = bargeGate_.feed(stats_.micRms, stats_.outRms, armed, mic.clips, ageMs);
+    if (armed && stats_.outRms >= AEC_BARGE_RMS && stats_.gateOutRms < AEC_BARGE_RMS)
+      ++stats_.dcRejectedFrames;
+    const bool triggered = bargeGate_.feed(stats_.gateMicRms, stats_.gateOutRms, armed, mic.clips, ageMs);
     if (triggered) triggerAudioAgeMs_ = ageMs;
     uint32_t elapsed = uint32_t(finishedUs - started);
     if (elapsed > stats_.cpuMaxUs) stats_.cpuMaxUs = elapsed;
