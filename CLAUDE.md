@@ -61,6 +61,13 @@ OpenAI / Google / Gemini / ElevenLabs / FishAudio / Sakura(ずんだもん) / Za
 - Lambda関数を修正したら、コミット前にデプロイする。各Lambda配下の `deploy.sh` を実行（例: `cd backend/<lambda-dir> && bash deploy.sh`）。
 - PowerShellでgitコマンドを実行するとき、`Set-Location` を使わず `git` から直接実行する（パーミッション設定のパターンマッチが効かなくなるため）。
 
+### スクリーンショットの共有
+
+- 保存先は `C:\Users\exodj\Pictures\Screenshots`。
+- 「スクショ撮ったから見て」、またはスクショの文脈で「撮ったから見て」と依頼されたら、保存先の画像ファイルを更新日時の新しい順に並べ、最新1枚を開いて確認する。「最新」という指定や画像の貼り付けは不要。
+- 「2枚撮った」など枚数の指定があれば、最新の指定枚数を確認する。ファイル名・パスの指定があればそちらを優先する。
+- 開いたファイル名または撮影時刻を返答に添え、対象が合っているか分かるようにする。画像が見つからない場合はその旨を伝える。
+
 ## ESP32-S3ファーム開発
 
 - AECの開発先は [v0.7](devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)。AEC自動停止ON、生マイクへのフォールバックは計測のみ。TLSのPSRAM移行、AEC参照待ち・STT補正、Soniox先行接続の別タスク化で、声への停止反応・再生音・本文開始速度は改善報告あり（保存点 `dd77e42`）。13:19の無発声での誤検出に対し、RMS 1,200 / 128msに出力/入力RMS比25%以上と飽和後256msの保護を追加。18:26の再生音による停止の疑いを受け、`AEC_RESET_EACH_TURN=true` で、時刻・参照履歴だけでなくAEC本体も毎ターン再作成する比較版を追加した。18:43に「自分の声で停止し、再生音では停止しない」と改善報告。10ターン目の検出→録音29ms、初回送信62ms、AEC欠落・確保失敗0を確認。状態持越しが原因だったとの確定ではなく、本文開始が重いという懸念は残る。画像には初期化・本文開始の時間がなく、`[AEC_RESET] elapsed_us / ready` と要求開始から `first_tts_i2s_ms` までのログで切り分ける。初期化コスト・再学習・長時間の安定性も比較する。検出前・未接続中の音声保持は未実装。[v0.7の試験手順・実機結果・復旧](docs/esp32-v07-aec.md) を参照。
@@ -101,12 +108,16 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 ### 起動
 
-ログオン時にタスクスケジューラ (`TTS-AutoStart`) が自動起動。手動起動は不要。
-- スクリプト: `C:\Users\exodj\projects\tts-models\faster-qwen3-tts\scripts\start-tts-service.ps1`
-- APIサーバー + ngrok起動 → URL変更時はLambda環境変数 (`ZAKICORP_TTS_URL`) を5つ自動更新
-- ログ: `scripts\tts-service.log` / トースト通知(BurntToast)
+2026-09-11にタスクスケジューラ (`TTS-AutoStart`) をOS起動30秒後の非対話実行（S4U、通常権限）へ変更。ログオン不要。監視は現在稼働中で、既存API/ngrokの引継ぎと外部ヘルス確認に成功。OS再起動後の音声生成確認は未実施。
+- 実装・登録: `tools/tts-service/supervisor.py` / `tools/tts-service/install.ps1`
+- 実際の配置: `.local/tts-service/`（Git対象外、登録時のコピー）。再適用は保守時間にタスクを停止してから登録する。
+- APIサーバー + ngrokを監視し、プロセス終了後に再起動。モデル準備・公開ヘルス確認後、URL変更時にLambda環境変数 (`ZAKICORP_TTS_URL`) を5つ更新。
+- ログ: `.local/tts-service/logs/`。既存の認証ファイルを参照し、画面通知に依存しない。
+- 元のTTSリポジトリの`setup-tasks.ps1`を実行するとログオン起動に戻る。[適用・検証・復旧手順](docs/tts-boot-recovery.md)を参照。
 
 ### ngrok URL変更時のLambda更新対象
+
+Windows更新は自動更新を受け入れる運用。2026-09-12に一時停止を解除し、アクティブ時間を手動で07:00〜翌01:00（時間外01:00〜07:00）へ設定済み。Proへの変更・恒久的な手動更新化は進めない。[Windows更新の設定・調査記録](docs/windows-update-restart-control.md)を参照。
 
 1. `toytalk-stream-handler-lambda` (app TTS)
 2. `toytalk-api-stream-for-esp32-lambda` (ESP32 TTS)
