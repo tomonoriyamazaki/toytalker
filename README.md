@@ -42,4 +42,6 @@ https://github.com/user-attachments/assets/177e0598-6c0a-4d14-9477-36d719003d13
 - [開発のあゆみ（初期からの検討・試行錯誤の記録）](docs/history.md)
 - [マイコン（ESP32）実装](docs/mcu.md)
 - [スマホアプリ実装](app/README.md)
-- [RTX 5090 / Qwen3-TTS 同時リクエスト試験計画](docs/qwen3-tts-concurrency-test-plan.md)
+- [自前クローンボイス（RTX 5090 / Qwen3-TTS）のバッチ推論](docs/qwen3-tts-batch-engine-2026-09-12.md)
+- [原価と課金の考え方](docs/pricing-and-cost-model.md)
+- [製品化の認証チェックリスト（STマーク・技適・PSE）](docs/certification-checklist.md)

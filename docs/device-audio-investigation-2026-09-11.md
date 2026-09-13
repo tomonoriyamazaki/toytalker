@@ -203,6 +203,6 @@ ba:e5のRequest ID: `005246ed-712d-4458-ab0d-0389c7c1291e`。
 - [デバイス設定Lambda](../backend/toytalker-device-setting-lambda/index.mjs): デバイス登録・`last_seen`更新
 - [Sonioxキー発行Lambda](../backend/toytalk-soniox-stt-lambda/index.mjs)
 - [v0.5再生終了の既存調査](esp32-playback-end-timing.md)
-- [v0.7本文開始の既存調査](esp32-v07-latency-review.md)
+- [v0.7本文開始の高速化で保留した候補](deferred-items.md)
 
 実装に関する説明はローカルソースを参照。本番コードのダウンロード・差分照合は未実施。

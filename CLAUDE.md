@@ -2,7 +2,7 @@
 
 Claude CodeとCodexで共有するシステム概要・開発ルール。Codexはルートの [AGENTS.md](AGENTS.md) からこのファイルを参照する。共通情報はこのファイルを更新し、両ファイルへ重複して記載しない。
 
-**このファイルの運用**: 書くのは「コードから読み取れないこと」だけ（ルール、事故の教訓、本番に出ている版、未確認の事項）。各領域の「現在の状態」は上書きし、日付付きの経過は積み上げずに `docs/` の調査メモへ書く。2026-09-13の圧縮前の全文は [退避版](docs/claude-md-archive-2026-09-13.md) にある。
+**このファイルの運用**: 書くのは「コードから読み取れないこと」だけ（ルール、事故の教訓、本番に出ている版、未確認の事項）。各領域の「現在の状態」は上書きし、日付付きの経過は積み上げずに `docs/` の調査メモへ書く。調査メモは領域ごとの入口1本に要点を統合し、1日単位の個別メモは統合後に削除する（2026-09-13に40本→24本へ整理）。意図的に先送りした項目と却下理由は [先送り項目](docs/deferred-items.md) に書く。
 
 ## システム構成
 
@@ -26,8 +26,8 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 
 - 原価・マージン2.0・前払いポイント・プレミアムボイスの料金体系は [原価と課金の考え方](docs/pricing-and-cost-model.md)。
 - 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。
-- LLMのツール呼び出しは、外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。無料ツールは何もしない。[ツールコスト記録](docs/search-cost-tracking.md)。
-- 為替は毎月1日に `toytalker-ops-monthly-lambda` が自動保存し、先月の実費・各社請求・単価行の点検をメールする。単価は自動更新しない。[月次運用レポート](docs/ops-monthly-report.md)。
+- LLMのツール呼び出しは、外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。無料ツールは何もしない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第9節。
+- 為替は毎月1日に `toytalker-ops-monthly-lambda` が自動保存し、先月の実費・各社請求・単価行の点検をメールする。単価は自動更新しない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第10節。
 - `zakicorp#tts` の単価は暫定（$0.000025/文字、Cartesiaの半額、2026-09-13登録）。正式な単価は未決定。
 
 ### Lambda一覧
@@ -107,12 +107,16 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 ### 調査メモ
 
-- [v0.7 AEC試験手順・実機結果・復旧](docs/esp32-v07-aec.md) — AEC全般の入口
-- [AC RMS判定と到達点](docs/esp32-aec-gate-ac-2026-09-12.md) — 現行判定方式、今後の改善余地
-- [USBログ待ち対策](docs/esp32-usb-log-backpressure-2026-09-12.md) — 現行実機版
-- [ボタン反応の修正](docs/esp32-button-response-2026-09-12.md)、[NLP比較](docs/esp32-aec-nlp-comparison-2026-09-12.md)、[入力クリップ比較](docs/esp32-aec-input-headroom-2026-09-12.md)
-- [終端調査と修正](docs/esp32-stream-end-investigation-2026-09-12.md)、[本文開始の高速化検討](docs/esp32-v07-latency-review.md)
-- [音声介入第一弾（v0.6）](docs/esp32-v06-voice-barge-in.md)、[TLSメモリ調査](docs/esp32-s3-tls-memory-investigation-2026-09-06.md)
+- [v0.7 AEC試験手順・実機結果・復旧](docs/esp32-v07-aec.md) — AEC全般の入口。NLP=AGGRの根拠とボタン即時消音の実測もここ
+- [AC RMS判定と到達点](docs/esp32-aec-gate-ac-2026-09-12.md) — 現行判定方式、今後の改善余地、再開時の切り分け手順
+- [終端調査と修正](docs/esp32-stream-end-investigation-2026-09-12.md) — 終端救済の実装と、AEC閾値の根拠になったturn=18/20の実測
+- [USBログ待ち対策](docs/esp32-usb-log-backpressure-2026-09-12.md) — 現行実機版の最後の変更
+- [入力クリップ比較](docs/esp32-aec-input-headroom-2026-09-12.md) — 入力1/4縮小を却下した記録。再提案しないために残す
+- [音声介入第一弾（v0.6）](docs/esp32-v06-voice-barge-in.md) — 音量方式が不可と分かった根拠、RXターンごと再確保の由来
+- [TLSメモリ調査](docs/esp32-s3-tls-memory-investigation-2026-09-06.md) — Stringリーク修正の経緯と、未修正のリスク一覧
+- [v0.5 再生終了の計測](docs/esp32-playback-end-timing.md) — v0.5のみ。v0.7はI2S APIが違う
+- [配布実機の音途切れ報告（2026-09-11）](docs/device-audio-investigation-2026-09-11.md) — サーバー側調査、原因未特定。実機の版照合が未着手
+- 本文開始の高速化で保留した候補は [先送り項目](docs/deferred-items.md)
 
 ## ZakiCorp TTS（クローンボイス, β版）
 
@@ -148,6 +152,7 @@ ngrok URL変更時のLambda更新対象:
 
 ### 調査メモ
 
-- [バッチエンジンの実装と検証](docs/qwen3-tts-batch-engine-2026-09-12.md) — 現行本番版。最初に読む
-- [現状まとめ](docs/qwen3-tts-current-status.md) — バッチ版採用前の整理（記述は採用前の状態）
-- 経過: [同時要求試験計画](docs/qwen3-tts-concurrency-test-plan.md)、[4〜32件測定](docs/qwen3-tts-capacity-2026-09-12.md)、[プロファイル](docs/qwen3-tts-profile-2026-09-12.md)、[CUDAトレース](docs/qwen3-tts-cuda-trace-2026-09-12.md)、[改善試験](docs/qwen3-tts-improvement-trials-2026-09-12.md)、[可変チャンク](docs/qwen3-tts-dynamic-chunks-2026-09-12.md)、[並列比較](docs/qwen3-tts-parallel-improvement-2026-09-12.md)、[バッチ見込み計測](docs/qwen3-tts-batch-step-bench-2026-09-12.md)
+- [バッチエンジンの実装と検証](docs/qwen3-tts-batch-engine-2026-09-12.md) — 現行本番版。最初に読む。設計の根拠になった事前計測（見込み計測・CUDAトレース・改善候補比較）もここ
+- [調査の経緯](docs/qwen3-tts-current-status.md) — 元実装の問題発見から本番反映までの時系列、元実装の分析と却下した案
+- [元実装の1〜32件測定](docs/qwen3-tts-capacity-2026-09-12.md) — バッチ版の改善幅の比較対象
+- [計測方法と用語の定義](docs/qwen3-tts-concurrency-test-plan.md) — TTFA・生成倍率・模擬再生枯渇の定義。未実施の試験一覧

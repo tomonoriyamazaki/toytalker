@@ -1,6 +1,6 @@
 # 原価と課金の考え方（2026-09-13 時点の方針）
 
-従量課金で「使った分だけ、安く、気軽に」を実現するための、原価の見方と料金の組み立て。[以前のTTS単価比較](cost-estimate.md) と [月次運用レポート](ops-monthly-report.md) の前提になる。
+従量課金で「使った分だけ、安く、気軽に」を実現するための、原価の見方と料金の組み立て。月次運用レポートLambda（第10節）の前提になる。2026-09-10の市場調査（旧 cost-estimate.md）と2026-09-12のツールコスト記録（旧 search-cost-tracking.md）は末尾に統合した。
 
 ## 1. 原価の記録と請求額の関係
 
@@ -92,3 +92,59 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 - **LLM入力トークン**: 会話履歴を長く持つほど膨らむ。履歴の上限を決めておくと原価が安定する。
 - **相槌の定型音声化**: 原価よりレイテンシ改善の効果が大きい。別件として検討。
 - **AWS Lambda**: 本文Lambdaは2GBでLLM・TTSの応答待ち中も課金される。記録外の原価では最大の項目。
+
+## 9. 有料ツール（外部API）のコスト記録（2026-09-12）
+
+- LLMのfunction callingで呼ぶツールのうち、外部に料金が発生するもの（現状はSerper検索）だけを `tool` 種別で回数課金として記録する。自前のLambda/DynamoDBを呼ぶだけの無料ツールは何も記録しない。検索は「調べ物をよくする子」と「雑談だけの子」で回数が大きく違うため、一律マージンではなく回数で数える。
+- 単価は `toytalker-api-unit-prices` の `${provider}#tool` 行、`input_unit_type = "requests"`。`serper#tool` = $0.001/回（$50 / 5万クレジット、1検索=1クレジット、購入から6か月で失効）。1回検索のターンでツール代は約0.15円（マージン前）。
+- 有料ツールを増やすとき: 本文Lambda2つ（App / ESP32）の `PAID_TOOLS` に `ツール名: { provider, model }` を1行足し、単価行を足す。アプリ側は円グラフの色を付けたい場合だけ `CHART_COLORS` に追加。無料ツールを増やすときは何もしない。
+- 残骸: 最初は `search` 種別で実装し同日 `tool` へ汎用化した。`2026-09-12#<device>#search` の利用状況行と `serper#search` の単価行が1件ずつ残っている。参照されないので消してよい。
+
+## 10. 月次運用レポートLambda（為替更新・請求突き合わせ・単価点検）
+
+2026-09-12に `toytalker-ops-monthly-lambda` を追加。毎月1日 09:00 JST に動き、結果を1通のメールで送る。値の自動修正はしない。
+
+### やること
+
+1. **為替**: Frankfurter（ECB公表レート、キー不要）からUSD→JPYを取り、`toytalker-exchange-rates` に当月の行が無ければ作る。既存行は維持（`FX_OVERWRITE=true` で上書き）。
+2. **先月の記録集計**: `toytalker-usage` を先月分でスキャンし、プロバイダー×種別ごとにマージン後の円額・マージン前のUSD実費・使用量をまとめる。
+3. **各社の実績との突き合わせ**: APIで請求を取れる社（OpenAI・Anthropic）は差分と割合を出し、20%超なら要確認印。ElevenLabsは使用文字数。取れない社（Cartesia・Serper・Google・Soniox・Sakura・Fish Audio）は記録実費と確認先URLを並べる。
+4. **点検**: 単価行が無くて記録されなかった呼び出し（記録側Lambdaの `[Pricing] missing price` ログをCloudWatchから検索）、180日以上更新されていない単価行、対象月の為替行の有無。
+5. **通知**: SNSトピック `toytalker-ops-monthly` にメール。件名はASCII固定（`ToyTalker monthly cost report YYYY-MM`）。
+
+### 記録側の変更（同日）
+
+- App本文・ESP32本文・読み上げの3 Lambdaで、`toytalker-usage` に `cost_usd`（マージン前のUSD実費）を加算する。突き合わせはこの値で行う。2026-09-12より前の行は `cost_jpy / margin / usd_jpy_rate` で割り戻すため概算になる（レポートに行数を表示）。
+- 単価行が無いときに `console.warn("[Pricing] missing price for <provider#api_type>")` を出す。以前は静かに記録されなかった。
+
+### 構築と運用
+
+- ディレクトリ: `backend/toytalker-ops-monthly-lambda/`
+- 初回構築: `bash setup.sh <メールアドレス>`。SNSトピックとメール購読、実行ロール `toytalker-ops-monthly-role`、Lambda（Node.js 24、5分、256MB）、EventBridge Scheduler `toytalker-ops-monthly`（`cron(0 9 1 * ? *)`、Asia/Tokyo）を作る。再実行しても更新扱いで壊れない。購読はメール内のリンクで確認が必要（2026-09-13確認済み）。
+- コード更新: `bash deploy.sh`。
+- 手動実行: `{"month":"2026-08","send":false}` のように対象月と送信有無を指定できる。`send:false` は戻り値の `report` に本文を返すだけでメールを送らない。`fx:false` で為替更新を省略。
+- 環境変数:
+
+| 変数 | 内容 |
+|---|---|
+| `OPS_SNS_TOPIC_ARN` | 必須。setup.sh が設定 |
+| `FX_OVERWRITE` | `true` で当月の為替行を毎回上書き。既定は無い月だけ作成 |
+| `STALE_PRICE_DAYS` | 単価行の鮮度しきい値。既定180 |
+| `OPENAI_ADMIN_KEY` / `ANTHROPIC_ADMIN_KEY` | 任意。組織の請求額をAPIで取る管理者キー。読み取り専用に絞れず漏洩時の影響が大きいため、当面は置かない方針（レポートの数字と各社ダッシュボードを手で見比べる） |
+| `ELEVENLABS_API_KEY` | 任意。使用文字数の取得。本文Lambdaと同じ値を設定済みだが `user_read` 権限が無く401になる。権限付きのキーに差し替えると取得できる |
+
+### 確認と見直しの目安
+
+- 2026-09-12に `{"month":"2026-08","send":false}` で8月分（利用者8人、合計81.77円、実費$0.27）を生成し、9-13にメール送信を確認。2026-09の為替行は154.04円（Frankfurter 2026-09-11）。8月以前は為替行が無く150円固定で記録されている。
+- 差分が20%を超えて印が付いたら、まず単価行の単位・値を疑う（トークン種別の違い、キャッシュ料金、音声トークン換算など）。
+- 「単価行なしの警告」が出たら `toytalker-api-unit-prices` に行を足す。足すまでその呼び出しは記録されない。
+- 単価の自動取得はしない。各社がAPIで単価を公開しておらず、料金ページの読み取りは壊れやすいため。
+- プロビジョニングプロファイル等の期限は別件（1年）。
+
+## 参考: 2026-09-10の市場調査（単価は当時のリスト値、要再確認）
+
+- **Cartesiaの課金構造**: 月額サブスク＋クレジット枠、超過分は追加課金（純従量ではない）。Free $0/2万字（非商用のみ）、Pro $4/10万字、Startup $49/125万字、Scale $299/800万字。Pro〜Scaleで1文字あたりの単価はほぼ同じ（約$37〜40/100万字）で、違うのは月間の含有文字数だけ。Instantクローンは標準声と同単価・作成無料・個数無制限。PVCクローンは1.5倍。超過単価は非公開。商用利用はFree不可。
+- **ElevenLabsのクローン保存数**: Free 3 / Starter 10 / Creator 30 / Pro 160 / Scale・Business 660。全ユーザーが親の声を登録する設計には構造的に不向きで、自前クローン基盤が要る理由の一つ。料金はモデル（Flash $50/100万字、Multilingual $100/100万字）で決まり、クローンかプリセットかは無関係。
+- **自前GPUの運用形態（RunPod、RTX 5090 32GB）**: Pod常時起動 $0.99/時（月約¥10.7万）、Serverless $1.58/時（稼働分のみ）。GPU実稼働が1日15時間超ならPod、下回るならServerless。夜ピーク型ならServerless＋keep-warm。NVIDIAはGeForceのデータセンター商用利用に制約があるため、本格量産時はL40S/A100等への移行も検討。立ち上げは従量API、規模が出たら自前GPUが定石。
+- **Aivis Cloud**（アニメ調）: ¥44,000/100万字でCartesiaの約7倍。アニメ路線を採るかは製品コンセプト次第。
+- 当時の1時間の会話原価の試算（ずんだもん約¥40、Cartesia約¥99、ElevenLabs Flash約¥115）は、第2節の新しい前提（Cartesia $0.00005/字、実測に近いターン数）で置き換えた。
