@@ -14,7 +14,7 @@ PC再起動後、人がログオンする前にクローン音声を復旧させ
 
 監視は15秒間隔。既存のAPI/ngrokプロセスを引き継ぎ、二重起動を避ける。APIは実行ファイル・引数・作業ディレクトリを照合する。プロセス終了後は30秒待って再起動する。自分が起動したプロセスについて、ヘルスチェックが10分間連続で失敗した場合にも再起動する。引き継いだ既存プロセスはヘルス失敗だけでは停止しない。
 
-`/health`は現行APIの起動処理（モデルロード・ウォームアップ）後に応答する。公開URLの`/health`も確認してから、5つのLambdaのURLを照合する。URL変更時のみ更新し、他の環境変数を保持し、RevisionIdによって同時変更の上書きを防ぐ。通信不通なら次の監視周期で再試行する。音声生成自体の継続的な成功まではヘルスチェックだけでは保証しない。
+`/health`は現行APIの起動処理（モデルロード・ウォームアップ）後に応答する。公開URLの`/health`も確認してから、6つのLambda（`supervisor.py` の `FUNCTIONS`）のURLを照合する。URL変更時のみ更新し、他の環境変数を保持し、RevisionIdによって同時変更の上書きを防ぐ。通信不通なら次の監視周期で再試行する。音声生成自体の継続的な成功まではヘルスチェックだけでは保証しない。
 
 認証情報は従来の `.env`、AWSプロファイル、ngrok設定を参照し、Gitへコピーしない。APIキーが空の場合は起動を拒否する。ログは `.local/tts-service/logs/` に保存する。APIログには会話関連情報が含まれる可能性があるため共有前に確認する。現段階ではログの自動世代管理は未実装。
 
@@ -42,7 +42,7 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 
 ## 公開経路: Cloudflare Tunnel（2026-09-13切替）
 
-本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 5本の `ZAKICORP_TTS_URL` はこの値で、監視タスクが `config.json` の `public_url` を使って照合・維持する。`public_url` が設定されている間、監視タスクはngrokを起動しない（2026-09-13 18:02に撤去。起動していれば停止する）。`public_url` を空にするとngrokを再び起動して予備経路に戻る。
+本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 6本の `ZAKICORP_TTS_URL` はこの値で、監視タスクが `config.json` の `public_url` を使って照合・維持する。`public_url` が設定されている間、監視タスクはngrokを起動しない（2026-09-13 18:02に撤去。起動していれば停止する）。`public_url` を空にするとngrokを再び起動して予備経路に戻る。
 
 | 項目 | 値・場所 |
 |---|---|
@@ -71,7 +71,7 @@ Get-Content .\.local\tts-service\logs\cloudflared-service.log -Tail 5
 - サービスが止まった: 管理者PowerShellで `Start-Service cloudflared`。起動直後に落ちる場合は `cloudflared-service-fix.ps1` を再実行（ImagePathの引数が消えた場合の対処）。
 - PC再起動後: サービスは自動起動。監視タスクとは独立。
 - トンネルを作り直す: `cloudflared tunnel login`（ブラウザで承認）→ `tunnel create <名前>` → `config.yml` の `tunnel`/`credentials-file` を新IDに → `tunnel route dns <名前> tts.zakicorp.com` → `cloudflared-service-fix.ps1`。
-- **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。`public_url` が空になると監視タスクがngrokを起動し、そのURLをLambda 5本へ同期する（約1〜2分。ngrokの認証設定 `ngrok.yml` は残してある）。Cloudflareへ戻すときは `-PublicUrl 'https://tts.zakicorp.com'`。
+- **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。`public_url` が空になると監視タスクがngrokを起動し、そのURLをLambda 6本へ同期する（約1〜2分。ngrokの認証設定 `ngrok.yml` は残してある）。Cloudflareへ戻すときは `-PublicUrl 'https://tts.zakicorp.com'`。
 
 ### 拠点での遮断: 合言葉ヘッダー（2026-09-13 17:30ごろ有効化）
 
@@ -79,11 +79,11 @@ Cloudflareの WAF カスタムルール `tts-edge-key-required`（Security → S
 
 | 置き場所 | 名前 |
 |---|---|
-| Lambda 5本の環境変数 | `ZAKICORP_EDGE_KEY`（ZakiCorp呼び出しのヘッダーに付ける。未設定なら送らない） |
+| Lambda 6本（デバイス設定Lambdaを含む）の環境変数 | `ZAKICORP_EDGE_KEY`（ZakiCorp呼び出しのヘッダーに付ける。未設定なら送らない） |
 | Cloudflareのルール式 | `not any(http.request.headers["x-zakicorp-edge-key"][*] eq "<値>")` |
 | `tts-models/faster-qwen3-tts/scripts/.env` | `ZAKICORP_EDGE_KEY`（監視タスクの公開health確認と負荷試験クライアント `run.py` が読む） |
 
-確認: ヘッダー無し／誤りは403、正しい値は200、`toytalk.zakicorp.com` は無関係（ルールは `http.host eq "tts.zakicorp.com"` に限定）。入れ替えは「ルールを旧か新のどちらかなら通すに変更 → Lambda 5本と `.env` を新値に → ルールを新だけに戻す」の順で無停止。Accessのサービストークンは期限があるため採用していない。
+確認: ヘッダー無し／誤りは403、正しい値は200、`toytalk.zakicorp.com` は無関係（ルールは `http.host eq "tts.zakicorp.com"` に限定）。入れ替えは「ルールを旧か新のどちらかなら通すに変更 → Lambda 6本と `.env` を新値に → ルールを新だけに戻す」の順で無停止。Accessのサービストークンは期限があるため採用していない。
 
 公開側 `/health` は `{"status":"ok"}` のみ返す（Cloudflare経由か非ローカルの要求）。話者登録名は `[A-Za-z0-9_-]{1,80}` に限定し既存名は409。
 

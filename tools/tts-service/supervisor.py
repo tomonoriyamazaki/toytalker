@@ -14,7 +14,8 @@ import psutil
 LOG = logging.getLogger("tts-service")
 FUNCTIONS = ["toytalk-stream-handler-lambda", "toytalk-api-stream-for-esp32-lambda",
              "toytalker-backchannel-for-app-lambda", "toytalker-backchannel-for-esp32-lambda",
-             "toytalker-tts-only-lambda"]
+             "toytalker-tts-only-lambda",
+             "toytalker-device-setting-lambda"]   # clone-voice registration (/v1/speakers/register); missed until 2026-09-13
 
 
 def get_json(url):

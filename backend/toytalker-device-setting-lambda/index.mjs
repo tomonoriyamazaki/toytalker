@@ -631,7 +631,9 @@ export const handler = async (event) => {
       // APIサーバーでembedding抽出
       const ttsResp = await fetch(`${baseUrl}/v1/speakers/register`, {
         method: "POST",
-        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json" },
+        // X-Zakicorp-Edge-Key: Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
+        headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json",
+                   ...(process.env.ZAKICORP_EDGE_KEY ? { "X-Zakicorp-Edge-Key": process.env.ZAKICORP_EDGE_KEY } : {}) },
         body: JSON.stringify({ name: voiceId, audio_base64, mime_type: mime_type || "audio/wav" }),
       });
       if (!ttsResp.ok) {

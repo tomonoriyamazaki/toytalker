@@ -61,7 +61,7 @@ class RecoveryTests(unittest.TestCase):
         aws.return_value = {"RevisionId": "revision-1", "Environment": {"Variables": {"OTHER": "keep"}}}
         service.synchronize_urls({}, "https://example.test")
         updates = [call.args for call in aws.call_args_list if call.args[2] == "update-function-configuration"]
-        self.assertEqual(len(updates), 5)
+        self.assertEqual(len(updates), len(service.FUNCTIONS))
         for args in updates:
             self.assertEqual(args[args.index("--revision-id") + 1], "revision-1")
             values = json.loads(args[args.index("--environment") + 1])["Variables"]
@@ -71,7 +71,7 @@ class RecoveryTests(unittest.TestCase):
     def test_unchanged_url_never_updates_lambda(self, aws):
         aws.return_value = {"Environment": {"Variables": {"ZAKICORP_TTS_URL": "https://example.test"}}}
         service.synchronize_urls({}, "https://example.test")
-        self.assertEqual(len(aws.call_args_list), 5)
+        self.assertEqual(len(aws.call_args_list), len(service.FUNCTIONS))
         self.assertTrue(all(call.args[2] == "get-function-configuration" for call in aws.call_args_list))
 
 
