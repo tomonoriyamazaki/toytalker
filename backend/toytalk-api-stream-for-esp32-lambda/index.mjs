@@ -69,6 +69,9 @@
     web_search: { provider: "serper", model: "google-search" },
   };
 
+  // 検索結果と一緒に渡す指示。検索直後のターンだけに効かせ、通常ターンの口調には影響させない。
+  const TOOL_RESULT_INSTRUCTION = "この検索結果をもとに答えてください。「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は入れず、答えの中身から話し始めてください。口調や温かさはいつも通りのキャラクターのままで、そのあとも自然に会話を続けてください。";
+
   const WEB_SEARCH_TOOL = {
     name: "web_search",
     description: "子供の質問に答えるためにウェブ検索する。知識にない最新情報や具体的な事実を調べるときに使う。",
@@ -763,8 +766,10 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
     // システムプロンプトを追加（キャラクターの個性 + 共通指示）
     const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", year: "numeric", month: "long", day: "numeric", weekday: "short", hour: "2-digit", minute: "2-digit" });
-    const backchannelHint = backchannelFired ? "\n【重要】相槌は別途再生済みです。冒頭の相槌・挨拶・オウム返しは不要です。本題から返答を始めてください。" : "";
-    const toolHint = SERPER_API_KEY ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。\n- 検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を必ず添えてから検索してください。\n- 検索結果を受け取ったら、最初の一文字から答えの中身を話し始めてください。「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は一切つけません。\n例:「恐竜のことを調べてみるね」→（検索）→「いちばん大きい恐竜はアルゼンチノサウルスだよ！」" : "";
+    const backchannelHint = backchannelFired ? "\n【重要】相槌は別途再生済みです。冒頭の相槌・挨拶・オウム返しは不要です。本題から返答を始めてください。口調や温かさはいつも通りのままにしてください。" : "";
+    // 検索後の「前置きなし」指示はシステムプロンプトに置かず、検索結果を返すメッセージ側（TOOL_RESULT_INSTRUCTION）に添える。
+    // システムプロンプトに置くと通常ターンの口調まで素っ気なくなるため。
+    const toolHint = SERPER_API_KEY ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。" : "";
     const basePrompt = `あなたは子供向けの友好的な音声アシスタントです。簡潔に答えて、自然に会話を続けてください。単語の間に半角スペースを入れないでください。現在の日時は${now}です。日時を聞かれたら年は省略して簡潔に答えてください。相手が話した言語で返答してください。${backchannelHint}${toolHint}`;
     const systemPrompt = {
       role: "system",
@@ -1054,7 +1059,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
           messagesWithSystem.push(
             { role: "assistant", functionCall: { name: delta.name, args: delta.args } },
-            { role: "user", functionResponse: { name: delta.name, response: { results: toolResult } } }
+            { role: "user", functionResponse: { name: delta.name, response: { results: toolResult, instruction: TOOL_RESULT_INSTRUCTION } } }
           );
           llmStream = createLLMStream(messagesWithSystem);
 
