@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | 未コミット変更のコミットとpush | 未 |
 | 2 | stash 2本の整理 | 未 |
-| 3 | `backend/*/deploy.sh` のMac対応 | 未 |
+| 3 | `backend/*/deploy.sh` のMac対応 | 済（2026-09-13、Mac側で対応） |
 | 4 | 自宅PCへの遠隔手段（Remote Control、Tailscale等） | 未 |
 | 5 | ESP32実機・USBケーブル・スマホ（実機アプリ）の持参 | 未 |
 
@@ -19,14 +19,15 @@
 - 2026-09-13の作業はすべてコミット・push済み。ローカル・リモートとも `main` のみで、worktree・stash・未コミット変更は無い。Macでは `git pull` するだけでよい。
 - 古いstash 2件（設定ファイルの差分と、ESP32音声修正の中断分）は中身を確認のうえ削除済み。
 
-### 1-3. deploy.sh のMac対応
+### 1-3. deploy.sh のMac対応（済）
 
-8本すべての `backend/*/deploy.sh` が次の2箇所でWindows専用になっている。
+2026-09-13にMac側で対応した。8本の `backend/*/deploy.sh` と `toytalker-ops-monthly-lambda/setup.sh` を、同じファイルのままWindows（Git Bash）とMacの両方で動くようにした。
 
-- `"/c/Program Files/nodejs/npx.cmd" esbuild ...` → `npx esbuild ...` にする（Git BashでもMacでも動く）。
-- `powershell -Command "Compress-Archive ..."` → `zip -j ../deploy.zip index.mjs` などにする。
+- `"/c/Program Files/nodejs/npx.cmd"` / `npm.cmd` の絶対パスをやめ、PATHの `npx` / `npm` を使う。
+- zip作成は `zip` コマンドがあればそれを使い（Mac / Linux）、無ければ従来の `powershell Compress-Archive`（Windows Git Bash）に分岐する。
+- `set -euo pipefail` が無かった3本（soniox-stt、device-setting、tts-only）に追加した。無いとバンドル失敗時に古いzipをそのままデプロイしてしまう（Macの試験で実際に起きかけた）。
 
-`toytalker-ops-monthly-lambda` は `setup.sh` もある。修正後の動作確認は本番Lambdaへのデプロイになるので、CLAUDE.mdのルール通りOKを取ってから実行する。デプロイ元はmain。
+動作確認は本番へデプロイせずに行った。`aws lambda update-function-code` だけ握りつぶす偽の `aws` をPATHの先頭に置いて8本を最後まで実行し、できた `deploy.zip` の中身を `aws lambda get-function` で取得した本番コードと比較して、8本すべて一致を確認した。Macで初めて動かすLambdaは先に各ディレクトリで `npm install` が要る（`openai` 等の依存が無いとesbuildが失敗する）。
 
 ### 1-4. 自宅PCの遠隔手段
 

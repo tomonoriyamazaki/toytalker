@@ -58,12 +58,16 @@ rm -f ops-policy.json
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$ROLE"
 
 echo "📦 Bundling..."
-"/c/Program Files/nodejs/npx" esbuild index.mjs --bundle --platform=node --format=esm \
+npx esbuild index.mjs --bundle --platform=node --format=esm \
   --external:@aws-sdk/client-dynamodb --external:@aws-sdk/lib-dynamodb \
   --external:@aws-sdk/client-sns --external:@aws-sdk/client-cloudwatch-logs \
   --outfile=bundle.mjs
 mkdir -p temp_deploy && cp bundle.mjs temp_deploy/index.mjs
-( cd temp_deploy && powershell -Command "Compress-Archive -Path 'index.mjs' -DestinationPath '../deploy.zip' -Force" )
+if command -v zip >/dev/null 2>&1; then
+  rm -f deploy.zip; ( cd temp_deploy && zip -q ../deploy.zip index.mjs )                        # Mac / Linux
+else
+  ( cd temp_deploy && powershell -Command "Compress-Archive -Path 'index.mjs' -DestinationPath '../deploy.zip' -Force" )   # Windows Git Bash
+fi
 rm -rf temp_deploy
 
 echo "λ Lambda function..."
