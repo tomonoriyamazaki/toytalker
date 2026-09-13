@@ -28,6 +28,7 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 - 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。
 - LLMのツール呼び出しは、外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。無料ツールは何もしない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第9節。
 - 為替は毎月1日に `toytalker-ops-monthly-lambda` が自動保存し、先月の実費・各社請求・単価行の点検をメールする。単価は自動更新しない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第10節。
+- Cartesiaの同時接続上限（429）に当たったときは、返答単位でずんだもんへ切り替えて会話を止めない。仕様は [TTSフォールバックとプッシュ通知](docs/tts-fallback-and-notifications.md)（2026-09-13合意、未実装）。複数アカウントでの上限回避はしない。
 - `zakicorp#tts` の単価は暫定（$0.000025/文字、Cartesiaの半額、2026-09-13登録）。正式な単価は未決定。
 
 ### Lambda一覧

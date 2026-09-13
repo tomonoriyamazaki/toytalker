@@ -395,7 +395,16 @@ export const handler = async (event) => {
 
     // TTS生成 (raw PCM)
     const ttsStart = Date.now();
-    const pcmBuffer = trimSilence(await generateTTSPcm(backchannelText, ttsVendor, ttsVoice));
+    let rawPcm;
+    try {
+      rawPcm = await generateTTSPcm(backchannelText, ttsVendor, ttsVoice);
+    } catch (e) {
+      // 主プロバイダーが失敗（同時接続上限など）したら即ずんだもん。相槌は短いので再試行しない
+      if (ttsVendor === "sakura") throw e;
+      console.warn(`[TTS] ${ttsVendor} unavailable -> fallback sakura: ${e?.message || e}`);
+      rawPcm = await ttsPcmSakura(backchannelText, { model: "zundamon" });
+    }
+    const pcmBuffer = trimSilence(rawPcm);
     console.log(`[TTS] ${ttsVendor}/${ttsVoice} pcm=${pcmBuffer.length}bytes (${Date.now() - ttsStart}ms)`);
     console.log(`[Total] ${Date.now() - start}ms`);
 

@@ -364,7 +364,15 @@ export const handler = async (event) => {
     console.log(`[Backchannel] "${partialText}" → "${backchannelText}" (${Date.now() - start}ms) history=${history.length}turns`);
 
     const ttsStart = Date.now();
-    const audioBase64 = await generateTTS(backchannelText, ttsVendor, ttsVoice);
+    let audioBase64;
+    try {
+      audioBase64 = await generateTTS(backchannelText, ttsVendor, ttsVoice);
+    } catch (e) {
+      // 主プロバイダーが失敗（同時接続上限など）したら即ずんだもん。相槌は短いので再試行しない
+      if (ttsVendor === "sakura") throw e;
+      console.warn(`[TTS] ${ttsVendor} unavailable -> fallback sakura: ${e?.message || e}`);
+      audioBase64 = await ttsToBase64Sakura(backchannelText, { model: "zundamon" });
+    }
     console.log(`[TTS] ${ttsVendor}/${ttsVoice} (${Date.now() - ttsStart}ms)`);
 
     console.log(`[Total] ${Date.now() - start}ms`);

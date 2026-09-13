@@ -451,9 +451,11 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
   const ttsText = applyLineBreakPauses(text);
 
   // TTS 実行（出力は全プロバイダーmp3に統一）
+  // 主プロバイダーが失敗（同時接続上限など）したらずんだもんで生成し、ヘッダーで知らせる
   let b64;
+  let usedVendor = cfg.ttsVendor;
   const fmt = "mp3";
-  try {
+  const synthesizePrimary = async () => {
     if (cfg.ttsVendor === "openai") {
       b64 = await ttsToBase64OpenAI(ttsText, voice, cfg.ttsModel);
     } else if (cfg.ttsVendor === "google") {
@@ -472,14 +474,24 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
     } else if (cfg.ttsVendor === "zakicorp") {
       b64 = await ttsToBase64ZakiCorp(ttsText, { speaker: voice === "default" ? "vivian" : voice });
     } else {
-      return fail(500, "Unknown ttsVendor");
+      throw new Error("Unknown ttsVendor");
     }
+  };
+  try {
+    await synthesizePrimary();
   } catch (e) {
-    return fail(502, `TTS failed: ${e?.message || e}`);
+    if (cfg.ttsVendor === "sakura") return fail(502, `TTS failed: ${e?.message || e}`);
+    console.warn(`[TTS] ${cfg.ttsVendor} unavailable -> fallback sakura: ${e?.message || e}`);
+    try {
+      b64 = await ttsToBase64Sakura(ttsText, { model: "zundamon" });
+      usedVendor = "sakura";
+    } catch (e2) {
+      return fail(502, `TTS failed: ${e2?.message || e2}`);
+    }
   }
 
-  // コスト記録（レスポンスとは独立、失敗しても無視）
-  trackTtsCost({ ownerId, ttsVendor: cfg.ttsVendor, ttsModel: cfg.ttsModel, text: ttsText, b64Len: b64.length });
+  // コスト記録（レスポンスとは独立、失敗しても無視。フォールバック時は実際に使った声で記録）
+  trackTtsCost({ ownerId, ttsVendor: usedVendor, ttsModel: usedVendor === "sakura" ? "zundamon" : cfg.ttsModel, text: ttsText, b64Len: b64.length });
 
   // 音声バイナリを直接ストリーミング返却（S3に保存しない）
   const audioBuf = Buffer.from(b64, "base64");
@@ -489,6 +501,7 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
     headers: {
       "Content-Type": mime,
       "X-Audio-Format": fmt,
+      ...(usedVendor !== cfg.ttsVendor ? { "X-TTS-Fallback": usedVendor } : {}),
       "Content-Disposition": `attachment; filename="toytalker-tts.${fmt}"`,
     },
   });

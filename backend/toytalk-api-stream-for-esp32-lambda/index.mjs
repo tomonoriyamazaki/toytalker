@@ -527,6 +527,22 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
   }
 
 
+  // ---- TTSフォールバック ----
+  // 主プロバイダーが 429（同時接続上限）や 5xx で失敗したら短く再試行し、だめならずんだもん（Sakura）で続ける。
+  // 一度切り替えたらその返答の残りはずんだもんのまま。仕様: docs/tts-fallback-and-notifications.md
+  const TTS_RETRY_WAITS_MS = [300, 600];
+  const TTS_FALLBACK_NOTICE = "いまはこんでいるから、べつのこえでおはなしするね。";
+  function ttsErrorStatus(e) {
+    if (typeof e?.status === "number") return e.status;
+    const m = /\b([45]\d{2})\b/.exec(String(e?.message || ""));
+    return m ? Number(m[1]) : null;
+  }
+  function isRetryableTtsError(e) {
+    const s = ttsErrorStatus(e);
+    return s === 429 || s === 408 || (s !== null && s >= 500);
+  }
+  const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
   // FishAudio TTS → Buffer (raw PCM via MP3 decode is not feasible on Lambda;
   // FishAudio supports pcm output via format param)
   async function ttsBufferFishAudio(text, { referenceId = "hMK7c1GPJmptCzI4bQIu" } = {}) {
@@ -794,6 +810,8 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     let llmTokensIn = 0, llmTokensOut = 0;
     let ttsInputChars = 0;
     const toolCalls = {};  // ツール名→成功回数。PAID_TOOLSに載っているものだけ課金対象
+    let ttsFallbackActive = false;   // この返答でずんだもんへ切り替え済みか
+    let ttsFallbackChars = 0;        // ずんだもんで生成した文字数（Sakura分として記録）
 
     // ---- LLM ストリーム生成 ----
     function streamLLMOpenAI(msgs, model) {
@@ -990,10 +1008,9 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         firstTtsMarked = true;
       }
 
-      ttsInputChars += t.length;
-
       // 音声チャンク（生PCMバイナリとして送信）
-      try {
+      // 主プロバイダーで合成。429/5xx は短く再試行し、だめならこの返答の残りはずんだもんで続ける
+      async function synthesizePrimary(t) {
         let pcmBuffer;
         if (cfg.ttsVendor === "openai") {
           const voiceName = voice === "default" ? "nova" : voice;
@@ -1023,11 +1040,43 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         } else {
           throw new Error("Unknown ttsVendor");
         }
+        return pcmBuffer;
+      }
+      const synthesizeFallback = (t) => ttsBufferSakura(t, { model: "zundamon" });
+      try {
+        let pcmBuffer;
+        let usedFallback = false;
+        if (ttsFallbackActive) {
+          pcmBuffer = await synthesizeFallback(t);
+          usedFallback = true;
+        } else {
+          try {
+            pcmBuffer = await synthesizePrimary(t);
+          } catch (e) {
+            let lastErr = e;
+            if (cfg.ttsVendor !== "sakura" && isRetryableTtsError(e)) {
+              for (const wait of TTS_RETRY_WAITS_MS) {
+                await sleepMs(wait);
+                try { pcmBuffer = await synthesizePrimary(t); lastErr = null; break; } catch (e2) { lastErr = e2; }
+              }
+            }
+            if (lastErr) {
+              if (cfg.ttsVendor === "sakura") throw lastErr;
+              console.warn(`[TTS] ${cfg.ttsVendor} unavailable (${ttsErrorStatus(lastErr) ?? "?"}) -> fallback sakura: ${lastErr?.message || lastErr}`);
+              ttsFallbackActive = true;
+              usedFallback = true;
+              // 切り替わった最初の文の頭に一言添える（音声だけ。画面のテキストは変えない）
+              pcmBuffer = await synthesizeFallback(TTS_FALLBACK_NOTICE + t);
+              ttsFallbackChars += TTS_FALLBACK_NOTICE.length;
+            }
+          }
+        }
+        if (usedFallback) ttsFallbackChars += t.length; else ttsInputChars += t.length;
         if (pcmBuffer) {
           pcmBuffer = trimSilence(pcmBuffer);  // 前後の無音を削って切替体感を速く
           sendMeta(res, "tts_start", { id: segSeq, size: pcmBuffer.length });
           sendPCM(res, pcmBuffer);
-          console.log(`[Lambda] id=${segSeq}, pcm.length=${pcmBuffer.length} bytes, text="${t}"`);
+          console.log(`[Lambda] id=${segSeq}, pcm.length=${pcmBuffer.length} bytes, text="${t}"${usedFallback ? " (fallback sakura)" : ""}`);
         }
       } catch (e) {
         sendMeta(res, "error", { message: `TTS failed: ${e?.message || e}` });
@@ -1146,6 +1195,15 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           await addUsage({ ownerId, deviceId, date, apiType: "tts", provider: cfg.ttsVendor, model: cfg.ttsModel, costJpy: ttsCostResult.costJpy, costUsd: ttsCostResult.costUsd, ttsCharacters: ttsInputChars, usdJpyRate: ttsCostResult.usdJpyRate, unitPriceUsd: ttsCostResult.unitPriceUsd, margin: ttsCostResult.margin });
         }
 
+        // フォールバック（ずんだもん）で生成した分は Sakura として別行で記録
+        let fallbackCostResult = null;
+        if (ttsFallbackChars > 0) {
+          fallbackCostResult = calcCostJpy({ providerApiType: "sakura#tts", mora: ttsFallbackChars, usdJpyRate });
+          if (fallbackCostResult) {
+            await addUsage({ ownerId, deviceId, date, apiType: "tts", provider: "sakura", model: "zundamon", costJpy: fallbackCostResult.costJpy, costUsd: fallbackCostResult.costUsd, ttsCharacters: ttsFallbackChars, usdJpyRate: fallbackCostResult.usdJpyRate, unitPriceUsd: fallbackCostResult.unitPriceUsd, margin: fallbackCostResult.margin });
+          }
+        }
+
         // STT (確定文の文字数から概算)
         const userMsgChars = lastUserMsg?.content?.length ?? 0;
         let sttCost = null;
@@ -1185,9 +1243,10 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           voice_id: voice,
           cost_stt: sttCost?.costJpy ?? 0,
           cost_llm: llmCost?.costJpy ?? 0,
-          cost_tts: ttsCostResult?.costJpy ?? 0,
+          tts_fallback: ttsFallbackChars > 0 ? { from: cfg.ttsVendor, to: "sakura", chars: ttsFallbackChars } : null,
+          cost_tts: (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0),
           cost_tool: toolCostTotal,
-          cost_total: (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + (ttsCostResult?.costJpy ?? 0) + toolCostTotal,
+          cost_total: (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0) + toolCostTotal,
         });
       }
     } catch (err) {
