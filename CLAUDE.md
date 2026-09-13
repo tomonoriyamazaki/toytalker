@@ -126,7 +126,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 ### 現在の状態（2026-09-13時点）
 
-- **本番はバッチ推論エンジン第2版**（2026-09-13 12:06反映）。`tts-models/faster-qwen3-tts/api_server_batch.py` + `batch_engine.py`。要求ごとに独立したKV行を持ち、同時32件・実運用上限24件程度、VRAM約20GiB。元の `api_server.py` は無変更で残す。
+- **本番はバッチ推論エンジン第2版**（2026-09-13 12:06反映）。`tts-models/faster-qwen3-tts/api_server_batch.py` + `batch_engine.py`。要求ごとに独立したKV行を持つ。本番は `scripts/.env` の `TTS_BATCH_CLASSES=1,2,4,8,16` で同時16件構成（VRAM約11GiB、他のGPU用途と同居するため。2026-09-13夜に32件構成・約19GiBから変更）。17件目以降は待ち行列。32件構成へ戻すには `.env` の行を消して再起動。元の `api_server.py` は無変更で残す。
 - 切替は `tools/tts-service/switch-api.ps1 -ApiScript <script> [-PublicUrl <url>]` を昇格実行（`.local/tts-service/config.json` の `api_script`/`public_url` を設定し監視タスク再起動、APIは約40秒停止）。復旧は `-ApiScript api_server.py`。公開URLは固定なのでLambdaの再設定は不要。
 - ユーザー確認済み（2026-09-13）: アプリでの会話、Cloudflare経由と合言葉遮断後の会話、クローンボイス登録、PC再起動後の自動復帰。未確認: 長文分割境界の聞こえ方。
 - 単独要求の元実装は `StaticCache` が1つで同時要求が互いのKV文脈を上書きする構造があった（言葉の繰り返し・抜けの原因）。バッチ版で解消。

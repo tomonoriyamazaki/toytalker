@@ -105,6 +105,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\tts-service\swit
 
 復旧は同じスクリプトを `-ApiScript api_server.py` で実行する。バッチ版の詳細は [実装と検証](qwen3-tts-batch-engine-2026-09-12.md)。切り替え後は `Invoke-RestMethod http://127.0.0.1:8000/health` の応答に `engine` があればバッチ版。
 
+バッチ版の同時上限は `tts-models/faster-qwen3-tts/scripts/.env` の `TTS_BATCH_CLASSES` で決まる（監視タスクが `.env` を環境変数としてAPIに渡す）。2026-09-13夜から `1,2,4,8,16`（同時16件、待機VRAM約11GiB、他のGPU用途と同居するため）。`1,2,4,8,16,32` にすると同時32件・約19GiB。変更後は `switch-api.ps1` で再起動し、`api.log` の `engine ready: classes=[...] rows=N` で確認する。
+
 ## 自動起動しなかったときの手動手順
 
 管理者PowerShellを開く。以下はPCを再起動せず、TTS・ngrokの起動状態を確認・復旧する手順。
