@@ -325,12 +325,16 @@ async function getExchangeRate(month, currency = "JPY") {
 
 function calcTtsCostJpy({ providerApiType, characters, utf8Bytes, mora, pcmBytes, audioTokens, usdJpyRate }) {
   const price = cachedPrices?.[providerApiType];
-  if (!price) return null;
+  if (!price) {
+    // 単価行が無いと記録されない。月次の運用Lambdaがこのログを拾って知らせる
+    console.warn(`[Pricing] missing price for ${providerApiType}`);
+    return null;
+  }
   const margin = cachedMargin || 1.5;
 
   if (price.currency === "JPY") {
     const inputCost = (mora ?? 0) * Number(price.unit_price_input);
-    return { costJpy: inputCost * margin, usdJpyRate: null, unitPriceUsd: null, margin };
+    return { costJpy: inputCost * margin, costUsd: null, usdJpyRate: null, unitPriceUsd: null, margin };
   }
 
   const inputUnit = price.input_unit_type;
@@ -350,19 +354,20 @@ function calcTtsCostJpy({ providerApiType, characters, utf8Bytes, mora, pcmBytes
     costUsd += (utf8Bytes ?? 0) * Number(price.unit_price_input);
   }
   const costJpy = costUsd * usdJpyRate * margin;
-  return { costJpy, usdJpyRate, unitPriceUsd: Number(price.unit_price_input), margin };
+  return { costJpy, costUsd, usdJpyRate, unitPriceUsd: Number(price.unit_price_input), margin };
 }
 
-async function addUsage({ ownerId, deviceId, date, provider, model, costJpy, ttsCharacters, usdJpyRate, unitPriceUsd, margin }) {
+async function addUsage({ ownerId, deviceId, date, provider, model, costJpy, costUsd, ttsCharacters, usdJpyRate, unitPriceUsd, margin }) {
   if (!costJpy || costJpy <= 0) return;
   const sk = `${date}#${deviceId}#tts`;
   try {
+    // cost_usd はマージン前のUSD実費（請求額との突き合わせ用）
     await ddb.send(new UpdateCommand({
       TableName: USAGE_TABLE,
       Key: { owner_id: ownerId, "date#device_id#api_type": sk },
-      UpdateExpression: "ADD cost_jpy :cost, requests :one, tts_characters :ttsc SET provider = :p, model = :m, usd_jpy_rate = :r, unit_price_usd = :u, margin = :mg",
+      UpdateExpression: "ADD cost_jpy :cost, cost_usd :usd, requests :one, tts_characters :ttsc SET provider = :p, model = :m, usd_jpy_rate = :r, unit_price_usd = :u, margin = :mg",
       ExpressionAttributeValues: {
-        ":cost": costJpy, ":one": 1, ":ttsc": ttsCharacters,
+        ":cost": costJpy, ":usd": costUsd ?? 0, ":one": 1, ":ttsc": ttsCharacters,
         ":p": provider, ":m": model, ":r": usdJpyRate ?? 0, ":u": unitPriceUsd ?? 0, ":mg": margin,
       },
     }));
@@ -397,7 +402,7 @@ async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len }) {
     if (cost) {
       await addUsage({
         ownerId, deviceId: "app", date, provider: ttsVendor, model: ttsModel,
-        costJpy: cost.costJpy, ttsCharacters: chars,
+        costJpy: cost.costJpy, costUsd: cost.costUsd, ttsCharacters: chars,
         usdJpyRate: cost.usdJpyRate, unitPriceUsd: cost.unitPriceUsd, margin: cost.margin,
       });
     }

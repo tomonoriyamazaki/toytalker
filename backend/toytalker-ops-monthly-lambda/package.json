@@ -1,0 +1,9 @@
+{
+  "name": "toytalker-ops-monthly-lambda",
+  "version": "1.0.0",
+  "description": "Monthly ops report: exchange rate update, recorded cost vs provider bills, unit price checks",
+  "type": "module",
+  "main": "index.mjs",
+  "license": "ISC",
+  "dependencies": {}
+}

@@ -124,13 +124,17 @@
 
   function calcCostJpy({ providerApiType, tokensIn, tokensOut, characters, utf8Bytes, mora, pcmBytes, userMessageChars, requests, usdJpyRate }) {
     const price = cachedPrices?.[providerApiType];
-    if (!price) return null;
+    if (!price) {
+      // 単価行が無いと記録されない。月次の運用Lambdaがこのログを拾って知らせる
+      console.warn(`[Pricing] missing price for ${providerApiType}`);
+      return null;
+    }
     const margin = cachedMargin || 1.5;
 
     // Sakura: 円建て直接
     if (price.currency === "JPY") {
       const inputCost = (mora ?? 0) * Number(price.unit_price_input);
-      return { costJpy: inputCost * margin, usdJpyRate: null, unitPriceUsd: null, margin };
+      return { costJpy: inputCost * margin, costUsd: null, usdJpyRate: null, unitPriceUsd: null, margin };
     }
 
     const inputUnit = price.input_unit_type;
@@ -168,15 +172,16 @@
     }
 
     const costJpy = costUsd * usdJpyRate * margin;
-    return { costJpy, usdJpyRate, unitPriceUsd: Number(price.unit_price_input), margin };
+    return { costJpy, costUsd, usdJpyRate, unitPriceUsd: Number(price.unit_price_input), margin };
   }
 
-  async function addUsage({ ownerId, deviceId, date, apiType, provider, model, costJpy, tokensIn, tokensOut, ttsCharacters, sttCharacters, requestCount, usdJpyRate, unitPriceUsd, margin }) {
+  async function addUsage({ ownerId, deviceId, date, apiType, provider, model, costJpy, costUsd, tokensIn, tokensOut, ttsCharacters, sttCharacters, requestCount, usdJpyRate, unitPriceUsd, margin }) {
     if (!costJpy || costJpy <= 0) return;
     const sk = `${date}#${deviceId}#${apiType}`;
     try {
       const addParts = ["cost_jpy :cost", "requests :one"];
       const vals = { ":cost": costJpy, ":one": requestCount ?? 1, ":p": provider, ":m": model, ":r": usdJpyRate ?? 0, ":u": unitPriceUsd ?? 0, ":mg": margin };
+      if (costUsd)       { addParts.push("cost_usd :usd");         vals[":usd"]  = costUsd; }  // マージン前のUSD実費（請求額との突き合わせ用）
       if (tokensIn)      { addParts.push("tokens_in :tin");       vals[":tin"]  = tokensIn; }
       if (tokensOut)     { addParts.push("tokens_out :tout");     vals[":tout"] = tokensOut; }
       if (ttsCharacters) { addParts.push("tts_characters :ttsc"); vals[":ttsc"] = ttsCharacters; }
@@ -1129,7 +1134,7 @@
         const llmPriceKey = `${llmProvider}#llm`;
         const llmCost = calcCostJpy({ providerApiType: llmPriceKey, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate });
         if (llmCost) {
-          await addUsage({ ownerId, deviceId, date, apiType: "llm", provider: llmProvider, model: llmModelId, costJpy: llmCost.costJpy, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate: llmCost.usdJpyRate, unitPriceUsd: llmCost.unitPriceUsd, margin: llmCost.margin });
+          await addUsage({ ownerId, deviceId, date, apiType: "llm", provider: llmProvider, model: llmModelId, costJpy: llmCost.costJpy, costUsd: llmCost.costUsd, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate: llmCost.usdJpyRate, unitPriceUsd: llmCost.unitPriceUsd, margin: llmCost.margin });
         }
 
         // TTS
@@ -1149,7 +1154,7 @@
           ttsCostResult = calcCostJpy({ providerApiType: ttsPriceKey, characters: ttsInputChars, usdJpyRate });
         }
         if (ttsCostResult) {
-          await addUsage({ ownerId, deviceId, date, apiType: "tts", provider: cfg.ttsVendor, model: cfg.ttsModel, costJpy: ttsCostResult.costJpy, ttsCharacters: ttsInputChars, usdJpyRate: ttsCostResult.usdJpyRate, unitPriceUsd: ttsCostResult.unitPriceUsd, margin: ttsCostResult.margin });
+          await addUsage({ ownerId, deviceId, date, apiType: "tts", provider: cfg.ttsVendor, model: cfg.ttsModel, costJpy: ttsCostResult.costJpy, costUsd: ttsCostResult.costUsd, ttsCharacters: ttsInputChars, usdJpyRate: ttsCostResult.usdJpyRate, unitPriceUsd: ttsCostResult.unitPriceUsd, margin: ttsCostResult.margin });
         }
 
         // STT (確定文の文字数から概算)
@@ -1158,7 +1163,7 @@
         if (userMsgChars > 0) {
           sttCost = calcCostJpy({ providerApiType: "soniox#stt", userMessageChars: userMsgChars, usdJpyRate });
           if (sttCost) {
-            await addUsage({ ownerId, deviceId, date, apiType: "stt", provider: "soniox", model: "soniox", costJpy: sttCost.costJpy, sttCharacters: userMsgChars, usdJpyRate: sttCost.usdJpyRate, unitPriceUsd: sttCost.unitPriceUsd, margin: sttCost.margin });
+            await addUsage({ ownerId, deviceId, date, apiType: "stt", provider: "soniox", model: "soniox", costJpy: sttCost.costJpy, costUsd: sttCost.costUsd, sttCharacters: userMsgChars, usdJpyRate: sttCost.usdJpyRate, unitPriceUsd: sttCost.unitPriceUsd, margin: sttCost.margin });
           }
         }
 
@@ -1170,7 +1175,7 @@
           if (!paid || count <= 0) continue;
           const c = calcCostJpy({ providerApiType: `${paid.provider}#tool`, requests: count, usdJpyRate });
           if (!c) continue;
-          await addUsage({ ownerId, deviceId, date, apiType: "tool", provider: paid.provider, model: paid.model, costJpy: c.costJpy, requestCount: count, usdJpyRate: c.usdJpyRate, unitPriceUsd: c.unitPriceUsd, margin: c.margin });
+          await addUsage({ ownerId, deviceId, date, apiType: "tool", provider: paid.provider, model: paid.model, costJpy: c.costJpy, costUsd: c.costUsd, requestCount: count, usdJpyRate: c.usdJpyRate, unitPriceUsd: c.unitPriceUsd, margin: c.margin });
           toolUsage.push({ tool: toolName, provider: paid.provider, requests: count, cost: c.costJpy });
           toolCostTotal += c.costJpy;
         }

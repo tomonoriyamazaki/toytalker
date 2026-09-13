@@ -27,8 +27,10 @@ Cartesiaの設定・有効化手順は [Cartesia TTS導入](docs/cartesia-tts.md
 
 ### コスト記録の方針
 
+- 原価の見方・マージン2.0の根拠・従量課金（前払いポイント）・プレミアムボイスの料金体系は [原価と課金の考え方](docs/pricing-and-cost-model.md) にまとめてある。
 - 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。相槌はデフォルトON。
 - LLMのツール呼び出しは、外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。無料ツール（デバイス設定変更など）はLLMトークンに含まれるので何もしない。[ツールコスト記録](docs/search-cost-tracking.md) を参照。
+- 為替は毎月1日に `toytalker-ops-monthly-lambda` が自動保存し、同時に先月の記録実費・各社請求・単価行の点検をメールで送る。単価は自動更新しない。[月次運用レポート](docs/ops-monthly-report.md) を参照。
 
 ### Lambda一覧
 
@@ -41,6 +43,7 @@ Cartesiaの設定・有効化手順は [Cartesia TTS導入](docs/cartesia-tts.md
 | `toytalk-soniox-stt-lambda` | Soniox一時キー発行 | `backend/toytalk-soniox-stt-lambda` |
 | `toytalker-device-setting-lambda` | デバイス登録・ボイス設定・コスト管理 | `backend/toytalker-device-setting-lambda` |
 | `toytalker-tts-only-lambda` | App用 読み上げ（テキスト→TTSのみ、LLM/STTなし、音声バイナリ直返し） | `backend/toytalker-tts-only-lambda` |
+| `toytalker-ops-monthly-lambda` | 月次運用レポート（為替更新・請求突き合わせ・単価点検、毎月1日にメール） | `backend/toytalker-ops-monthly-lambda` |
 
 ### DynamoDBテーブル一覧
 
