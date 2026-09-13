@@ -156,28 +156,37 @@ def run(config):
     api = Component("api", [sys.executable, "-u", api_script], api_script, config)
     public_url = (config.get("public_url") or "").rstrip("/") or None
     LOG.info("API entry point: %s; public URL: %s", api_script, public_url or "ngrok (dynamic)")
-    tunnel = Component("ngrok", [config["ngrok"], "http", "8000", "--config", config["ngrok_config"]], "8000", config)
+    # "public_url" (a Cloudflare Tunnel hostname served by its own Windows service) is a fixed address:
+    # publish it to the Lambdas and do not run ngrok at all. Clearing public_url brings ngrok back
+    # (see docs/tts-boot-recovery.md). ngrok is only used when public_url is unset.
+    tunnel = None
+    if public_url:
+        stray = find_process(config["ngrok"], "8000")
+        if stray:
+            LOG.info("public_url is set; stopping standby ngrok pid=%s", stray.pid)
+            stray.terminate()
+    else:
+        tunnel = Component("ngrok", [config["ngrok"], "http", "8000", "--config", config["ngrok_config"]], "8000", config)
     synced_url = None
     next_sync = 0
     last_error = None
     while True:
         try:
             api.ensure_running()
-            tunnel.ensure_running()
             try:
                 healthy = get_json("http://127.0.0.1:8000/health").get("status") == "ok"
             except Exception:
                 healthy = False
             api.health(healthy)
-            try:
-                tunnels = get_json("http://127.0.0.1:4040/api/tunnels")["tunnels"]
-                url = next(t["public_url"] for t in tunnels if t["public_url"].startswith("https://"))
-            except Exception:
-                url = None
-            tunnel.health(bool(url))
-            # "public_url" (e.g. a Cloudflare Tunnel hostname run as its own Windows service) is a fixed
-            # address: publish it to the Lambdas instead of the ngrok URL. ngrok stays supervised as a fallback.
-            if public_url:
+            if tunnel is not None:
+                tunnel.ensure_running()
+                try:
+                    tunnels = get_json("http://127.0.0.1:4040/api/tunnels")["tunnels"]
+                    url = next(t["public_url"] for t in tunnels if t["public_url"].startswith("https://"))
+                except Exception:
+                    url = None
+                tunnel.health(bool(url))
+            else:
                 url = public_url
             if healthy and url and (url != synced_url or time.monotonic() >= next_sync):
                 # Do not publish an endpoint until it actually responds through ngrok.

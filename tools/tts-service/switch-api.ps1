@@ -60,8 +60,23 @@ try {
 $h = Wait-Health 'http://127.0.0.1:8000/health' 240
 $mode = if ($h.PSObject.Properties.Name -contains 'engine' -and $h.engine) { 'batch engine' } else { 'original' }
 Write-Output "Local health OK ($mode)"
-$tunnels = (Invoke-RestMethod 'http://127.0.0.1:4040/api/tunnels' -TimeoutSec 10).tunnels
-$url = ($tunnels | Where-Object { $_.public_url -like 'https://*' } | Select-Object -First 1).public_url
-Wait-Health "$url/health" 60 | Out-Null
+$config = Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+if ($config.public_url) {
+    # Fixed public hostname (Cloudflare Tunnel). The edge rule needs the passphrase header from scripts/.env.
+    $url = $config.public_url
+    $edgeLine = Get-Content -LiteralPath (Join-Path $config.root 'scripts\.env') | Where-Object { $_ -match '^ZAKICORP_EDGE_KEY=' } | Select-Object -First 1
+    $headers = @{ 'User-Agent' = 'toytalker-switch/1.0' }
+    if ($edgeLine) { $headers['X-Zakicorp-Edge-Key'] = ($edgeLine -split '=', 2)[1].Trim() }
+    $deadline = (Get-Date).AddSeconds(60)
+    $ok = $false
+    while ((Get-Date) -lt $deadline -and -not $ok) {
+        try { $ok = ((Invoke-RestMethod "$url/health" -TimeoutSec 5 -Headers $headers).status -eq 'ok') } catch { Start-Sleep -Seconds 2 }
+    }
+    if (-not $ok) { throw "No healthy response from $url/health" }
+} else {
+    $tunnels = (Invoke-RestMethod 'http://127.0.0.1:4040/api/tunnels' -TimeoutSec 10).tunnels
+    $url = ($tunnels | Where-Object { $_.public_url -like 'https://*' } | Select-Object -First 1).public_url
+    Wait-Health "$url/health" 60 | Out-Null
+}
 Write-Output "Public health OK: $url"
 Get-Content -LiteralPath "$runtime\logs\supervisor.log" -Tail 6

@@ -42,7 +42,7 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 
 ## 公開経路: Cloudflare Tunnel（2026-09-13切替）
 
-本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 5本の `ZAKICORP_TTS_URL` はこの値で、監視タスクが `config.json` の `public_url` を使って照合・維持する。ngrokは予備として引き続き監視配下で動いているが、Lambdaへは公開しない。
+本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 5本の `ZAKICORP_TTS_URL` はこの値で、監視タスクが `config.json` の `public_url` を使って照合・維持する。`public_url` が設定されている間、監視タスクはngrokを起動しない（2026-09-13 18:02に撤去。起動していれば停止する）。`public_url` を空にするとngrokを再び起動して予備経路に戻る。
 
 | 項目 | 値・場所 |
 |---|---|
@@ -71,7 +71,7 @@ Get-Content .\.local\tts-service\logs\cloudflared-service.log -Tail 5
 - サービスが止まった: 管理者PowerShellで `Start-Service cloudflared`。起動直後に落ちる場合は `cloudflared-service-fix.ps1` を再実行（ImagePathの引数が消えた場合の対処）。
 - PC再起動後: サービスは自動起動。監視タスクとは独立。
 - トンネルを作り直す: `cloudflared tunnel login`（ブラウザで承認）→ `tunnel create <名前>` → `config.yml` の `tunnel`/`credentials-file` を新IDに → `tunnel route dns <名前> tts.zakicorp.com` → `cloudflared-service-fix.ps1`。
-- **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。監視タスクがngrokのURLをLambdaへ再同期する（約1分）。
+- **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。`public_url` が空になると監視タスクがngrokを起動し、そのURLをLambda 5本へ同期する（約1〜2分。ngrokの認証設定 `ngrok.yml` は残してある）。Cloudflareへ戻すときは `-PublicUrl 'https://tts.zakicorp.com'`。
 
 ### 拠点での遮断: 合言葉ヘッダー（2026-09-13 17:30ごろ有効化）
 
@@ -89,7 +89,7 @@ Cloudflareの WAF カスタムルール `tts-edge-key-required`（Security → S
 
 ### 未実施（次の段階）
 
-安定後のngrok撤去、Route 53ホストゾーン削除。
+Route 53の `zakicorp.com` ホストゾーン削除（月$0.50。Cloudflareで安定したら）。
 
 ## APIの版の切り替え（元の `api_server.py` とバッチ版 `api_server_batch.py`）
 
