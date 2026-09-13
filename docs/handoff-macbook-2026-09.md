@@ -14,19 +14,10 @@
 | 4 | 自宅PCへの遠隔手段（Remote Control、Tailscale等） | 未 |
 | 5 | ESP32実機・USBケーブル・スマホ（実機アプリ）の持参 | 未 |
 
-### 1-1. 未コミット変更（2026-09-13 16:02のコミット `aaaabd1` 以降）
+### 1-1. コミット・push・stash（2026-09-13 19:40 時点で完了）
 
-内容は2件。どちらも本番反映は済んでいて、リポジトリへの記録だけが残っている。
-
-- **ZakiCorp TTSの公開経路をngrokからCloudflare Tunnel（`https://tts.zakicorp.com`）へ切替**した記録。`CLAUDE.md`、`docs/tts-boot-recovery.md`、`tools/tts-service/supervisor.py`（`public_url` 対応、User-Agent変更）、`tools/tts-service/switch-api.ps1`（`-PublicUrl`）、新規 `tools/tts-service/cloudflared-service-fix.ps1`。
-- **Qwen3-TTS調査メモの統合**。`docs/qwen3-tts-*-2026-09-12.md` の個別メモ8本を削除し、`qwen3-tts-batch-engine-2026-09-12.md` / `qwen3-tts-capacity-2026-09-12.md` / `qwen3-tts-concurrency-test-plan.md` / `qwen3-tts-current-status.md` へ要点を移した。
-
-pushしないとMacから見えない。コミットは2つに分けてよい。
-
-### 1-2. stash
-
-- `stash@{0}` "Temporary stash for settings": `.claude/settings.local.json` の差分のみ（Git対象外ファイル）。不要なら捨てる。
-- `stash@{1}` "WIP on fix/esp32-audio-chunk-playback": 古いESP32音声修正の作業中断分。現行v0.7とは無関係の可能性が高い。中身を見て捨てるか判断する。
+- 2026-09-13の作業はすべてコミット・push済み。ローカル・リモートとも `main` のみで、worktree・stash・未コミット変更は無い。Macでは `git pull` するだけでよい。
+- 古いstash 2件（設定ファイルの差分と、ESP32音声修正の中断分）は中身を確認のうえ削除済み。
 
 ### 1-3. deploy.sh のMac対応
 
@@ -84,9 +75,20 @@ arduino-cli core install esp32:esp32@3.3.11
 - ESP32実機: `toytalker_v07_serial_nowait`（2026-09-12夜書き込み）。詳細はCLAUDE.md「ESP32-S3ファーム開発」。
 - ZakiCorp TTS: バッチ推論エンジン第2版、公開はCloudflare Tunnel `https://tts.zakicorp.com`、ngrokは予備。
 - Lambda 5本の `ZAKICORP_TTS_URL` は上記固定URL。監視タスク `TTS-AutoStart` が維持する。
+- Cartesia TTS: 本文・相槌・読み上げの5 Lambdaで利用可能（Proプラン）。アプリからのクローンボイス作成はデバイス設定Lambda（`POST /custom-voices` provider=Cartesia、タイムアウト60秒）。ボイス一覧の並びは `toytalker-voices.sort_order` でサーバー制御。[Cartesia TTS導入](cartesia-tts.md)。
+- TTSフォールバック: 主プロバイダーが429/5xx等で失敗したら再試行→ずんだもん（返答単位で固定、Sakura分は別行で記録）。5 Lambdaに導入済み。[仕様と実測](tts-fallback-and-notifications.md)。Proでも同時64件まで429は出ず、96件で27件が切り替わることを実測済み。
+- アプリ: 0.8.6 (24) をTestFlightへ送信済み。内部グループのみで、外部グループ「tester」への追加は未実施（追加すると新バージョンのBeta審査が入る）。開発ビルド（development、24）も端末に入っている。
+- コスト: `service#margin` は2.0。単価表の全行に `provider` / `api_type` 列あり。`cartesia#tts` は$0.00005/字（Pro）、`serper#tool` は$0.001/回。為替2026-09は154.04円（ECB）。月次運用レポートLambdaは毎月1日にメール（10/1が初回本番）。
+- Cartesiaへの問い合わせ（同時接続・組織・クローンの扱い）は2026-09-13に回答済み。要点は [フォールバック仕様の背景](tts-fallback-and-notifications.md)。
 
 ## 5. 残タスク（出張中に着手できるもの）
 
 - CLAUDE.md「未確認」に挙がっている項目のうち、実機とスマホがあればできるもの: スマホからのZakiCorp会話確認、長文分割境界の聞こえ方、stream終端の切断・救済経路の再現。
 - Cloudflare側の未実施: Accessのサービストークン、公開 `/health` の話者一覧非表示、話者登録名の検証。これはCloudflareダッシュボードとLambda側の作業なのでMacからできる。ただしTTSサーバー側の変更が要るものはWindows PCが必要。
 - 先送り項目は [deferred-items.md](deferred-items.md)。
+- 2026-09-13夜時点で次に手を付ける順番（合意済み、いずれも未実装）:
+  1. 認証（Cognito: Apple・Google・LINE）。設計は [deferred-items.md](deferred-items.md) の「ユーザー認証」。
+  2. 前払いポイント制（ウォレット・消費記録・Web購入ページ Stripe Checkout・プッシュ通知）。仕様は [原価と課金の考え方](pricing-and-cost-model.md) 第11節。購入ページは認証の後。
+  3. 単価のモデル単位化（`provider#api_type#model` → `provider#api_type` の順で引く）と、利用状況の行をプロバイダーごとに分ける変更（同じ日に同じ端末で2プロバイダーを使うと `provider` が上書きされる既存の制約）。
+  4. フォールバックの遅延条件（主プロバイダーの応答3秒超で切り替え）と、月次レポートへの「ピーク同時本数」「切り替え回数」の追加。
+  5. Fish Audio (demo) のボイス16件は版権声のため、いずれ削除（使用中キャラクターの確認が先）。
