@@ -166,7 +166,9 @@ TTS調査の現在地は [現状まとめ](docs/qwen3-tts-current-status.md) を
 
 同日深夜にバッチ推論エンジンを実装（`tts-models/faster-qwen3-tts/batch_engine.py`、`api_server_batch.py`。元の `api_server.py` とライブラリは無変更）。要求ごとに独立したKV行を持ち、1/2/4/8/16のCUDA graphを1本のワーカースレッドで回す。HTTP経由で同時16件 20.95倍・初回PCM p95 0.84秒・枯渇0/48、同時4件 9.42倍・0.42秒、単独の初回PCM 0.25秒。隠れ状態は元実装とbf16 1〜2ulp以内で一致。[実装と検証](docs/qwen3-tts-batch-engine-2026-09-12.md)。ユーザー聴取で同一文8件・別話者8件とも問題なし（`measure-000-06` の末尾切れは旧実装にもある生成側のEOS判定で、並列とは無関係と波形で確認）。
 
-**2026-09-13 10:27にユーザー指示で本番をバッチ版へ切替済み。** `tools/tts-service/switch-api.ps1 -ApiScript api_server_batch.py` を昇格実行し、`.local/tts-service/config.json` の `api_script` を設定、監視タスク再起動、ローカル・公開healthを確認。ngrok URLは不変でLambda更新なし。切替前の設定は `.local/tts-service/config.json.20260913-102735.bak` 等に退避。復旧は同スクリプトを `-ApiScript api_server.py` で昇格実行。切替後にngrok経由で同時1/4/8件と別話者8件を確認済み（8件で14.75倍・初回p95 0.63秒・枯渇0）。4件試験で1件だけ28秒の生成があり、同時実行の干渉ではないことを行単位の完全一致検査で確認（他行の有無・行移動で出力差0）。最初のトークンの反復ペナルティ漏れを修正し、10:40に同スクリプトで本番を再起動済み。`supervisor.py` は `config.json` の `api_script` でAPIを選ぶ。手順は [起動・復旧](docs/tts-boot-recovery.md)、結果は [実装と検証](docs/qwen3-tts-batch-engine-2026-09-12.md) 参照。スマホからの会話確認は未実施。
+**2026-09-13 10:27にユーザー指示で本番をバッチ版へ切替済み。** `tools/tts-service/switch-api.ps1 -ApiScript api_server_batch.py` を昇格実行し、`.local/tts-service/config.json` の `api_script` を設定、監視タスク再起動、ローカル・公開healthを確認。ngrok URLは不変でLambda更新なし。切替前の設定は `.local/tts-service/config.json.20260913-102735.bak` 等に退避。復旧は同スクリプトを `-ApiScript api_server.py` で昇格実行。切替後にngrok経由で同時1/4/8件と別話者8件を確認済み（8件で14.75倍・初回p95 0.63秒・枯渇0）。4件試験で1件だけ28秒の生成があり、同時実行の干渉ではないことを行単位の完全一致検査で確認（他行の有無・行移動で出力差0）。最初のトークンの反復ペナルティ漏れを修正し、10:40に同スクリプトで本番を再起動済み。
+
+**第2版（2026-09-13 12:06 本番反映）：** cache長1024（既定）、波形復号のCUDA graph（逐次と差0、起動時に自動照合）、同時32件、長文のサーバー側文末分割（120文字、先行4分割並列、境界30msフェード＋120ms無音）。8001番で同時32件 33.0倍・初回p95 1.30秒・64/64・枯渇0、単独3.83倍、423文字の長文は5分割で約70秒分を7秒。本プロセスのVRAM約20GiB。実運用上限は24件程度と見る。分割境界の聞こえ方は未聴取。[第2版の記録](docs/qwen3-tts-batch-engine-2026-09-12.md)。`supervisor.py` は `config.json` の `api_script` でAPIを選ぶ。手順は [起動・復旧](docs/tts-boot-recovery.md)、結果は [実装と検証](docs/qwen3-tts-batch-engine-2026-09-12.md) 参照。スマホからの会話確認は未実施。
 
 ### 起動
 
