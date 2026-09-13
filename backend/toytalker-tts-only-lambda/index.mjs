@@ -263,7 +263,9 @@ async function ttsToBase64ZakiCorp(text, { speaker = "vivian", language = "Japan
   if (!key || !baseUrl) throw new Error("ZAKICORP_API_KEY or ZAKICORP_TTS_URL is not set");
   const resp = await fetch(`${baseUrl}/v1/tts/stream`, {
     method: "POST",
-    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+    // X-Zakicorp-Edge-Key: Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
+    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json",
+               ...(process.env.ZAKICORP_EDGE_KEY ? { "X-Zakicorp-Edge-Key": process.env.ZAKICORP_EDGE_KEY } : {}) },
     body: JSON.stringify({ text, language, speaker }),
   });
   if (!resp.ok) throw new Error(`ZakiCorp TTS failed: ${resp.status} ${await resp.text()}`);

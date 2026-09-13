@@ -629,6 +629,8 @@
       headers: {
         "Authorization": `Bearer ${key}`,
         "Content-Type": "application/json",
+        // Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
+        ...(process.env.ZAKICORP_EDGE_KEY ? { "X-Zakicorp-Edge-Key": process.env.ZAKICORP_EDGE_KEY } : {}),
       },
       body: JSON.stringify({ text, language, speaker }),
     });

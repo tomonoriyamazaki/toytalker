@@ -21,7 +21,11 @@ def get_json(url):
     # Local and public health checks must not inherit an interactive shell's proxy.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     # Cloudflare's browser integrity check rejects the default "Python-urllib" User-Agent with 403.
-    req = urllib.request.Request(url, headers={"ngrok-skip-browser-warning": "1", "User-Agent": "toytalker-supervisor/1.0"})
+    headers = {"ngrok-skip-browser-warning": "1", "User-Agent": "toytalker-supervisor/1.0"}
+    # Edge passphrase checked by a Cloudflare WAF custom rule (ZAKICORP_EDGE_KEY comes from scripts/.env).
+    if os.environ.get("ZAKICORP_EDGE_KEY"):
+        headers["X-Zakicorp-Edge-Key"] = os.environ["ZAKICORP_EDGE_KEY"]
+    req = urllib.request.Request(url, headers=headers)
     with opener.open(req, timeout=10) as response:
         return json.load(response)
 

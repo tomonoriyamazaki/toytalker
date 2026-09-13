@@ -73,9 +73,23 @@ Get-Content .\.local\tts-service\logs\cloudflared-service.log -Tail 5
 - トンネルを作り直す: `cloudflared tunnel login`（ブラウザで承認）→ `tunnel create <名前>` → `config.yml` の `tunnel`/`credentials-file` を新IDに → `tunnel route dns <名前> tts.zakicorp.com` → `cloudflared-service-fix.ps1`。
 - **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。監視タスクがngrokのURLをLambdaへ再同期する（約1分）。
 
+### 拠点での遮断: 合言葉ヘッダー（2026-09-13 17:30ごろ有効化）
+
+Cloudflareの WAF カスタムルール `tts-edge-key-required`（Security → Security rules）が、`tts.zakicorp.com` 宛てで `X-Zakicorp-Edge-Key` ヘッダーが正しい値でない要求を拠点で **Block** する。期限なし。値の置き場所は次の2か所＋サーバー側 `.env`（値はここに書かない）。
+
+| 置き場所 | 名前 |
+|---|---|
+| Lambda 5本の環境変数 | `ZAKICORP_EDGE_KEY`（ZakiCorp呼び出しのヘッダーに付ける。未設定なら送らない） |
+| Cloudflareのルール式 | `not any(http.request.headers["x-zakicorp-edge-key"][*] eq "<値>")` |
+| `tts-models/faster-qwen3-tts/scripts/.env` | `ZAKICORP_EDGE_KEY`（監視タスクの公開health確認と負荷試験クライアント `run.py` が読む） |
+
+確認: ヘッダー無し／誤りは403、正しい値は200、`toytalk.zakicorp.com` は無関係（ルールは `http.host eq "tts.zakicorp.com"` に限定）。入れ替えは「ルールを旧か新のどちらかなら通すに変更 → Lambda 5本と `.env` を新値に → ルールを新だけに戻す」の順で無停止。Accessのサービストークンは期限があるため採用していない。
+
+公開側 `/health` は `{"status":"ok"}` のみ返す（Cloudflare経由か非ローカルの要求）。話者登録名は `[A-Za-z0-9_-]{1,80}` に限定し既存名は409。
+
 ### 未実施（次の段階）
 
-Cloudflare Accessのサービストークン（Lambdaだけを通す）、公開側 `/health` の話者一覧非表示、話者登録名の検証、安定後のngrok撤去。
+安定後のngrok撤去、Route 53ホストゾーン削除。
 
 ## APIの版の切り替え（元の `api_server.py` とバッチ版 `api_server_batch.py`）
 
