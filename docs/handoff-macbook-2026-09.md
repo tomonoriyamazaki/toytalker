@@ -8,11 +8,12 @@
 
 | # | 項目 | 状態 |
 |---|---|---|
-| 1 | 未コミット変更のコミットとpush | 未 |
-| 2 | stash 2本の整理 | 未 |
+| 1 | 未コミット変更のコミットとpush | 済（2026-09-13 19:40） |
+| 2 | stash 2本の整理 | 済（2026-09-13、確認のうえ削除） |
 | 3 | `backend/*/deploy.sh` のMac対応 | 済（2026-09-13、Mac側で対応） |
-| 4 | 自宅PCへの遠隔手段（Remote Control、Tailscale等） | 未 |
-| 5 | ESP32実機・USBケーブル・スマホ（実機アプリ）の持参 | 未 |
+| 4 | 自宅PCへの遠隔手段（Remote Control、Tailscale等） | 済（Tailscale + Sunshine/Moonlight、2026-09-13 Macから接続確認） |
+| 5 | ESP32実機・USBケーブル・スマホ（実機アプリ）の持参 | 未（出発時に確認） |
+| 6 | 出発直前にWindows Updateを手動確認し、更新と再起動をその場で済ませる | 未 |
 
 ### 1-1. コミット・push・stash（2026-09-13 19:40 時点で完了）
 
@@ -29,13 +30,23 @@
 
 動作確認は本番へデプロイせずに行った。`aws lambda update-function-code` だけ握りつぶす偽の `aws` をPATHの先頭に置いて8本を最後まで実行し、できた `deploy.zip` の中身を `aws lambda get-function` で取得した本番コードと比較して、8本すべて一致を確認した。Macで初めて動かすLambdaは先に各ディレクトリで `npm install` が要る（`openai` 等の依存が無いとesbuildが失敗する）。
 
-### 1-4. 自宅PCの遠隔手段
+### 1-4. 自宅PCの遠隔手段（2026-09-13 21:50 時点で確認済み）
 
-TTSサーバー（RTX 5090）は持ち出せない。自動復帰の仕組みはあるが、止まったときに手を入れる手段が今はない。
+TTSサーバー（RTX 5090）は持ち出せない。自動復帰の仕組みに加えて、止まったときに手を入れる手段を以下で用意した。
 
-- **Claude Code Remote Control**: Windows側で `claude --remote-control` を起動したままにすると、Macのブラウザ（claude.ai/code）やスマホアプリからこのPC上のセッションを操作できる。実行はWindows PC上。TTSサーバー復旧、`.local/tts-service/logs/` の確認向き。
-- **Tailscale + リモートデスクトップ**: 昇格が必要な操作（`switch-api.ps1`、`cloudflared` サービス）向け。導入するなら出発前に接続確認まで済ませる。
-- 復旧手順は [起動・復旧](tts-boot-recovery.md)。Windows更新の再起動はアクティブ時間07:00〜翌01:00の外で起きる（[設定記録](windows-update-restart-control.md)）。
+- **Tailscale**: 自宅PC（`desktop-ojpa2dh`、100.125.70.89）・MacBook・iPhoneの3台が同じアカウントで接続済み。サービスは自動起動。
+- **Sunshine + Moonlight（画面共有）**: Windows側は `SunshineService`（自動起動）が稼働し、47984/47989/47990/48010をLISTEN。ファイアウォール規則「Sunshine」でTCP/UDP受信を全プロファイル許可済み。MacのMoonlightには `DESKTOP-OJPA2DH` がペアリング済みで、手動アドレス 100.125.70.89 も登録済み。2026-09-13にMacをiPhoneテザリング（LAN外）にした状態でTailscale経由の接続試験に成功（1920x1080 HEVC、遅延約41ms、コマ落ち0%、リレーなしの直接接続、PIN入力不要）。昇格が必要な操作（`switch-api.ps1`、`cloudflared` サービス再起動、Windows Update）はこれで行う。
+- **Claude Code Remote Control**: Windows側で `claude --remote-control` を起動したままにすると、Macのブラウザ（claude.ai/code）やスマホアプリからこのPC上のセッションを操作できる。PC再起動で消えるので、消えたらMoonlightから起動し直す。
+- **セッション間メッセージ**: MacのClaude Codeセッションから自宅PCのセッションへメッセージを送れることを確認した（2026-09-13）。相手側の権限内の確認作業を頼む用途。
+- 使えないもの: Windows 11 Homeはリモートデスクトップのホストになれない（`fDenyTSConnections=1` のままでよい）。OpenSSHサーバーは未導入。
+- 復旧手順は [起動・復旧](tts-boot-recovery.md)。Windows更新の再起動はアクティブ時間07:00〜翌01:00の外で起きる（[設定記録](windows-update-restart-control.md)）。再起動後にTTSが自動復帰することは2026-09-13 17:48の再起動試験で確認済み。
+
+### 1-5. 出発前に確認した自宅PCの状態（2026-09-13 21:50）
+
+- 電源設定: AC時のスリープ・休止はともに「なし」。
+- `TTS-AutoStart` は稼働中。直近の起動ログに「public health and Lambda URLs verified」。`cloudflared` サービスは自動起動で稼働中。Lambdaの `ZAKICORP_TTS_URL` は `https://tts.zakicorp.com`。
+- Windows Updateの再起動待ちは無し。出発直前に手動で更新確認し、溜まった更新と再起動をその場で済ませる（留守中の自動再起動を減らす）。
+- TTSサーバーが完全に落ちた場合、Cloudflareが5xxを返せばフォールバックでずんだもんへ切り替わる。応答が遅いだけの状態は切り替わらない（遅延条件は未実装、5節の4）。長引くときは `toytalker-voices` でZakiCorpボイスをCartesiaへ差し替える（Macから可能）。
 
 ## 2. Macのセットアップ
 
