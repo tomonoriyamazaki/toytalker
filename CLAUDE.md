@@ -25,6 +25,7 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 ### コスト記録の方針
 
 - 原価・マージン2.0・前払いポイント・プレミアムボイスの料金体系は [原価と課金の考え方](docs/pricing-and-cost-model.md)。
+- 前払いポイント制（ウォレット・台帳・Stripe Checkout・無料枠・残高0の扱い）の実装仕様は同文書の第11節（2026-09-13合意、未実装。購入機能は認証の後）。
 - 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。
 - LLMのツール呼び出しは、外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。無料ツールは何もしない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第9節。
 - 為替は毎月1日に `toytalker-ops-monthly-lambda` が自動保存し、先月の実費・各社請求・単価行の点検をメールする。単価は自動更新しない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第10節。
