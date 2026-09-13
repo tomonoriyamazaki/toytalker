@@ -1,4 +1,4 @@
-param([switch]$ProbeOnly)
+param([switch]$ProbeOnly, [ValidateSet('api_server.py', 'api_server_batch.py')][string]$ApiScript = 'api_server.py')
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
 $existing = Get-ScheduledTask -TaskName 'TTS-AutoStart' -ErrorAction Stop
@@ -15,6 +15,7 @@ $config = @{
     aws = (Get-Command aws -ErrorAction Stop).Source
     ngrok_config = 'C:\Users\exodj\AppData\Local\ngrok\ngrok.yml'
     logs = (Join-Path $runtime 'logs')
+    api_script = $ApiScript
 }
 foreach ($path in @($config.root, $config.python, $config.ngrok, $config.aws, $config.ngrok_config)) {
     if (-not (Test-Path -LiteralPath $path)) { throw "Missing required path: $path" }
