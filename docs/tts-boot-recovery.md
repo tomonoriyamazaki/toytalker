@@ -87,9 +87,9 @@ Cloudflareの WAF カスタムルール `tts-edge-key-required`（Security → S
 
 公開側 `/health` は `{"status":"ok"}` のみ返す（Cloudflare経由か非ローカルの要求）。話者登録名は `[A-Za-z0-9_-]{1,80}` に限定し既存名は409。
 
-### 未実施（次の段階）
+### 後始末（完了）
 
-Route 53の `zakicorp.com` ホストゾーン削除（月$0.50。Cloudflareで安定したら）。
+Route 53の `zakicorp.com` ホストゾーンは2026-09-13にユーザーが削除した（DNSはCloudflareのみ。`zackey.xyz` のゾーンはRoute 53に残る）。ドメイン登録そのものはお名前.comのまま。
 
 ## APIの版の切り替え（元の `api_server.py` とバッチ版 `api_server_batch.py`）
 

@@ -138,7 +138,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 - 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認してLambda 6本の `ZAKICORP_TTS_URL` を維持する。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
 - 設定・認証情報の所在、正常確認、復旧、ngrokへの戻し方（`switch-api.ps1 -PublicUrl ''`）は [起動・復旧](docs/tts-boot-recovery.md) の「公開経路」節。`cloudflared service install` は `--config` を保存しないので `tools/tts-service/cloudflared-service-fix.ps1` でImagePathに明示する。
 - 拠点での遮断: WAFカスタムルール `tts-edge-key-required` が `X-Zakicorp-Edge-Key` ヘッダー（Lambda環境変数 `ZAKICORP_EDGE_KEY`、サーバー側 `.env` にも同値）の無い要求を403で落とす（2026-09-13）。期限なし。公開側 `/health` は `status` のみ、話者登録名は英数字と `-_` に限定。詳細と鍵の入れ替え手順はランブック。
-- ngrokは2026-09-13 18:02に撤去（`public_url` 設定中は監視タスクが起動しない。`switch-api.ps1 -PublicUrl ''` で復活）。再起動試験済み（17:48、ログイン前にトンネル・API・監視が復帰）。未実施: Route 53ホストゾーン削除。
+- ngrokは2026-09-13 18:02に撤去（`public_url` 設定中は監視タスクが起動しない。`switch-api.ps1 -PublicUrl ''` で復活）。再起動試験済み（17:48、ログイン前にトンネル・API・監視が復帰）。Route 53の `zakicorp.com` ホストゾーンは2026-09-13に削除済み（`zackey.xyz` は残る）。
 
 ### 起動・監視
 
