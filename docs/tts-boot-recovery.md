@@ -107,6 +107,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\tts-service\swit
 
 バッチ版の同時上限は `tts-models/faster-qwen3-tts/scripts/.env` の `TTS_BATCH_CLASSES` で決まる（監視タスクが `.env` を環境変数としてAPIに渡す）。2026-09-13夜から `1,2,4,8,16`（同時16件、待機VRAM約11GiB、他のGPU用途と同居するため）。`1,2,4,8,16,32` にすると同時32件・約19GiB。変更後は `switch-api.ps1` で再起動し、`api.log` の `engine ready: classes=[...] rows=N` で確認する。
 
+波形復号の左文脈は同じ `.env` の `TTS_CONTEXT_FRAMES` で決まる（`api_server_batch.py` の既定値は25）。2026-09-13 19:02から `12`（聴取で25と区別がつかず、同時32件時の復号時間が約半分になる。計測は [バッチエンジンの文書](qwen3-tts-batch-engine-2026-09-12.md) 第3版）。起動ログの `engine ready: ... context_frames=12 (4.2s)` で確認する。行を消すと25に戻る。
+
 ## 自動起動しなかったときの手動手順
 
 管理者PowerShellを開く。以下はPCを再起動せず、TTS・ngrokの起動状態を確認・復旧する手順。
