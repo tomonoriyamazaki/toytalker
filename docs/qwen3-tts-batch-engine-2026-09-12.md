@@ -148,7 +148,7 @@ python benchmarks/concurrency/batch_selftest.py --out benchmarks/concurrency/res
 | 16・short | 32/32 | 0.970秒 | 5.87秒 | 17.75倍 | 0 |
 | 1・long（423文字） | 1/1 | 0.476秒 | 6.58秒 | 10.66倍 | 0 |
 
-同時16件はlocalhostの24.6倍に対して17.8倍で、この規模ではngrok経由の受信側が律速になっている（GPU側の余力ではない）。途切れは0で、各要求の受信は再生より速い。長文の保存音声: `benchmarks/concurrency/results/prod-v2-long-20260913.wav`（分割境界の聴取用）。
+同時16件はlocalhostの24.6倍に対して17.8倍だったが、続けて測った同時24件は48/48成功・初回p95 1.25秒・18.2倍・枯渇0、同時32件は64/64成功・初回p95 1.57秒・32.5倍・枯渇0。32件で32.5倍が通っているので、ngrok経由が16件で頭打ちという見方は撤回する（16〜24件の倍率の低さはバースト構造による計測の揺れ）。ngrokエージェントは東京拠点（jp、往復10ms）に自動接続済み。長文の保存音声: `benchmarks/concurrency/results/prod-v2-long-20260913.wav`（分割境界の聴取用）。
 
 ### 未確認
 
