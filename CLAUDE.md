@@ -75,6 +75,7 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 - 原因不明の問題の診断は「証拠→仮説（推測と明示）→合意→検証」の順で進め、証拠が足りない仮説を断定口調で言わない。対策を出すときは「根治か、痛み止めか」を一言で明示する。
 - 話題が変わる区切りや、コンテキストが膨らんだら、新しいセッションでの再開をこちらから提案する。「引き継ぎmd書いて」と言われたら、状況・決定事項・残タスクを `docs/` にまとめる。
 - 破壊的・不可逆な操作（DynamoDBの削除/更新、Lambda削除、`Remove-Item`、`git reset --hard` 等）のパーミッションは `ask` のままにし、`allow` へ移す提案はしない。
+- MacBookで開発するときは [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md) を最初に読む。Windows固有のルール（PowerShell、スクリーンショット保存先、`tools/tts-service/`）はMacでは該当しない。
 
 ### スクリーンショットの共有
 
@@ -121,23 +122,31 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 ## ZakiCorp TTS（クローンボイス, β版）
 
-ローカルPC (RTX 5090) でQwen3-TTSベースのクローンボイスAPIサーバーを稼働。ngrokで公開し、Lambdaから利用する。
+ローカルPC (RTX 5090) でQwen3-TTSベースのクローンボイスAPIサーバーを稼働。Cloudflare Tunnelで `https://tts.zakicorp.com` として公開し、Lambdaから利用する（2026-09-13にngrokから切替。ngrokは予備）。
 
 ### 現在の状態（2026-09-13時点）
 
 - **本番はバッチ推論エンジン第2版**（2026-09-13 12:06反映）。`tts-models/faster-qwen3-tts/api_server_batch.py` + `batch_engine.py`。要求ごとに独立したKV行を持ち、同時32件・実運用上限24件程度、VRAM約20GiB。元の `api_server.py` は無変更で残す。
-- 切替は `tools/tts-service/switch-api.ps1 -ApiScript <script>` を昇格実行（`.local/tts-service/config.json` の `api_script` を設定し監視タスク再起動）。復旧は `-ApiScript api_server.py`。ngrok URLは不変でLambda更新は不要。
+- 切替は `tools/tts-service/switch-api.ps1 -ApiScript <script> [-PublicUrl <url>]` を昇格実行（`.local/tts-service/config.json` の `api_script`/`public_url` を設定し監視タスク再起動、APIは約40秒停止）。復旧は `-ApiScript api_server.py`。公開URLは固定なのでLambdaの再設定は不要。
 - 未確認: スマホからの会話確認、長文分割境界の聞こえ方。
 - 単独要求の元実装は `StaticCache` が1つで同時要求が互いのKV文脈を上書きする構造があった（言葉の繰り返し・抜けの原因）。バッチ版で解消。
 
+### 公開経路（2026-09-13にCloudflare Tunnelへ切替）
+
+- 公開URLは固定の **`https://tts.zakicorp.com`**。Cloudflare Tunnel `toytalker-tts`（ID `8bc0e7f0-…`、locally-managed）を Windowsサービス `cloudflared`（自動起動）が張る。東京拠点、無料プラン、転送量課金なし。
+- `zakicorp.com` のDNSはRoute 53からCloudflare（無料）へ移行済み。`toytalk.zakicorp.com`（S3+CloudFrontのサイト）とACM検証用CNAMEもCloudflare側に置いた（どちらもDNS only）。登録先はお名前.com、期限は自動更新。
+- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認してLambda 5本の `ZAKICORP_TTS_URL` を維持する。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
+- 設定・認証情報の所在、正常確認、復旧、ngrokへの戻し方（`switch-api.ps1 -PublicUrl ''`）は [起動・復旧](docs/tts-boot-recovery.md) の「公開経路」節。`cloudflared service install` は `--config` を保存しないので `tools/tts-service/cloudflared-service-fix.ps1` でImagePathに明示する。
+- 未実施: Cloudflare Accessのサービストークン（Lambdaだけを通す）、公開側 `/health` の話者一覧非表示、話者登録名の検証、安定後のngrok撤去。
+
 ### 起動・監視
 
-- タスクスケジューラ `TTS-AutoStart` がOS起動30秒後に非対話実行（S4U、通常権限、ログオン不要）。APIサーバー + ngrokを監視し、終了後に再起動。URL変更時にLambda環境変数 `ZAKICORP_TTS_URL` を5つ更新する。
+- タスクスケジューラ `TTS-AutoStart` がOS起動30秒後に非対話実行（S4U、通常権限、ログオン不要）。APIサーバー + ngrokを監視し、終了後に再起動。`public_url` が設定されていればそのURLを、無ければngrokのURLをLambda環境変数 `ZAKICORP_TTS_URL`（5つ）へ同期する。
 - 実装・登録: `tools/tts-service/supervisor.py` / `install.ps1`。実際の配置は `.local/tts-service/`（Git対象外）、ログは `.local/tts-service/logs/`。再適用は保守時間にタスクを停止してから登録する。
 - 元のTTSリポジトリの `setup-tasks.ps1` を実行するとログオン起動に戻る。[起動・復旧手順](docs/tts-boot-recovery.md)。
 - Windows更新は自動更新を受け入れ、アクティブ時間07:00〜翌01:00。[設定記録](docs/windows-update-restart-control.md)。
 
-ngrok URL変更時のLambda更新対象:
+`ZAKICORP_TTS_URL` の同期対象（`public_url` 未設定時はngrok URL変更のたびに更新）:
 
 1. `toytalk-stream-handler-lambda` (app TTS)
 2. `toytalk-api-stream-for-esp32-lambda` (ESP32 TTS)

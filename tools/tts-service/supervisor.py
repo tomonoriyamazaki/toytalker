@@ -20,7 +20,8 @@ FUNCTIONS = ["toytalk-stream-handler-lambda", "toytalk-api-stream-for-esp32-lamb
 def get_json(url):
     # Local and public health checks must not inherit an interactive shell's proxy.
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    req = urllib.request.Request(url, headers={"ngrok-skip-browser-warning": "1"})
+    # Cloudflare's browser integrity check rejects the default "Python-urllib" User-Agent with 403.
+    req = urllib.request.Request(url, headers={"ngrok-skip-browser-warning": "1", "User-Agent": "toytalker-supervisor/1.0"})
     with opener.open(req, timeout=10) as response:
         return json.load(response)
 
@@ -131,8 +132,10 @@ def probe(config):
     health = get_json("http://127.0.0.1:8000/health")
     if health.get("status") != "ok":
         raise RuntimeError("Local TTS not ready")
-    tunnels = get_json("http://127.0.0.1:4040/api/tunnels")["tunnels"]
-    url = next(t["public_url"] for t in tunnels if t["public_url"].startswith("https://"))
+    url = (config.get("public_url") or "").rstrip("/")
+    if not url:
+        tunnels = get_json("http://127.0.0.1:4040/api/tunnels")["tunnels"]
+        url = next(t["public_url"] for t in tunnels if t["public_url"].startswith("https://"))
     if get_json(url + "/health").get("status") != "ok":
         raise RuntimeError("Public TTS not ready")
     aws(config, "lambda", "get-function-configuration", "--function-name", FUNCTIONS[0],
@@ -147,7 +150,8 @@ def run(config):
     # "api_script" selects the API entry point in the TTS repo (api_server.py or api_server_batch.py).
     api_script = config.get("api_script", "api_server.py")
     api = Component("api", [sys.executable, "-u", api_script], api_script, config)
-    LOG.info("API entry point: %s", api_script)
+    public_url = (config.get("public_url") or "").rstrip("/") or None
+    LOG.info("API entry point: %s; public URL: %s", api_script, public_url or "ngrok (dynamic)")
     tunnel = Component("ngrok", [config["ngrok"], "http", "8000", "--config", config["ngrok_config"]], "8000", config)
     synced_url = None
     next_sync = 0
@@ -167,6 +171,10 @@ def run(config):
             except Exception:
                 url = None
             tunnel.health(bool(url))
+            # "public_url" (e.g. a Cloudflare Tunnel hostname run as its own Windows service) is a fixed
+            # address: publish it to the Lambdas instead of the ngrok URL. ngrok stays supervised as a fallback.
+            if public_url:
+                url = public_url
             if healthy and url and (url != synced_url or time.monotonic() >= next_sync):
                 # Do not publish an endpoint until it actually responds through ngrok.
                 if get_json(url + "/health").get("status") != "ok":

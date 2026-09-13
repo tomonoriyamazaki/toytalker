@@ -2,7 +2,11 @@
 # Run in an ADMIN PowerShell from the repository root:
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\tts-service\switch-api.ps1 -ApiScript api_server_batch.py
 # Roll back with -ApiScript api_server.py. The public ngrok URL is kept (ngrok is adopted, not restarted).
-param([Parameter(Mandatory = $true)][ValidateSet('api_server.py', 'api_server_batch.py')][string]$ApiScript)
+# -PublicUrl sets config.json "public_url" (fixed hostname such as https://tts.zakicorp.com served by the
+# cloudflared Windows service); the supervisor then publishes that URL to the Lambdas instead of the ngrok URL.
+# Pass -PublicUrl '' to clear it and go back to the dynamic ngrok URL.
+param([Parameter(Mandatory = $true)][ValidateSet('api_server.py', 'api_server_batch.py')][string]$ApiScript,
+      [string]$PublicUrl = $null)
 $ErrorActionPreference = 'Stop'
 $repo = (Resolve-Path "$PSScriptRoot\..\..").Path
 $runtime = Join-Path $repo '.local\tts-service'
@@ -42,8 +46,11 @@ try {
     # 3) deploy supervisor and select the script
     Copy-Item -LiteralPath "$PSScriptRoot\supervisor.py" -Destination "$runtime\supervisor.py" -Force
     $config | Add-Member -NotePropertyName api_script -NotePropertyValue $ApiScript -Force
+    if ($PSBoundParameters.ContainsKey('PublicUrl')) {
+        $config | Add-Member -NotePropertyName public_url -NotePropertyValue $PublicUrl -Force
+    }
     $config | ConvertTo-Json | Set-Content -LiteralPath $configPath -Encoding UTF8
-    Write-Output "config.json api_script = $ApiScript"
+    Write-Output "config.json api_script = $ApiScript; public_url = $($config.public_url)"
 } finally {
     # 4) restart the supervisor; it launches the selected script and re-adopts ngrok
     Enable-ScheduledTask -TaskName 'TTS-AutoStart' | Out-Null

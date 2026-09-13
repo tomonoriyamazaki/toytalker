@@ -40,6 +40,43 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 
 完了判定には、非対話タスクでの動作確認に加えて、作業保存後にPCを再起動し、ログオンせずスマホでクローン音声の応答を確認する。再起動はこのインストーラーでは実行しない。API/ngrok終了からの復旧の実機試験は音声利用を中断するため、利用していない時間に行う。
 
+## 公開経路: Cloudflare Tunnel（2026-09-13切替）
+
+本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 5本の `ZAKICORP_TTS_URL` はこの値で、監視タスクが `config.json` の `public_url` を使って照合・維持する。ngrokは予備として引き続き監視配下で動いているが、Lambdaへは公開しない。
+
+| 項目 | 値・場所 |
+|---|---|
+| Cloudflareアカウント / ゾーン | exodjp@gmail.com のアカウント、ゾーン `zakicorp.com`（無料プラン。ネームサーバーは `ariadne.ns.cloudflare.com` / `tate.ns.cloudflare.com`、2026-09-13にRoute 53から移行。登録先はお名前.com） |
+| トンネル | 名前 `toytalker-tts`、ID `8bc0e7f0-7f28-409a-bb05-ea1d9c0c9d7c`（locally-managed） |
+| DNS | `tts` → `8bc0e7f0-….cfargotunnel.com` のCNAME（`cloudflared tunnel route dns` で自動作成、プロキシON）。ほかに `toytalk` → CloudFront（DNS only）とACM検証用CNAME（DNS only）をRoute 53から移した |
+| 設定ファイル | `C:\Users\exodj\.cloudflared\config.yml`（ingress: `tts.zakicorp.com` → `http://localhost:8000`、それ以外は404） |
+| 認証情報（Git対象外、秘密） | `C:\Users\exodj\.cloudflared\cert.pem`（`cloudflared tunnel login` で取得）、`C:\Users\exodj\.cloudflared\8bc0e7f0-….json`（トンネル資格情報）。同じ3ファイルの複製が `C:\Windows\System32\config\systemprofile\.cloudflared\` にもある |
+| 常駐 | Windowsサービス `cloudflared`（自動起動、LocalSystem）。`service install` は `--config` を保存しないため、`tools/tts-service/cloudflared-service-fix.ps1`（管理者）でImagePathに `--config` と `--logfile` を明示している |
+| ログ | `.local/tts-service/logs/cloudflared-service.log`（サービス）、`cloudflared.log`（手動実行時） |
+| 監視 | `supervisor.py` は `public_url` があればその `/health` を確認してLambdaへ同期する。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る |
+
+### 正常確認
+
+```powershell
+Get-Service cloudflared
+Invoke-RestMethod https://tts.zakicorp.com/health -TimeoutSec 10
+& 'C:\Program Files (x86)\cloudflared\cloudflared.exe' tunnel info toytalker-tts
+Get-Content .\.local\tts-service\logs\cloudflared-service.log -Tail 5
+```
+
+`tunnel info` で東京拠点（nrt〜）へ3〜4本の接続があれば正常。切替時の実測は [バッチエンジン記録](qwen3-tts-batch-engine-2026-09-12.md) 参照（ngrokと同等、同時32件まで枯渇0）。
+
+### 復旧
+
+- サービスが止まった: 管理者PowerShellで `Start-Service cloudflared`。起動直後に落ちる場合は `cloudflared-service-fix.ps1` を再実行（ImagePathの引数が消えた場合の対処）。
+- PC再起動後: サービスは自動起動。監視タスクとは独立。
+- トンネルを作り直す: `cloudflared tunnel login`（ブラウザで承認）→ `tunnel create <名前>` → `config.yml` の `tunnel`/`credentials-file` を新IDに → `tunnel route dns <名前> tts.zakicorp.com` → `cloudflared-service-fix.ps1`。
+- **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。監視タスクがngrokのURLをLambdaへ再同期する（約1分）。
+
+### 未実施（次の段階）
+
+Cloudflare Accessのサービストークン（Lambdaだけを通す）、公開側 `/health` の話者一覧非表示、話者登録名の検証、安定後のngrok撤去。
+
 ## APIの版の切り替え（元の `api_server.py` とバッチ版 `api_server_batch.py`）
 
 2026-09-13追加。`config.json` の `api_script`（省略時 `api_server.py`）で監視が起動するAPIを選ぶ。`supervisor.py` はこの値を起動コマンドと既存プロセスの照合の両方に使う。`install.ps1 -ApiScript api_server_batch.py` で登録時に指定することもできる。
