@@ -10,7 +10,7 @@
 |---|---|---|
 | 1 | 未コミット変更のコミットとpush | 済（2026-09-13 19:40） |
 | 2 | stash 2本の整理 | 済（2026-09-13、確認のうえ削除） |
-| 3 | `backend/*/deploy.sh` のMac対応 | 済（2026-09-13、Mac側で対応） |
+| 3 | `backend/*/deploy.sh` のMac対応、各Lambdaの `npm install`、ESP32シリアル受信 | 済（2026-09-13、Mac側で対応） |
 | 4 | 自宅PCへの遠隔手段（Remote Control、Tailscale等） | 済（Tailscale + Sunshine/Moonlight、2026-09-13 Macから接続確認） |
 | 5 | ESP32実機・USBケーブル・スマホ（実機アプリ）の持参 | 未（出発時に確認） |
 | 6 | 出発直前にWindows Updateを手動確認し、更新と再起動をその場で済ませる | 未 |
@@ -79,7 +79,8 @@ arduino-cli core install esp32:esp32@3.3.11
 
 - CLAUDE.mdの「PowerShellでgitを実行するときSet-Locationを使わない」「スクリーンショットの保存先」はWindows固有。Macでは該当なし。
 - `tools/tts-service/`（supervisor.py, install.ps1, switch-api.ps1, cloudflared-service-fix.ps1）はWindows PC上でしか意味がない。Macから編集してもよいが、反映はWindows PCで昇格実行が必要。
-- ESP32のシリアルログは `.local/serial-logs/`（Git対象外）にWindows側だけある。Macで取る場合は別途保存する。
+- ESP32のシリアルログは `.local/serial-logs/`（Git対象外）にWindows側だけある。Macでは `.local/serial/capture.sh`（2026-09-13作成、Git対象外）が `/dev/cu.usbmodem*` を921600bpsで読み続けて `.local/serial/esp32.log` へ追記する。書き込みでポートが消えても再接続する。起動は `nohup .local/serial/capture.sh &`、閲覧は `tail -f .local/serial/esp32.log`。Arduino IDEのシリアルモニタとは同時に開けない。実機受信は2026-09-13にMacで確認済み。
+- Macの `npm install` はpackage-lock.jsonを書き換える（Node v25 / Windowsはv22）。Lambdaはesbuildで束ねるので影響はないが、lockの差分はコミットしない。8本のうち依存があるLambda 6本は2026-09-13に `npm install` 済み。
 - 2台で作業するので、切り替えのたびにpush/pullする。デプロイ前に `git log origin/main..HEAD` と `git status` で本番に出す版を確認する（CLAUDE.mdのworktree確認ルールと同じ趣旨）。
 
 ## 4. 出発時点の本番の状態（2026-09-13）
