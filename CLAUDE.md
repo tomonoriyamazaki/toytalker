@@ -36,7 +36,7 @@ Cartesiaの設定・有効化手順は [Cartesia TTS導入](docs/cartesia-tts.md
 
 本文応答が素っ気なくなった原因として、検索後の「前置き禁止・中身だけ」の強い指示がシステムプロンプト末尾に毎ターン入っていた点を修正。App/ESP32両方のメインLambdaで、検索ヒントは「検索前の一言」だけに戻し、検索後の指示は検索結果を返す `functionResponse.response.instruction`（`TOOL_RESULT_INSTRUCTION`）に移して検索直後のターンだけに効かせる。相槌ヒントにも「口調や温かさはいつも通り」を追記。口調が戻ったかはユーザーの会話で確認する。
 
-**デプロイ元の注意（2026-09-13の事故）：** Cartesia TTS対応はブランチ `worktree-cartesia-tts`（`.claude/worktrees/cartesia-tts`、mainの上位集合）にあり、mainには未統合。最初にmainの作業ツリーからデプロイしたため11:14〜11:21の間、App/ESP32メインLambdaからCartesiaが消えた。11:21にworktree側へ同じプロンプト修正を入れて再デプロイし復旧（bundleにCartesia参照あり）。**Lambdaをデプロイする前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する。** 現在、プロンプト修正はworktree（未コミット）とmain作業ツリー（未コミット、同内容）の両方にある。統合はworktree側を正とし、main側の2ファイルは統合前に破棄してよい。
+**デプロイ元の注意（2026-09-13の事故）：** Cartesia TTS対応が別worktreeのブランチにあった時期に、mainの作業ツリーからデプロイしたため11:14〜11:21の間、App/ESP32メインLambdaからCartesiaが消えた。worktree側から再デプロイして復旧。**Lambdaをデプロイする前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する。** 同日中にworktree2本（Cartesia・月次運用Lambda）をmainへ統合し、本文Lambda3つをその統合後のコードから再デプロイ済み。以降はmainがデプロイ元。
 
 ### Lambda一覧
 
