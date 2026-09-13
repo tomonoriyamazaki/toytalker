@@ -109,7 +109,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
       const data = await res.json();
       const systemVoices: Voice[] = data.voices ?? [];
 
-      // ユーザー自身のZakiCorpカスタムボイスは別エンドポイント。
+      // ユーザー自身のカスタムボイス（ZakiCorp / Cartesia）は別エンドポイント。
       // settings.tsx と同じ方式でマージ（GET /voices には含まれない）。
       let customVoices: Voice[] = [];
       if (ownerId) {
@@ -123,7 +123,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
             .map((v: any) => ({
               voice_id: v.voice_id,
               label: v.label,
-              provider: "ZakiCorp",
+              provider: v.provider ?? "ZakiCorp",
               vendor_id: v.vendor_id,
               isCustom: true,
             }));
@@ -325,24 +325,17 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
 
   // ベンダー(provider)別にグルーピング（キャラ設定のボイス選択画面と同じ並び）。
   // ZakiCorp は最後にまとめる。
+  // 並び順はサーバー（sort_order）に従う。各プロバイダーの直後に自分のカスタムボイスを並べる
   const providerOrder = [...new Set(voices.map((v) => v.provider))];
   const voiceSections: { title: string; data: Voice[] }[] = [];
-  const zakicorpSystem: Voice[] = [];
-  const zakicorpCustom: Voice[] = [];
   for (const provider of providerOrder) {
     const pv = voices.filter((v) => v.provider === provider);
     if (pv.length === 0) continue;
-    if (provider === "ZakiCorp") {
-      zakicorpSystem.push(...pv.filter((v) => !v.isCustom));
-      zakicorpCustom.push(...pv.filter((v) => v.isCustom));
-    } else {
-      voiceSections.push({ title: provider, data: pv });
-    }
+    const sys = pv.filter((v) => !v.isCustom);
+    const cus = pv.filter((v) => v.isCustom);
+    if (sys.length > 0) voiceSections.push({ title: provider, data: sys });
+    if (cus.length > 0) voiceSections.push({ title: `${provider} (Custom)`, data: cus });
   }
-  if (zakicorpSystem.length > 0)
-    voiceSections.push({ title: "ZakiCorp（システム）", data: zakicorpSystem });
-  if (zakicorpCustom.length > 0)
-    voiceSections.push({ title: "ZakiCorp（カスタム）", data: zakicorpCustom });
 
   return (
     <Modal visible transparent animationType="none" onRequestClose={handleClose}>
@@ -548,7 +541,6 @@ const st = StyleSheet.create({
     paddingTop: 14,
     paddingBottom: 4,
     backgroundColor: "#f7f7f7",
-    textTransform: "uppercase",
   },
   pickerItem: {
     flexDirection: "row",

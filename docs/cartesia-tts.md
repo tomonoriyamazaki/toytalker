@@ -94,3 +94,26 @@ aws lambda get-function-configuration --function-name toytalk-stream-handler-lam
 - `sonic-3.6` が利用不可の場合は `sonic-3` へ `TTS_TABLE` の `ttsModel` を変更する。
 - 相槌用の短文で先頭無音が長い場合はESP32側の `trimSilence` が吸収する想定。App側は未確認。
 - 感情・話速（`generation_config`）は未使用。必要なら `ttsBytesCartesia` の body に追加する。
+
+## アプリからのクローンボイス作成（2026-09-13）
+
+ZakiCorpのカスタムボイスと同じ画面・同じAPIで、Cartesia Instant cloneも作れるようにした。
+
+- **API**: `POST /custom-voices` の `provider` に `"Cartesia"` を渡す（省略時は ZakiCorp）。デバイス設定Lambdaが音声をそのまま `POST https://api.cartesia.ai/voices/clone`（multipart、`language: ja`）へ送り、返ってきたボイスUUIDを `vendor_id` に保存する。元音声は `toytalker-tts-speakers` の `{owner_id}/cartesia_{voice_id}.{ext}` に控えを残し、`sample_key` に記録する。
+- **一覧**: `GET /custom-voices` は ZakiCorp と Cartesia の両方（system + 自分のもの）を返す。`GET /voices` は owner_id 付きの行を除外する（ZakiCorp限定から一般化）。
+- **削除**: `DELETE /custom-voices/{id}` は Cartesia 側のボイスも `DELETE /voices/{uuid}` で消し、S3の控えも消す。
+- **受け付ける音声**: wav / mp3 / ogg / flac / webm、16MB以下。m4a（iOSのボイスメモなど）はCartesiaが受け付けないため400を返す。アプリの録音はwavなので問題ない。
+- **アプリ**: 録音画面に「作成に使うエンジン」の切替（Cartesia / ZakiCorp、既定Cartesia）。Cartesiaは録音10秒、ZakiCorpは5秒。ボイス選択と読み上げ画面に「Cartesia（カスタム）」の区分を追加。
+- **環境変数**: デバイス設定Lambdaに `CARTESIA_API_KEY` を設定済み。
+- **プラン**: Instant clone はProプラン以上。Freeだと Cartesia が `402 plan_upgrade_required` を返し、Lambdaは502でその文言をそのまま返す（2026-09-13の確認時点ではFreeのままで、ここまで動作確認済み。Pro切替後に登録→一覧→削除を再確認する）。
+- **料金**: クローン作成は無料。利用は標準ボイスと同じ `cartesia#tts` の単価で記録される。プレミアム扱いは今回はしない。
+- **Lambda設定**: クローン作成は5秒前後かかるため、デバイス設定Lambdaのタイムアウトを10秒→60秒、メモリを128MB→256MBに変更（2026-09-13、コンソール設定。deploy.sh では変わらない）。10秒のままだとLambdaだけが途中で止まり、Cartesia側にはボイスが作られて登録漏れになる。
+- **2026-09-13の確認**: Pro切替後、Lambda経由で登録（約5秒）→一覧→削除まで通しで成功。タイムアウト時に残った孤児ボイス1件はCartesia側で削除済み。
+
+## ボイス一覧の並び順（2026-09-13）
+
+- 並び順はサーバー側で決める。`toytalker-voices` の各行の `sort_order`（数値、小さいほど先。無い行は末尾）で並べ、同じ値の中はラベル順。現在は Sakura Internet 10 / Cartesia 20 / ElevenLabs 30 / OpenAI 40 / Google 50 / Gemini 60 / Fish Audio (demo) 70 / ZakiCorp 80。
+- アプリ（設定のボイス選択・読み上げ）は受け取った順にプロバイダーの枠を作り、その直後に自分のカスタムボイスを「（カスタム）」として並べる。ZakiCorpの特別扱いは廃止。新しいプロバイダーはアプリ変更なしで表示される（利用状況グラフの色だけはアプリ側）。
+- 並びを変えたいときは DynamoDB の `sort_order` を直すだけでよい。プロバイダーの位置を変えるなら、そのプロバイダーの全行を同じ値にする。
+- `cartesia_zaki` は本人のクローンなので `owner_id` を本人に付け、公開一覧から外して「Cartesia（カスタム）」に移した（ラベル「Zaki」）。
+- 表示名は `provider` の文字列がそのまま見出しになる（大文字変換は廃止）。2026-09-13に `Sakura` → `Sakura Internet`、`FishAudio` → `Fish Audio (demo)`（版権声のため一時的、いずれ削除）に改名。Lambdaは小文字化して `sakura` / `fish` を含むかで判定するので、この改名でLambda変更は不要。名前を変えるときは「sakura」「fish」「cartesia」「elevenlabs」「openai」「google」「gemini」「zakicorp」のいずれかを含める。自分のカスタムボイスの枠は `<provider> (Custom)`。

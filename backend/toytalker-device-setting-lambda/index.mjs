@@ -1,6 +1,6 @@
 // Node.js 18+ / ESM（index.mjs）
 // Handler: index.handler
-// Env: ZAKICORP_API_KEY, ZAKICORP_TTS_URL（カスタムボイス登録用）
+// Env: ZAKICORP_API_KEY, ZAKICORP_TTS_URL（ZakiCorpカスタムボイス登録用）, CARTESIA_API_KEY（Cartesiaクローンボイス用）
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand, DeleteCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
@@ -9,6 +9,13 @@ const client = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(client);
 const s3 = new S3Client({ region: "ap-northeast-1" });
 const SPEAKERS_BUCKET = "toytalker-tts-speakers";
+
+// ボイス一覧の並び順。各行の sort_order（数値、小さいほど先）で並べ、無い行は末尾。同じ値の中はラベル順。
+// アプリは受け取った順のまま表示するので、並びを変えたいときは DynamoDB の sort_order を直すだけでよい。
+function sortVoices(items) {
+  const order = (v) => (typeof v.sort_order === "number" ? v.sort_order : Number(v.sort_order) || 9999);
+  return [...items].sort((a, b) => order(a) - order(b) || String(a.label ?? "").localeCompare(String(b.label ?? ""), "ja"));
+}
 
 // ---- テーブル定義 ----
 const DEVICES_TABLE        = "toytalker-devices";
@@ -121,10 +128,10 @@ export const handler = async (event) => {
       return response(200, { llms: result.Items ?? [] });
     }
 
-    // ---- GET /voices ---- ボイス一覧取得（ZakiCorpはsystemのみ）
+    // ---- GET /voices ---- ボイス一覧取得（利用者個人のカスタムボイスは除く。owner_id が無い行と system 行だけ）
     if (method === "GET" && path === "/voices") {
       const result = await ddb.send(new ScanCommand({ TableName: VOICES_TABLE }));
-      const voices = (result.Items ?? []).filter(v => v.provider !== "ZakiCorp" || v.owner_id === "system");
+      const voices = sortVoices((result.Items ?? []).filter(v => !v.owner_id || v.owner_id === "system"));
       return response(200, { voices });
     }
 
@@ -548,24 +555,72 @@ export const handler = async (event) => {
       return response(200, { date, conversations });
     }
 
-    // ---- GET /custom-voices ---- ZakiCorpボイス一覧（system + 自分のカスタム）
+    // ---- GET /custom-voices ---- クローンボイス一覧（ZakiCorp / Cartesia の system + 自分のカスタム）
     if (method === "GET" && path === "/custom-voices") {
       const userId = event.queryStringParameters?.owner_id;
       if (!userId) return response(400, { error: "owner_id is required" });
       const result = await ddb.send(new ScanCommand({
         TableName: VOICES_TABLE,
-        FilterExpression: "provider = :p AND (owner_id = :system OR owner_id = :userId)",
-        ExpressionAttributeValues: { ":p": "ZakiCorp", ":system": "system", ":userId": userId },
+        FilterExpression: "(provider = :p OR provider = :c) AND (owner_id = :system OR owner_id = :userId)",
+        ExpressionAttributeValues: { ":p": "ZakiCorp", ":c": "Cartesia", ":system": "system", ":userId": userId },
       }));
-      return response(200, { voices: result.Items ?? [] });
+      return response(200, { voices: sortVoices(result.Items ?? []) });
     }
 
-    // ---- POST /custom-voices ---- カスタムボイス登録
+    // ---- POST /custom-voices ---- カスタムボイス登録（provider: "ZakiCorp"（既定） | "Cartesia"）
     if (method === "POST" && path === "/custom-voices") {
       const body = JSON.parse(event.body ?? "{}");
       const { label, audio_base64, owner_id, mime_type } = body;
       if (!label || !audio_base64) return response(400, { error: "label and audio_base64 are required" });
       if (!owner_id) return response(400, { error: "owner_id is required" });
+      const provider = body.provider === "Cartesia" ? "Cartesia" : "ZakiCorp";
+
+      if (provider === "Cartesia") {
+        // Cartesia Instant clone: 音声をそのまま送り、返ってきたボイスUUIDを vendor_id にする。
+        // 元音声はS3に控えを残す（作り直し・移行用）。
+        const cartesiaKey = process.env.CARTESIA_API_KEY;
+        if (!cartesiaKey) return response(500, { error: "Cartesia not configured" });
+        const mime = (mime_type || "audio/wav").toLowerCase();
+        const ext = /mp3|mpeg|mpga/.test(mime) ? "mp3" : /ogg|oga/.test(mime) ? "ogg" : /flac/.test(mime) ? "flac" : /webm/.test(mime) ? "webm" : /wav/.test(mime) ? "wav" : null;
+        if (!ext) return response(400, { error: `Cartesia does not accept ${mime}. Use wav / mp3 / ogg / flac.` });
+        const audioBuf = Buffer.from(audio_base64, "base64");
+        if (audioBuf.length > 16 * 1024 * 1024) return response(400, { error: "audio must be 16MB or smaller" });
+        const voiceId = `${owner_id}_cartesia_${Date.now()}`;
+
+        const form = new FormData();
+        form.append("clip", new Blob([audioBuf], { type: mime }), `clip.${ext}`);
+        form.append("name", `toytalker:${voiceId}`);
+        form.append("language", "ja");
+        form.append("description", `ToyTalker custom voice "${label}" (owner ${owner_id})`);
+        const cr = await fetch("https://api.cartesia.ai/voices/clone", {
+          method: "POST",
+          headers: { "Authorization": `Bearer ${cartesiaKey}`, "Cartesia-Version": "2026-08-14" },
+          body: form,
+        });
+        if (!cr.ok) {
+          const errText = await cr.text();
+          return response(502, { error: `Cartesia clone failed: ${cr.status} ${errText.slice(0, 300)}` });
+        }
+        const cv = await cr.json();
+        if (!cv?.id) return response(502, { error: "Cartesia clone returned no voice id" });
+
+        const sampleKey = `${owner_id}/cartesia_${voiceId}.${ext}`;
+        await s3.send(new PutObjectCommand({ Bucket: SPEAKERS_BUCKET, Key: sampleKey, Body: audioBuf, ContentType: mime }));
+        await ddb.send(new PutCommand({
+          TableName: VOICES_TABLE,
+          Item: {
+            voice_id: voiceId,
+            provider: "Cartesia",
+            owner_id,
+            vendor_id: cv.id,
+            label,
+            sample_key: sampleKey,
+            created_at: new Date().toISOString(),
+          },
+        }));
+        console.log(`[CustomVoice] Cartesia registered: ${voiceId}, owner=${owner_id}, label=${label}, cartesia_id=${cv.id}, clip=${audioBuf.length}bytes`);
+        return response(200, { voice_id: voiceId, label, provider: "Cartesia", vendor_id: cv.id });
+      }
 
       const apiKey = process.env.ZAKICORP_API_KEY;
       const baseUrl = process.env.ZAKICORP_TTS_URL;
@@ -649,11 +704,26 @@ export const handler = async (event) => {
 
       const ownerId = existing.Item.owner_id;
 
-      // S3から削除
-      await s3.send(new DeleteObjectCommand({
-        Bucket: SPEAKERS_BUCKET,
-        Key: `${ownerId}/speaker_${voiceId}.pt`,
-      }));
+      if (existing.Item.provider === "Cartesia") {
+        // Cartesia側のボイスも消す（無ければ無視）。控えの音声もS3から削除
+        const cartesiaKey = process.env.CARTESIA_API_KEY;
+        if (cartesiaKey && existing.Item.vendor_id) {
+          const dr = await fetch(`https://api.cartesia.ai/voices/${existing.Item.vendor_id}`, {
+            method: "DELETE",
+            headers: { "Authorization": `Bearer ${cartesiaKey}`, "Cartesia-Version": "2026-08-14" },
+          });
+          if (!dr.ok && dr.status !== 404) return response(502, { error: `Cartesia delete failed: ${dr.status}` });
+        }
+        if (existing.Item.sample_key) {
+          await s3.send(new DeleteObjectCommand({ Bucket: SPEAKERS_BUCKET, Key: existing.Item.sample_key }));
+        }
+      } else {
+        // ZakiCorp: S3の embedding を削除
+        await s3.send(new DeleteObjectCommand({
+          Bucket: SPEAKERS_BUCKET,
+          Key: `${ownerId}/speaker_${voiceId}.pt`,
+        }));
+      }
 
       // DynamoDBから削除
       await ddb.send(new DeleteCommand({

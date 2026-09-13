@@ -281,7 +281,9 @@ export default function Settings() {
   };
 
   // カスタムボイス
-  type CustomVoiceItem = { voice_id: string; label: string; vendor_id: string; owner_id?: string; created_at?: string };
+  type CustomVoiceItem = { voice_id: string; label: string; vendor_id: string; owner_id?: string; created_at?: string; provider?: string };
+  type CvProvider = "Cartesia" | "ZakiCorp";
+  const [cvProvider, setCvProvider] = useState<CvProvider>("Cartesia");
   const [customVoices, setCustomVoices] = useState<CustomVoiceItem[]>([]);
   const [customVoicesLoading, setCustomVoicesLoading] = useState(false);
   const [cvName, setCvName] = useState("");
@@ -293,8 +295,17 @@ export default function Settings() {
   const [editingVoiceId, setEditingVoiceId] = useState<string | null>(null);
   const [editingVoiceLabel, setEditingVoiceLabel] = useState("");
   const [cvUploadedFile, setCvUploadedFile] = useState<{ uri: string; name: string; mimeType: string; durationSec: number } | null>(null);
-  const CV_DURATION = 5;
-  const CV_GUIDE_TEXT = "以下の文章を、普段の声で読み上げてください：\n\n「こんにちは！今日はとてもいい天気ですね。一緒にお散歩に行きませんか？楽しいお話をたくさんしましょう。」";
+  // Cartesiaのクローンは長めの音声のほうが似るので10秒、ZakiCorpは従来どおり5秒
+  const CV_DURATION = cvProvider === "Cartesia" ? 10 : 5;
+  const CV_GUIDE_TEXT = "以下の文章を、普段の声で読み上げてください：\n\n「こんにちは！今日はとてもいい天気ですね。一緒にお散歩に行きませんか？楽しいお話をたくさんしましょう。」"
+    + (cvProvider === "Cartesia" ? "\n\n読み終わっても時間が残っていたら、好きな食べ物や今日あったことを、そのまま話し続けてください。" : "");
+  const CV_PROVIDER_LABEL: Record<CvProvider, string> = { Cartesia: "Cartesia（高品質）", ZakiCorp: "ZakiCorp（β版）" };
+  const changeCvProvider = (p: CvProvider) => {
+    if (cvRecording || p === cvProvider) return;
+    setCvProvider(p);
+    setCvRecordSeconds(0);
+    cvWavPathRef.current = "";
+  };
 
   const loadCustomVoices = async () => {
     if (!ownerId) return;
@@ -383,14 +394,16 @@ export default function Settings() {
       const res = await fetch(`${DEVICE_SETTING_URL}/custom-voices`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ label: cvName.trim(), audio_base64: audioBase64, owner_id: ownerId, mime_type: mimeType }),
+        body: JSON.stringify({ label: cvName.trim(), audio_base64: audioBase64, owner_id: ownerId, mime_type: mimeType, provider: cvProvider }),
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         throw new Error(err.error ?? `HTTP ${res.status}`);
       }
       const result = await res.json();
-      Alert.alert("登録完了", `「${result.label}」のボイスを作成しました！\n(${result.extraction_time_ms}ms)`);
+      const engine = result.provider ?? "ZakiCorp";
+      const timing = result.extraction_time_ms ? ` / ${result.extraction_time_ms}ms` : "";
+      Alert.alert("登録完了", `「${result.label}」のボイスを作成しました！\n(${engine}${timing})`);
       navigateTo("custom-voice-list", "back");
       loadCustomVoices();
     } catch (e: any) {
@@ -588,6 +601,26 @@ export default function Settings() {
               />
             </View>
 
+            <View style={{ width: "100%", marginBottom: 20 }}>
+              <Text style={{ fontSize: 13, color: "#666", marginBottom: 6 }}>作成に使うエンジン</Text>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                {(["Cartesia", "ZakiCorp"] as CvProvider[]).map((p) => (
+                  <TouchableOpacity
+                    key={p}
+                    onPress={() => changeCvProvider(p)}
+                    disabled={cvRecording}
+                    style={{ flex: 1, paddingVertical: 10, borderRadius: 10, borderWidth: 1, alignItems: "center",
+                      borderColor: cvProvider === p ? "#007AFF" : "#ddd", backgroundColor: cvProvider === p ? "#E5F0FF" : "#fff", opacity: cvRecording ? 0.5 : 1 }}
+                  >
+                    <Text style={{ fontSize: 14, fontWeight: cvProvider === p ? "700" : "500", color: cvProvider === p ? "#007AFF" : "#555" }}>{CV_PROVIDER_LABEL[p]}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {cvProvider === "Cartesia" && isUpload && !/\.(wav|mp3|ogg|flac)$/i.test(cvUploadedFile?.name ?? "") && (
+                <Text style={{ fontSize: 12, color: "#FF3B30", marginTop: 6 }}>Cartesiaは wav / mp3 / ogg / flac のファイルに対応しています</Text>
+              )}
+            </View>
+
             {!isUpload && (
               <>
                 <View style={{ width: "100%", height: 8, backgroundColor: "#e0e0e0", borderRadius: 4, marginBottom: 8 }}>
@@ -676,7 +709,7 @@ export default function Settings() {
               style={{ flex: 1 }}
               onPress={() => { if (editable) { setEditingVoiceId(v.voice_id); setEditingVoiceLabel(v.label); } }}
             >
-              <Text style={{ fontSize: 16, fontWeight: "600", color: "#333" }}>{v.label}</Text>
+              <Text style={{ fontSize: 16, fontWeight: "600", color: "#333" }}>{v.label}<Text style={{ fontSize: 12, fontWeight: "400", color: "#999" }}>  {v.provider ?? "ZakiCorp"}</Text></Text>
             </TouchableOpacity>
           )}
           {editable && editingVoiceId !== v.voice_id && (
@@ -1006,6 +1039,7 @@ export default function Settings() {
         </View>
         <ScrollView contentContainerStyle={s.wrap}>
           {[
+            { ver: "0.8.6", date: "20260913", desc: "料金にTools項目を追加、Cartesiaのクローンボイス作成に対応" },
             { ver: "0.8.5", date: "20260828", desc: "通信が不安定な環境向けに自動リトライ処理を追加" },
             { ver: "0.8.4", date: "20260811", desc: "デフォルトのボイス/LLMをずんだもん/Geminiに設定" },
             { ver: "0.8.3", date: "20260709", desc: "デバイス登録時の挙動を修正、デバイス検索の高速化と設定画面の改善" },
@@ -1087,33 +1121,26 @@ export default function Settings() {
     );
   }
 
-  const providerOrder = [...new Set(voices.map((v) => v.provider))];
-  const voiceSections: { title: string; data: VoiceItem[] }[] = [];
-  const zakicorpSystem: VoiceItem[] = [];
-  for (const provider of providerOrder) {
-    const providerVoices = voices.filter((v) => v.provider === provider);
-    if (providerVoices.length === 0) continue;
-    if (provider === "ZakiCorp") {
-      zakicorpSystem.push(...providerVoices);
-    } else {
-      voiceSections.push({ title: provider, data: providerVoices });
-    }
-  }
-  if (zakicorpSystem.length > 0) {
-    voiceSections.push({ title: "ZakiCorp（システム）", data: zakicorpSystem });
-  }
+  // 自分のカスタムボイス（ZakiCorp / Cartesia）。各プロバイダーの枠の直後に「（カスタム）」として並べる
   const customAsVoice = customVoices
     .filter(v => v.owner_id !== "system")
-    .map(v => ({ voice_id: v.voice_id, label: v.label, provider: "ZakiCorp", vendor_id: v.vendor_id }));
-  if (customAsVoice.length > 0) {
-    voiceSections.push({ title: "ZakiCorp（カスタム）", data: customAsVoice });
+    .map(v => ({ voice_id: v.voice_id, label: v.label, provider: v.provider ?? "ZakiCorp", vendor_id: v.vendor_id }));
+  // 並び順はサーバーが sort_order で決めて返す。アプリは受け取った順にプロバイダーの枠を作り、
+  // その直後に自分のカスタムボイスを「（カスタム）」として並べる。新しいプロバイダーはアプリ変更なしで表示される。
+  const providerOrder = [...new Set([...voices.map((v) => v.provider), ...customAsVoice.map((v) => v.provider)])];
+  const voiceSections: { title: string; data: VoiceItem[] }[] = [];
+  for (const provider of providerOrder) {
+    const providerVoices = voices.filter((v) => v.provider === provider);
+    const providerCustom = customAsVoice.filter((v) => v.provider === provider);
+    if (providerVoices.length > 0) voiceSections.push({ title: provider, data: providerVoices });
+    if (providerCustom.length > 0) voiceSections.push({ title: `${provider} (Custom)`, data: providerCustom });
   }
 
   const currentVoiceLabel = () => {
     const v = voices.find((v) => v.voice_id === charVoiceId);
     if (v) return `${v.label} (${v.provider})`;
     const cv = customVoices.find((v) => v.voice_id === charVoiceId);
-    if (cv) return `${cv.label} (ZakiCorp)`;
+    if (cv) return `${cv.label} (${cv.provider ?? "ZakiCorp"})`;
     return charVoiceId;
   };
 
@@ -1420,7 +1447,7 @@ const s = StyleSheet.create({
   headerTitle:             { fontSize: 18, fontWeight: "600" },
   back:                    { fontSize: 16, color: "#007AFF" },
   // キャラクター一覧
-  listSectionHeader:       { fontSize: 13, fontWeight: "700", color: "#555", marginTop: 16, marginBottom: 6, textTransform: "uppercase" },
+  listSectionHeader:       { fontSize: 13, fontWeight: "700", color: "#555", marginTop: 16, marginBottom: 6 },
   characterCard:           { flexDirection: "row", alignItems: "center", backgroundColor: "#f9f9f9", padding: 14, borderRadius: 10, borderWidth: 1, borderColor: "#e0e0e0", gap: 8 },
   characterName:           { fontSize: 15, fontWeight: "600" },
   characterDesc:           { fontSize: 12, color: "#888", marginTop: 2 },
