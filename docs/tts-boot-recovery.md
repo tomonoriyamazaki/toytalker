@@ -40,6 +40,20 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 
 完了判定には、非対話タスクでの動作確認に加えて、作業保存後にPCを再起動し、ログオンせずスマホでクローン音声の応答を確認する。再起動はこのインストーラーでは実行しない。API/ngrok終了からの復旧の実機試験は音声利用を中断するため、利用していない時間に行う。
 
+## APIの版の切り替え（元の `api_server.py` とバッチ版 `api_server_batch.py`）
+
+2026-09-13追加。`config.json` の `api_script`（省略時 `api_server.py`）で監視が起動するAPIを選ぶ。`supervisor.py` はこの値を起動コマンドと既存プロセスの照合の両方に使う。`install.ps1 -ApiScript api_server_batch.py` で登録時に指定することもできる。
+
+登録し直さずに切り替えるには、管理者PowerShellでリポジトリルートから:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\tts-service\switch-api.ps1 -ApiScript api_server_batch.py
+```
+
+処理内容: `.local` の `config.json`・`supervisor.py` を日時付きで退避 → タスクを無効化・停止 → 8000番で待ち受けているAPIプロセスを停止 → `supervisor.py` を配置し `api_script` を設定 → タスクを有効化・起動 → ローカルhealth（最大240秒）→ ngrok公開healthを確認。ngrokは停止しないので公開URLは変わらず、Lambdaの更新は起きない。音声は停止からhealth復帰までの約40秒間止まる。
+
+復旧は同じスクリプトを `-ApiScript api_server.py` で実行する。バッチ版の詳細は [実装と検証](qwen3-tts-batch-engine-2026-09-12.md)。切り替え後は `Invoke-RestMethod http://127.0.0.1:8000/health` の応答に `engine` があればバッチ版。
+
 ## 自動起動しなかったときの手動手順
 
 管理者PowerShellを開く。以下はPCを再起動せず、TTS・ngrokの起動状態を確認・復旧する手順。

@@ -40,6 +40,7 @@ def configure_environment(config):
     os.environ["AWS_SHARED_CREDENTIALS_FILE"] = str(Path(config["profile"]) / ".aws/credentials")
     os.environ["AWS_CONFIG_FILE"] = str(Path(config["profile"]) / ".aws/config")
     os.environ["PYTHONUNBUFFERED"] = "1"
+    os.environ["PYTHONIOENCODING"] = "utf-8"
     for line in (Path(config["root"]) / "scripts/.env").read_text(encoding="utf-8-sig").splitlines():
         if line.strip() and not line.lstrip().startswith("#") and "=" in line:
             key, value = line.split("=", 1)
@@ -143,7 +144,10 @@ def probe(config):
 
 
 def run(config):
-    api = Component("api", [sys.executable, "-u", "api_server.py"], "api_server.py", config)
+    # "api_script" selects the API entry point in the TTS repo (api_server.py or api_server_batch.py).
+    api_script = config.get("api_script", "api_server.py")
+    api = Component("api", [sys.executable, "-u", api_script], api_script, config)
+    LOG.info("API entry point: %s", api_script)
     tunnel = Component("ngrok", [config["ngrok"], "http", "8000", "--config", config["ngrok_config"]], "8000", config)
     synced_url = None
     next_sync = 0
