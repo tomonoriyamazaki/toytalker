@@ -18,6 +18,8 @@ export interface StageConfig {
   readonly cartesiaDefaultVoiceId: string;
   /** speaker embedding (.pt) のバックアップ先。S3バケット名は全世界で一意なので環境名を付ける */
   readonly speakersBucketName: string;
+  /** ESP32ファームのOTA配布先（manifest.json と .bin）。Soniox鍵発行Lambdaが読んで署名付きURLを返す */
+  readonly firmwareBucketName: string;
   /** Lambdaのアーキテクチャ。arm64は料金2割減。切替は実機確認とセット */
   readonly architecture: "x86_64" | "arm64";
   /**
@@ -48,6 +50,7 @@ export const stages: Record<StageName, StageConfig> = {
     stage: "rnd",
     account: "342082316736",
     speakersBucketName: "toytalker-tts-speakers", // 既存バケット名をそのまま維持
+    firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
     existingRoles: {
       lambdaRoleArn: "arn:aws:iam::342082316736:role/toytalk-lambda-role-dev",
       opsLambdaRoleArn: "arn:aws:iam::342082316736:role/toytalker-ops-monthly-role",
@@ -60,18 +63,21 @@ export const stages: Record<StageName, StageConfig> = {
     stage: "stg",
     account: "",
     speakersBucketName: "toytalker-tts-speakers-stg",
+    firmwareBucketName: "toytalker-firmware-stg",
   },
   prod: {
     ...common,
     stage: "prod",
     account: "",
     speakersBucketName: "toytalker-tts-speakers-prod",
+    firmwareBucketName: "toytalker-firmware-prod",
   },
   "prod-dg": {
     ...common,
     stage: "prod-dg",
     account: "",
     speakersBucketName: "toytalker-tts-speakers-prod-dg",
+    firmwareBucketName: "toytalker-firmware-prod-dg",
   },
 };
 

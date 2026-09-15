@@ -41,6 +41,7 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 3. **済（コードのみ、SSMへの投入は未実行）環境設定ファイルとSSMの名前。** `infra/config/stages.ts` と `infra/lib/secrets.ts`。RnDのLambda環境変数からSSMへ写すスクリプトは `infra/scripts/migrate-secrets-from-lambda.ts`。SSMに入れるまでは `--context secretsSource=lambda` で既存Lambdaの環境変数を読んでsynth/diffできる（RnD限定）。
 4. **済（2026-09-16 05:00 JST）RnDの既存資源を `cdk import` で引き取った。** 手順は [infra/README.md](../infra/README.md)。`cdk bootstrap` → SSMへ11件投入（`migrate-secrets-from-lambda.ts`）→ `--context importPhase=true` のテンプレート（36資源）で `cdk import`。import前後でLambda 8本の設定・コードハッシュ・環境変数が同一であることを確認した（更新日時だけCloudFormationのタグ付けで変わる）。IAMロールはimportせず、次のdeployでCDK管理の最小権限ロール（関数ごと、使うテーブルだけ）へ差し替えた。
 5. **済（同日 05:16 JST）初回 `cdk deploy` でドリフトなし。** Replaceなし。変わったもの: ロール9つ新設と差し替え、Node 22→24（3本）、ESP32用メインのメモリ 2024→2048、Function URL公開許可と温めルールのPermission追加（旧Sidは残る）。deploy直後に実機からの会話1件がDynamoDB・LLM・検索・TTSまで新ロールで成功。ドリフト検出は IN_SYNC。**ここでdeploy.shの役目が終わった。以後RnDへの反映は `cdk deploy --context stage=rnd`。**
+   - 同日06:24 JST、ESP32 OTA（main b18c70d）に合わせて2回目のdeploy: Soniox鍵発行Lambdaのタイムアウト3→5、`toytalker-devices` 書き込み、ファーム配布バケット `toytalker-firmware`（手作業で作成、CDKは `fromBucketName` で参照のみ。名前は `stages.ts` の `firmwareBucketName`）の読み取り、環境変数 `FIRMWARE_BUCKET`。デバイス設定Lambdaもmainの版へ。
    - 未処理: 旧ロール `toytalk-lambda-role-dev` `toytalker-ops-monthly-role` `toytalker-ops-monthly-scheduler-role` と、旧Permission（Sid `FunctionURLAllowPublicAccess` `FunctionURLAllowInvokeAction` `toytalker-warmer`）の削除。実機の連続会話試験が済んでから消す。
 6. **済（スクリプトのみ）マスターデータの投入スクリプト。** `infra/scripts/export-master-data.ts` / `import-master-data.ts`。出力先 `infra/master-data/` はGit対象外（人格プロンプトを含む）。
 7. **STGアカウントを作って `cdk bootstrap` → `cdk deploy`。** `stages.ts` の `account` を埋め、SSMに鍵を入れ、マスターデータを投入し、アプリとESP32の接続先をSTGへ向けて実機確認。
@@ -55,6 +56,16 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 - スタックは `terminationProtection: true`、テーブルとS3は `RemovalPolicy.RETAIN`、テーブルは削除保護ON。
 - ロググループもCDK管理（保持期間は現状どおり無期限。変えるなら `stages.ts` に足す）。
 - `cdk.json` は `versionReporting: false`（`AWS::CDK::Metadata` を出さない。import時に余計な資源を作らないため）。
+
+## 秘密の実行時取得（2026-09-16合意、未実装）
+
+今は「CDKがdeploy時にSSMを読み、Lambda環境変数に焼く」方式。これを「Lambdaが初期化時にSSMを読み、メモリに保持する」方式へ変える。
+
+- 理由: 環境変数はLambdaの設定を読める人に平文で見え、CDKがS3に上げるテンプレートにも入る。実行時取得なら鍵は関数のメモリにしかなく、読めるのはその関数のロールだけ。鍵の差し替えもSSMを変えるだけでdeploy不要になる。
+- 速度: 初期化（コールドスタート）に `GetParameters` 1〜2回分（30〜60ms）が足される。2回目以降は保持した値を使うので環境変数と同じ。温めで初期化はほぼ起きない（週1〜5回）ので体感差なし。
+- やり方: 共通モジュール1つを8本に入れ、初期化時に10件ずつ並列取得、5分以上経ったら裏で取り直す。CDKは環境変数から鍵を外し、ロールに `ssm:GetParameters` を足す。AWS管理キーの復号はSSM経由で自動的に許可される。AWS公式の Parameters and Secrets Lambda Extension はレイヤー追加とHTTP呼び出しへの書き換えが要るので使わない。
+- 時期: STGを作る前。8本のコードに手が入るので実機試験が要る。先にやればSTGは最初から環境変数に鍵の無い状態で立ち上がる。
+- 秘密でない設定（`ZAKICORP_TTS_URL`・`CARTESIA_DEFAULT_VOICE_ID`・`SONIOX_MODEL`・`FIRMWARE_BUCKET`・`OPS_SNS_TOPIC_ARN`）は環境変数のまま。
 
 ## 命名の見直し（2026-09-16、未決定）
 

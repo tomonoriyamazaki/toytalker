@@ -186,14 +186,14 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     name: "toytalk-soniox-stt-lambda",
     dir: "toytalk-soniox-stt-lambda",
     memorySize: 128,
-    timeoutSeconds: 3,
+    timeoutSeconds: 5, // OTA判定でS3のmanifestを読むため3→5（2026-09-16）
     format: "esm",
-    env: ["SONIOX_API_KEY", "SONIOX_MODEL"],
+    env: ["SONIOX_API_KEY", "SONIOX_MODEL", "FIRMWARE_BUCKET"],
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: false,
-    readTables: ["toytalker-devices"],
-    readWriteTables: [],
+    readTables: [],
+    readWriteTables: ["toytalker-devices"], // firmware_version 等を UpdateItem で記録
   },
   {
     id: "DeviceSetting",
@@ -295,6 +295,7 @@ export class ToyTalkerStack extends cdk.Stack {
       CARTESIA_DEFAULT_VOICE_ID: config.cartesiaDefaultVoiceId,
       ZAKICORP_TTS_URL: config.zakicorpTtsUrl,
       SONIOX_MODEL: config.sonioxModel,
+      FIRMWARE_BUCKET: config.firmwareBucketName,
       OPS_SNS_TOPIC_ARN: opsTopic.topicArn,
     };
 
@@ -372,6 +373,11 @@ export class ToyTalkerStack extends cdk.Stack {
 
     // ---- デバイス設定Lambda: クローンボイス登録でS3へ保存・削除 ----
     if (!importPhase) speakersBucket.grantReadWrite(functions.get("toytalker-device-setting-lambda")!);
+
+    // ---- ESP32ファームのOTA配布バケット（手作業で作成、CDKは参照のみ） ----
+    // Soniox鍵発行Lambdaが manifest.json を読み、.bin の署名付きURL（10分）を返す。署名はロールの資格情報なので読み取り権限が要る
+    const firmwareBucket = s3.Bucket.fromBucketName(this, "FirmwareBucket", config.firmwareBucketName);
+    if (!importPhase) firmwareBucket.grantRead(functions.get("toytalk-soniox-stt-lambda")!);
 
     // ---- 温めルール（5分ごと、5本へ {"warmup":true}） ----
     const warmTargets = FUNCTIONS.filter((s) => s.warm).map((s) => functions.get(s.name)!);
