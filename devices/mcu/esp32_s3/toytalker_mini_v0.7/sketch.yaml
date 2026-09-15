@@ -1,0 +1,4 @@
+# Arduino IDE 2 / arduino-cli がこのスケッチを開いたときに選ぶボード設定。
+# 実機の書き込み設定（ESP32S3 Dev Module, PSRAM有効, Flash 4MB, No FS 4MB (2MB APP x2), USB CDC On Boot）と同じ。
+# ポートは環境ごとに違うので書かない。ビルド確認: arduino-cli compile devices/mcu/esp32_s3/toytalker_mini_v0.7
+default_fqbn: esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=no_fs,CDCOnBoot=cdc

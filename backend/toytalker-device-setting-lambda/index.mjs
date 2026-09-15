@@ -298,25 +298,36 @@ export const handler = async (event) => {
       return response(200, result.Item);
     }
 
-    // ---- PUT /devices/{device_id} ---- デバイス設定更新（character_id / device_name / backchannel_enabled）
+    // ---- PUT /devices/{device_id} ---- デバイス設定更新（character_id / device_name / backchannel_enabled / fw_channel / fw_target）
+    // fw_channel は OTA の配布チャネル（stable|beta）、fw_target は版の固定（空文字で解除）。docs/esp32-ota-settings-plan.md
     if (method === "PUT" && path.startsWith("/devices/")) {
       const device_id = decodeURIComponent(path.split("/")[2]);
       const body      = JSON.parse(event.body ?? "{}");
-      const { character_id, device_name, backchannel_enabled } = body;
+      const { character_id, device_name, backchannel_enabled, fw_channel, fw_target } = body;
 
       const updates = ["last_seen = :t"];
+      const removes = [];
       const vals = { ":t": new Date().toISOString() };
       if (character_id        !== undefined) { updates.push("character_id = :c");        vals[":c"] = character_id; }
       if (device_name         !== undefined) { updates.push("device_name = :n");         vals[":n"] = device_name; }
       if (backchannel_enabled !== undefined) { updates.push("backchannel_enabled = :b"); vals[":b"] = backchannel_enabled; }
-      if (character_id === undefined && device_name === undefined && backchannel_enabled === undefined) {
-        return response(400, { error: "character_id, device_name, or backchannel_enabled is required" });
+      if (fw_channel !== undefined) {
+        if (fw_channel !== "stable" && fw_channel !== "beta") return response(400, { error: "fw_channel must be stable or beta" });
+        updates.push("fw_channel = :fc"); vals[":fc"] = fw_channel;
+      }
+      if (fw_target !== undefined) {
+        if (fw_target === "" || fw_target === null) removes.push("fw_target");
+        else if (typeof fw_target !== "string" || !/^[A-Za-z0-9._-]{1,32}$/.test(fw_target)) return response(400, { error: "fw_target is invalid" });
+        else { updates.push("fw_target = :ft"); vals[":ft"] = fw_target; }
+      }
+      if (updates.length === 1 && removes.length === 0) {
+        return response(400, { error: "character_id, device_name, backchannel_enabled, fw_channel, or fw_target is required" });
       }
 
       await ddb.send(new UpdateCommand({
         TableName: DEVICES_TABLE,
         Key: { device_id },
-        UpdateExpression: "SET " + updates.join(", "),
+        UpdateExpression: "SET " + updates.join(", ") + (removes.length ? " REMOVE " + removes.join(", ") : ""),
         ExpressionAttributeValues: vals,
       }));
       return response(200, { device_id, message: "Device updated" });

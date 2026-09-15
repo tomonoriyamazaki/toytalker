@@ -6,6 +6,8 @@ echo "📦 Bundling with esbuild..."
 npx esbuild index.mjs --bundle --platform=node --format=esm \
   --external:@aws-sdk/client-dynamodb \
   --external:@aws-sdk/lib-dynamodb \
+  --external:@aws-sdk/client-s3 \
+  --external:@aws-sdk/s3-request-presigner \
   --outfile=bundle.mjs
 
 echo "📁 Creating zip..."
