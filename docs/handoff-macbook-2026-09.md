@@ -78,6 +78,7 @@ arduino-cli core install esp32:esp32@3.3.11
 ## 3. Macで違うこと・触らないもの
 
 - CLAUDE.mdの「PowerShellでgitを実行するときSet-Locationを使わない」「スクリーンショットの保存先」はWindows固有。Macでは該当なし。
+- Macのスクリーンショット保存先は `~/Pictures/Screenshots`（2026-09-14に `defaults write com.apple.screencapture location` で設定）。「スクショ撮ったから見て」ではここを新しい順に見る。フォルダが空なら、クリップボードにコピーするモードで撮っている可能性が高い（設定の不具合ではない）。
 - `tools/tts-service/`（supervisor.py, install.ps1, switch-api.ps1, cloudflared-service-fix.ps1）はWindows PC上でしか意味がない。Macから編集してもよいが、反映はWindows PCで昇格実行が必要。
 - ESP32のシリアルログは `.local/serial-logs/`（Git対象外）にWindows側だけある。Macでは `.local/serial/capture.sh`（2026-09-13作成、Git対象外）が `/dev/cu.usbmodem*` を921600bpsで読み続けて `.local/serial/esp32.log` へ追記する。書き込みでポートが消えても再接続する。起動は `nohup .local/serial/capture.sh &`、閲覧は `tail -f .local/serial/esp32.log`。Arduino IDEのシリアルモニタとは同時に開けない。実機受信は2026-09-13にMacで確認済み。
 - Macの `npm install` はpackage-lock.jsonを書き換える（Node v25 / Windowsはv22）。Lambdaはesbuildで束ねるので影響はないが、lockの差分はコミットしない。8本のうち依存があるLambda 6本は2026-09-13に `npm install` 済み。
