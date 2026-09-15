@@ -40,3 +40,6 @@ fp-info-cache
 
 # 個人メモ（取引先名などを含みうる打ち合わせ準備。公開リポジトリに含めない）
 docs/*meeting-prep*.md
+
+# draw.io temporary backups (created while a file is open)
+.$*.bkp
