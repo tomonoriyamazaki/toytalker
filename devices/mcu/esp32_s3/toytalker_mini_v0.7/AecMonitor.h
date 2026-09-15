@@ -15,10 +15,10 @@
 
 constexpr bool AEC_ENABLED = true;  // false: new I2S driver + original level monitor, for comparison
 constexpr bool AEC_RESET_EACH_TURN = true; // compare against the old retained filter state
-// Build the comparison with -DTOYTALKER_AEC_NLP_LEVEL=1 (AGGR).
-// Default remains NORMAL; only this parameter differs between the A/B builds.
+// Default is AGGR (1), the configuration verified on the device (2026-09-12).
+// Build with -DTOYTALKER_AEC_NLP_LEVEL=0 to compare against NORMAL.
 #ifndef TOYTALKER_AEC_NLP_LEVEL
-#define TOYTALKER_AEC_NLP_LEVEL 0
+#define TOYTALKER_AEC_NLP_LEVEL 1
 #endif
 static_assert(TOYTALKER_AEC_NLP_LEVEL == 0 || TOYTALKER_AEC_NLP_LEVEL == 1,
               "AEC comparison supports NORMAL(0) and AGGR(1) only");

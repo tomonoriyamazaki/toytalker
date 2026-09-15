@@ -90,11 +90,12 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 
 ### 現在の状態（2026-09-13時点）
 
-- 開発先は [v0.7](devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)。[v0.6](devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino) は音量方式の検証版、[v0.5](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino) は実機確認済み安定版として保持。OTAは保留。
+- 開発先は [v0.7](devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)（OTA対応、NLP既定=AGGR、`sketch.yaml` にボード設定あり）。[v0.6](devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino) は音量方式の検証版、[v0.5](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino) は実機確認済み安定版として保持。
 - 実機に入っている版は `toytalker_v07_serial_nowait`（2026-09-12夜書き込み）。構成: AEC後のAC RMSで音声割り込み判定、NLP=AGGR、音声割り込みON、ボタン即時消音、AEC毎ターン再作成、TLSはPSRAM固定、USBログ送信待ち0。TTSはCartesia基準。
-- 同じ設定で再ビルドするには `--build-property 'compiler.cpp.extra_flags=-DTOYTALKER_AEC_NLP_LEVEL=1'` を付ける（既定NLPはNORMAL）。
+- NLP既定はAGGR（2026-09-16にNORMALから変更。実機構成と同じ）。NORMALで比較するときは `--build-property 'compiler.cpp.extra_flags=-DTOYTALKER_AEC_NLP_LEVEL=0'`。
 - AEC調整は一旦終了。「途中停止は減ったが、声で止めるには近づく必要がある」というトレードオフは既知で、最終的な限界とは扱わない。AEC本体の時刻整列・入力飽和・フィルタ等に未検証の改善候補あり。
 - 未確認: stream終端の切断・救済経路の実機再現、Soniox再接続後の録音停止（別件）、検出前・未接続中の音声保持（未実装）。
+- **OTAは2026-09-15に実装済み、実機未検証。** **フォルダは v0.7 の1つで、配布した版は git タグ `fw-<版>` で残す**（版ごとのフォルダは作らない。2026-09-16決定）。配布する版は `bash devices/mcu/esp32_s3/tools/publish-firmware.sh beta` でS3へ発行、`stable --promote` で全機へ。更新確認は起動時にSoniox一時キー取得の応答で行い、本体はS3から直接取る。仕様・検証手順・未実施の本番操作は [OTA実装](docs/esp32-ota-settings-plan.md)。
 - スマホから音声割り込み・相槌を再起動なしでON/OFFする案は未実装。相槌設定の本体反映は起動時、音声割り込みはファーム内固定。[設定同期の相談記録](docs/esp32-ota-settings-plan.md)。
 
 ### 環境・ビルド
@@ -109,6 +110,8 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 ```powershell
 arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=no_fs,CDCOnBoot=cdc --build-path "$env:TEMP/toytalker_v07_build" devices/mcu/esp32_s3/toytalker_mini_v0.7
 ```
+
+`sketch.yaml` の `default_fqbn` があるので `--fqbn` を省略してもよい。
 
 ### 調査メモ
 

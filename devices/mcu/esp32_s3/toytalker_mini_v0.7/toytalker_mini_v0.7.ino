@@ -1,5 +1,8 @@
-// toytalker_mini_v0.7 — experimental AEC voice barge-in
-// v0.5安定版・v0.6音量方式を保持。AEC後の音量で停止し、通常STTへ戻す実験版。
+// toytalker_mini_v0.7 — AEC voice barge-in（実機確認済み構成）+ OTA
+// v0.5安定版・v0.6音量方式を保持。このフォルダには最新のソースだけを置き、配布した版は
+// git のタグ fw-<版> で残す（tools/publish-firmware.sh が付ける）。版は FirmwareVersion.h。
+// OTA: OtaUpdater.h / AmazonRootCA.h、起動時の更新確認（startNormalOperation）、LED_BLINK_OTA。
+// NLP既定=AGGR（実機構成）。設計は docs/esp32-ota-settings-plan.md。
 // 受信(producer)とI2S再生(consumer)をFreeRTOSタスクで分離し、PSRAMリングバッファで吸収
 // LED制御はすべてdigitalWrite
 
@@ -29,6 +32,8 @@
 #include "TlsMemory.h"
 #include "SttMicFilter.h"
 #include "SonioxPreconnect.h"
+#include "FirmwareVersion.h"
+#include "OtaUpdater.h"
 #include <esp_arduino_version.h>
 
 // ==== デバッグ設定 ====
@@ -108,7 +113,8 @@ enum LEDMode {
   LED_ON,          // 点灯 = 録音中（話してOK）
   LED_BLINKING,    // 600ms周期 = 再生中
   LED_BLINK_SLOW,  // 1.2s周期 = 準備中（起動〜録音準備完了）
-  LED_BLINK_FAST   // 300ms周期 = BLE設定モード
+  LED_BLINK_FAST,  // 300ms周期 = BLE設定モード
+  LED_BLINK_OTA    // 120ms周期 = ファーム更新中（電源を切らない）
 };
 
 volatile LEDMode currentLEDMode = LED_OFF;
@@ -117,6 +123,12 @@ hw_timer_t* ledTimer = NULL;
 bool ampOn = false;
 BargeInFlag bargeInRequested;
 volatile bool sonioxPreconnectPending = false;  // 再生中の先行WS接続が進行中か
+
+// (最初の関数定義。Arduinoの自動プロトタイプはこの直前に入るので、enum等より後に置く)
+// OTA後の初回起動でコアが自動で有効印を付けるのを止める。有効印は startNormalOperation() で
+// Wi-Fi接続とSonioxキー取得に成功してから ota::confirmRunningImage() が付ける。
+// それより前に落ちる版はブートローダーが旧版へ戻す。コア側はCなので extern "C" が要る。
+extern "C" bool verifyRollbackLater() { return true; }
 
 void IRAM_ATTR onBargeInButton() {
   bargeInRequested.setFromISR(PIN_AMP_SD);
@@ -664,10 +676,10 @@ void stopBLE() {
 // ==== LED タイマー割り込み（30ms周期）====
 void IRAM_ATTR onLEDTimer() {
   LEDMode mode = currentLEDMode;
-  if (mode == LED_BLINKING || mode == LED_BLINK_SLOW || mode == LED_BLINK_FAST) {
+  if (mode == LED_BLINKING || mode == LED_BLINK_SLOW || mode == LED_BLINK_FAST || mode == LED_BLINK_OTA) {
     static uint8_t blinkCounter = 0;
-    // 30msティック数: FAST=5(150ms毎), BLINKING=10(300ms毎), SLOW=20(600ms毎)
-    uint8_t ticks = (mode == LED_BLINK_FAST) ? 5 : (mode == LED_BLINK_SLOW) ? 20 : 10;
+    // 30msティック数: OTA=2(60ms毎), FAST=5(150ms毎), BLINKING=10(300ms毎), SLOW=20(600ms毎)
+    uint8_t ticks = (mode == LED_BLINK_OTA) ? 2 : (mode == LED_BLINK_FAST) ? 5 : (mode == LED_BLINK_SLOW) ? 20 : 10;
     blinkCounter++;
     if (blinkCounter >= ticks) {
       blinkCounter = 0;
@@ -693,6 +705,7 @@ void setLEDMode(LEDMode mode) {
     case LED_BLINKING:
     case LED_BLINK_SLOW:
     case LED_BLINK_FAST:
+    case LED_BLINK_OTA:
       blinkState = true;
       digitalWrite(PIN_LED, HIGH);
       break;
@@ -2332,7 +2345,10 @@ void startNormalOperation() {
 
   // Sonioxキー取得（WiFi切替直後などの一時的な失敗に備えて3回リトライ）
   HTTPClient http;
-  String initUrl = String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress;
+  // fw/hw/ota/part はLambdaが記録し、更新の要否判定にも使う（docs/esp32-ota-settings-plan.md）
+  String initUrl = String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress
+                 + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + TOYTALKER_HW_VERSION
+                 + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel();
   int code = -1;
   String resp;
   for (int attempt = 1; attempt <= 3; attempt++) {
@@ -2353,13 +2369,32 @@ void startNormalOperation() {
     return;
   }
 
-  DynamicJsonDocument doc(512);
+  // 署名付きURL（一時認証トークン込みで2KB前後）が firmware に入るので余裕を取る
+  DynamicJsonDocument doc(4096);
   if (deserializeJson(doc, resp)) {
     setLEDMode(LED_OFF);
     return;
   }
   sonioxKey = doc["api_key"].as<String>();
   Serial.println("✅ Soniox temp key obtained");
+
+  // Wi-Fi接続とLambda到達まで来た版は健全とみなし、OTA後の初回起動なら有効印を付ける
+  ota::confirmRunningImage();
+
+  // 更新があれば録音・WS・AECを始める前に適用する。成功時は再起動して戻らない。
+  if (doc.containsKey("firmware")) {
+    ota::Manifest manifest;
+    const char* reason = "";
+    if (ota::parseManifest(doc["firmware"], manifest, reason)) {
+      setLEDMode(LED_BLINK_OTA);
+      const ota::Result result = ota::apply(manifest);
+      Serial.printf("[OTA] result=%d; continuing with current firmware\n", (int)result);
+      setLEDMode(LED_BLINK_SLOW);
+      logMemoryCheckpoint("after_ota_attempt");
+    } else {
+      Serial.printf("[OTA] manifest rejected: %s\n", reason);
+    }
+  }
 
   if (doc.containsKey("backchannel_enabled")) {
     backchannelEnabled = doc["backchannel_enabled"].as<bool>();
@@ -2382,8 +2417,10 @@ void setup() {
 #endif
   delay(100);
   Serial.println(AEC_BARGE_DETECT_ONLY ? "\n🚀 ToyTalker Mini v0.7 (AEC evaluation / detect only)"
-                                     : "\n🚀 ToyTalker Mini v0.7 (AEC barge-in trial)");
-  Serial.printf("[BUILD] arduino=%s idf=%s\n", ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
+                                     : "\n🚀 ToyTalker Mini v0.7 (AEC barge-in + OTA)");
+  Serial.printf("[BUILD] fw=%s hw=%s arduino=%s idf=%s\n", TOYTALKER_FW_VERSION, TOYTALKER_HW_VERSION,
+                ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
+  ota::printBootInfo();
 #if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
   Serial.println("[SERIAL] hwcdc_tx_timeout_ms=0 drop_on_backpressure=1");
 #endif
