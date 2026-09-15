@@ -17,7 +17,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **STTはLambdaを経由しない**: Soniox一時キーをLambdaが発行し、クライアントがSonioxへ直接WebSocket接続する。
 - **相槌(backchannel)**: メインLLMの処理中に「そうだね〜」等の短い応答を先に返す。デフォルトON。
 - **App / ESP32は対称構成**: 各々にメインLambda+相槌Lambdaがあり、出力形式だけ異なる（App=base64, ESP32=PCM）。
-- **複数アカウント展開（RnD/STG/本番×2）とCDK化は計画段階。** 決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。今のアカウントはRnDとして残し、ToyTalkerの資源はCDKに引き取る。
+- **複数アカウント展開（RnD/STG/本番×2）とCDK化は進行中。** RnDのToyTalker資源はCloudFormationスタック `ToyTalker-rnd` の管理下にある（2026-09-16にimport済み）。CDKコードは `infra/`（[README](infra/README.md)）、決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。APIキー類の正本はSSM Parameter Store `/toytalker/<key>`。命名の見直し（環境名の付与・`toytalk`/`toytalker` の統一）は未決定で、同計画の「命名の見直し」節。
 
 ### TTSプロバイダー
 
@@ -71,8 +71,8 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 - **本番に影響する操作（Lambdaデプロイ・AWS設定変更・DynamoDB書き込み）と削除操作は、何をするかを説明してからユーザーの明示的なOKを得て実行する。** 説明と実行を同じターンでやらない。
 - **作業は原則worktreeで行う（1つの作業ツリーに1セッション）。** 依頼を受けたら `.claude/worktrees/<name>` にブランチを切って始め、聞かない。同じ作業ツリーを複数セッションで共有すると、ファイルの選り分けや相手の作業待ちが発生する（2026-09-13）。終わったらmainへfast-forwardし、了承を得てworktreeとブランチを消す。CLAUDE.mdなど共有ファイルの大規模整理は1セッションだけで行う。
 - 「コミットして」と言われたらコミットし、そのまま現在のブランチへpushする。PR作成・マージ・ブランチクリーンアップは明示的な指示があるまでやらない。
-- Lambda関数を修正したら、コミット前にデプロイして動作確認する。各Lambda配下の `deploy.sh` を実行（例: `cd backend/<lambda-dir> && bash deploy.sh`）。
-- **Lambdaのデプロイ元はmain。** デプロイ前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する（2026-09-13に別worktreeの変更を含まない作業ツリーからデプロイし、数分間本番からCartesiaが消えた）。
+- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（2026-09-16から。各Lambda配下の `deploy.sh` は使わない。CDKが環境変数をSSMの値で上書きするので、`deploy.sh` や手作業で環境変数を変えても次のdeployで戻る）。
+- **Lambdaのデプロイ元はmain。** デプロイ前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する（2026-09-13に別worktreeの変更を含まない作業ツリーからデプロイし、数分間本番からCartesiaが消えた）。`cdk diff` で差分が出るLambdaが意図したものだけか確認する。
 - PowerShellでgitコマンドを実行するとき、`Set-Location` を使わず `git` から直接実行する（パーミッション設定のパターンマッチが効かなくなるため）。
 - ビルド確認と実機確認を区別して報告する。通信・音声・メモリの安定性は、ユーザーによる実機の連続会話試験とログで確認する。
 - 原因不明の問題の診断は「証拠→仮説（推測と明示）→合意→検証」の順で進め、証拠が足りない仮説を断定口調で言わない。対策を出すときは「根治か、痛み止めか」を一言で明示する。
@@ -138,7 +138,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 - 公開URLは固定の **`https://tts.zakicorp.com`**。Cloudflare Tunnel `toytalker-tts`（ID `8bc0e7f0-…`、locally-managed）を Windowsサービス `cloudflared`（自動起動）が張る。東京拠点、無料プラン、転送量課金なし。
 - `zakicorp.com` のDNSはRoute 53からCloudflare（無料）へ移行済み。`toytalk.zakicorp.com`（S3+CloudFrontのサイト）とACM検証用CNAMEもCloudflare側に置いた（どちらもDNS only）。登録先はお名前.com、期限は自動更新。
-- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認してLambda 6本の `ZAKICORP_TTS_URL` を維持する。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
+- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認してLambda 6本の `ZAKICORP_TTS_URL` を維持する。 CDK化後は同じ値を `infra/config/stages.ts` の `zakicorpTtsUrl` も持つ（deployのたびに上書き）。値が同じなので衝突しないが、URLを変えるときは両方を直す。監視タスクの同期は計画の9番で止める。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
 - 設定・認証情報の所在、正常確認、復旧、ngrokへの戻し方（`switch-api.ps1 -PublicUrl ''`）は [起動・復旧](docs/tts-boot-recovery.md) の「公開経路」節。`cloudflared service install` は `--config` を保存しないので `tools/tts-service/cloudflared-service-fix.ps1` でImagePathに明示する。
 - 拠点での遮断: WAFカスタムルール `tts-edge-key-required` が `X-Zakicorp-Edge-Key` ヘッダー（Lambda環境変数 `ZAKICORP_EDGE_KEY`、サーバー側 `.env` にも同値）の無い要求を403で落とす（2026-09-13）。期限なし。公開側 `/health` は `status` のみ、話者登録名は英数字と `-_` に限定。詳細と鍵の入れ替え手順はランブック。
 - ngrokは2026-09-13 18:02に撤去（`public_url` 設定中は監視タスクが起動しない。`switch-api.ps1 -PublicUrl ''` で復活）。再起動試験済み（17:48、ログイン前にトンネル・API・監視が復帰）。Route 53の `zakicorp.com` ホストゾーンは2026-09-13に削除済み（`zackey.xyz` は残る）。
