@@ -17,6 +17,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **STTはLambdaを経由しない**: Soniox一時キーをLambdaが発行し、クライアントがSonioxへ直接WebSocket接続する。
 - **相槌(backchannel)**: メインLLMの処理中に「そうだね〜」等の短い応答を先に返す。デフォルトON。
 - **App / ESP32は対称構成**: 各々にメインLambda+相槌Lambdaがあり、出力形式だけ異なる（App=base64, ESP32=PCM）。
+- **複数アカウント展開（RnD/STG/本番×2）とCDK化は計画段階。** 決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。今のアカウントはRnDとして手作業のまま残す。
 
 ### TTSプロバイダー
 
