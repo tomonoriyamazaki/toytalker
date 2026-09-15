@@ -8,8 +8,12 @@
 |---|---|---|
 | IaCの道具 | AWS CDK（TypeScript） | Lambda 8本がNode.js ESM + esbuildで、`NodejsFunction` がdeploy.shを丸ごと置き換える。ストリーミングFunction URLは `invokeMode: RESPONSE_STREAM` の1行。アプリもTS系で言語が増えない |
 | CloudFormation | CDKの裏で使い続ける | CDKはTSをCloudFormationテンプレートに変換して流す。YAMLは書かない。マネコンのCloudFormation画面はスタックの閲覧・ロールバック用に使う |
-| 今のアカウント | 手作業のままRnDとして残す | ToyTalker以外の資源も載っている。`cdk import` は設定値を読み取らずコードは手書きになるので、既存資源の取り込みはしない |
+| 今のアカウント | RnDとして残し、ToyTalkerの資源はCDK管理に引き取る（2026-09-15に変更） | 当初は手作業のまま残す予定だったが、RnDを見ながらCDKを書き、当てて差分が消えるまで直せる方が確実。テーブルにはデータが入っているので作り直さず `cdk import` で引き取る。ToyTalker以外の資源はCDKの管理外のまま |
 | 環境 | RnD（現行）→ STG → 自分用本番 → DG向け本番 | Organizationsで分け、ログインはIAM Identity Center。アカウントごとのアクセスキーは作らない |
+| 資源の名前 | テーブル名・Lambda名は `toytalker-*` の固定名を全環境で維持。S3バケットだけ環境名を付ける | アカウントが別なら同じ名前でぶつからない。RnDの既存資源をimportで引き取るには名前の一致が必要。S3は全世界で一意なので `toytalker-tts-speakers-<stage>` |
+| 環境ごとの設定 | `infra/config/stages.ts` の1ファイルに環境ごとの塊を並べ、`cdk deploy --context stage=<env>` で選ぶ | アカウントID・リージョン・APIの固定ドメイン・通知メール・ZakiCorp URL・メモリなど。秘密ではないのでGitに入れる |
+| 秘密の値 | アカウントごとのSSM Parameter Store（SecureString）。名前は全環境で同じ（例 `/toytalker/openai-api-key`）、中身だけ違う | CDKは名前しか持たず、秘密がファイルに載らない。中身は初回にアカウントごとに手で入れる（投入スクリプト可）。CDKがデプロイ時に読んでLambda環境変数に焼くので、鍵を入れ替えたら `cdk deploy` し直す |
+| CDKが決める値 | Function URLのホスト名など、生成結果の値はファイルに書かない | CDKコード内で「このLambdaのURLをあのLambdaの環境変数へ」と配線する。人が見るのはデプロイ後の出力 |
 | デプロイ経路 | 当面ローカルから `cdk deploy --profile <env>` | GitHub Actions + OIDCは本番が2つになってから |
 | Lambda起動の高速化 | 今はやらない | 温め設計が効いている（下記） |
 | Terraform | 見送り | AWS単独ならCDKの方が学ぶことが少ない。Cloudflare側（DNS・WAF・Tunnel）もコード化したくなったら再検討 |
@@ -28,16 +32,19 @@ CDKで再現する対象。
 
 ## 進め方
 
-1. **CDKの骨組みを書く**（worktreeで）。上の棚卸し全部。ランタイムはNode 24で統一。温めルールと、実リクエスト中に自分へpingを投げる予備インスタンス温めはそのまま持ち込む。
-2. **Lambdaコードから固定名を外す。** テーブル名や相手Lambda名が `toytalker-*` で焼き込まれているので環境変数経由にする。
-3. **秘密情報の置き場。** APIキー類はアカウントごとのSSM Parameter Storeへ。CDKは参照だけ持つ。
-4. **マスターデータの投入スクリプト。** characters・voices・llms・api-unit-prices の4テーブルをRnDから書き出してSTGへ入れる。
-5. **STGアカウントを作って `cdk bootstrap` → `cdk deploy`。** アプリとESP32の接続先をSTGへ向けて実機確認。
-6. **エンドポイントの固定名化。** Function URLはアカウントごとにホスト名が変わるので、CloudFrontを前段に置いて `api-stg.zakicorp.com` のような固定名にする（ストリーミングはCloudFront経由でも通る）。ESP32とアプリへの焼き込み方をここで整理。
-7. **ZakiCorp TTSのURL同期を止める。** 公開URLが `https://tts.zakicorp.com` で固定になったので、CDKの設定値に移す。
-8. STGで一通り動いたら、同じスタックを自分用本番、DG向け本番の順に出す。
-9. 本番が2つになったらGitHub Actions + OIDC（アカウントごとにOIDC用ロール1つ。権限はCDKのロール群を借りるだけ。これもCDKで書く）。
-10. 最後にRnDもCDKで作り直すか判断する。RnDが手作業のままだと、ランタイムEOL対応などはRnDだけ個別更新になる。
+RnDでCDKを完成させてから、同じコードをSTG・本番にまっさらに出す。RnDへの `cdk deploy` はSTGができるまで本番デプロイと同じ扱いで、毎回 `cdk diff` で置き換え（Replace）が1つも出ないことを確認してから流す。
+
+1. **RnDの現状をAWS CLIで読み出す。** Lambda 8本の設定、テーブル8つの定義、Function URL、IAMロールのポリシー、温めルール、Scheduler、SNS。CloudFormationのIaC generatorも抜け漏れ確認に使える（生成コードは使わない）。
+2. **CDKの骨組みを書く**（worktreeで）。上の棚卸し全部。ランタイムはNode 24で統一。温めルールと、実リクエスト中に自分へpingを投げる予備インスタンス温めはそのまま持ち込む。
+3. **環境設定ファイルとSSMの名前を決める。** `infra/config/stages.ts` と `/toytalker/<key>`。RnDのLambda環境変数に直接入っているAPIキー類をRnDのSSMへ移す。
+4. **RnDの既存資源を `cdk import` で引き取る。** DynamoDB 8テーブル、Lambda 8本、IAMロール、S3、SNS。Function URLとEventBridgeルールが引き取れるかは要確認。引き取れなければ、URL固定名化までは手作業のまま残しCDKの管理外にする（Function URLを作り直すとホスト名が変わりアプリとESP32が壊れる）。
+5. **RnDで `cdk diff` が空になるまで直す。** ここでdeploy.shの役目が終わる。以後RnDへの反映は `cdk deploy --context stage=rnd`。
+6. **マスターデータの投入スクリプト。** characters・voices・llms・api-unit-prices の4テーブルをRnDから書き出して別環境へ入れる。
+7. **STGアカウントを作って `cdk bootstrap` → `cdk deploy`。** SSMに鍵を入れ、マスターデータを投入し、アプリとESP32の接続先をSTGへ向けて実機確認。
+8. **エンドポイントの固定名化。** Function URLはアカウントごとにホスト名が変わるので、CloudFrontを前段に置いて `api-stg.zakicorp.com` のような固定名にする（ストリーミングはCloudFront経由でも通る）。アプリは `eas.json` のビルドプロファイルで、ESP32はビルドフラグで接続先を切り替える。
+9. **ZakiCorp TTSのURL同期を止める。** 公開URLが `https://tts.zakicorp.com` で固定になったので、環境設定ファイルの値に移す。
+10. STGで一通り動いたら、同じスタックを自分用本番、DG向け本番の順に出す。
+11. 本番が2つになったらGitHub Actions + OIDC（アカウントごとにOIDC用ロール1つ。権限はCDKのロール群を借りるだけ。これもCDKで書く）。
 
 ## CDK化のついでに入れるもの
 
