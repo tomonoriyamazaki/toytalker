@@ -43,9 +43,9 @@ PCB資料: [PINMAP](../devices/KiCad/toytalker_mini_v0.2/PINMAP.md)、[部品表
 - STAT1/STAT2: GPIO13/14。状態の解釈は充電ICの仕様と実機で確認する。
 - TH1: ハードウェアの充電温度保護用。ファームから直接読めるセンサーとして扱わない。
 
-## OTA実装（2026-09-15実装、実機未検証）
+## OTA実装（2026-09-15実装、2026-09-16に実機で更新成功）
 
-2026-09-14〜15の相談で合意し、同日ブランチ `esp32-ota` で実装した。ビルドとローカル試験は済み、実機での更新は未検証。実機検証が終わったらこの節の「未検証」を消し、CLAUDE.mdの実機の版を更新する。
+2026-09-14〜15の相談で合意し、ブランチ `esp32-ota` で実装した。2026-09-16に試験機で 0.7.1 → 0.7.2 の更新が通った（下の実測）。残る検証は中断・改ざん・ロールバック・更新後の会話。
 
 ### 確認済みの前提
 
@@ -88,25 +88,30 @@ PCB資料: [PINMAP](../devices/KiCad/toytalker_mini_v0.2/PINMAP.md)、[部品表
 3. 試験機（`fw_channel=beta`）の電源を入れ直し、`[OTA]` ログとDynamoDBの `firmware_version` を確認する。
 4. `bash devices/mcu/esp32_s3/tools/publish-firmware.sh stable --promote` で全機へ。
 
-### 実機検証（未実施）
+### 実機検証
 
-1. OTA対応版をUSBで書き込む（初回だけ必須。ブートローダーとパーティション表も3.3.11のものになる）。
-2. 起動文言だけ変えた次版を `beta` に発行し、試験機を `beta` にして電源入れ直し。ダウンロード→再起動→`[BUILD]` に新版→DynamoDBに版、を確認し所要時間を測る。
+1. 済（2026-09-16）: 0.7.1 をUSBで書き込み。起動時の `[OTA] confirm: img_state=-1 (no action)` でUSB書き込み版は有効印の対象外と確認。
+2. 済（2026-09-16 06:39）: 0.7.2（版の文字列だけ変更）を `beta` に発行し、試験機「v0.2 大スピーカー」（`fw_channel=beta`）の電源を入れ直し。実測:
+   - Wi-Fi接続 5.0秒 → 鍵取得 → `[OTA] start: 0.7.1 -> 0.7.2 size=1491920 attempt=1/3`
+   - TLS接続とヘッダー 614ms、ダウンロードと書き込み 16.9秒（約88KB/s、10%ごとに1.4〜2.0秒で一定）、`[OTA] done total_ms=17040`
+   - 再起動後 `[BUILD] fw=0.7.2`、`running=app1 next=app0 img_state=1`（検証待ち）、Wi-Fi再接続 1.9秒、鍵取得後に `[OTA] confirm: pending_verify -> valid err=0`
+   - DynamoDB `firmware_version=0.7.2 running_partition=app1 ota_capable=true`
+   - 録音前の `ALLOC_FAIL total=0` / `HEAP_CHECK ok=1 internal_free=168728`。更新のある起動の遅れは約20秒（見込み15〜40秒の範囲内）
+   - 署名付きURLは一時トークン込みで1,587文字（上限4,096）。S3からの取得はAmazon Root CA 1〜4だけで検証が通る（Macのcurlでも確認）
 3. ダウンロード途中で電源断。旧版で起動し再試行することを確認。
 4. SHA-256を壊したマニフェストで拒否されることを確認。
 5. 有効印の前にわざとクラッシュする版で、旧版へ戻り試行カウンタでループが止まることを確認。
 6. 更新後にWi-Fi設定（NVS）が残り、通常会話ができることを確認。
 
-### 本番に触る操作（未実施、個別にOKを取る）
+### 本番に入れたもの（2026-09-16）
 
-- S3バケット `toytalker-firmware` の作成（ap-northeast-1、パブリックアクセス全遮断、SSE-S3、バージョニング有効）。
-- `toytalk-soniox-stt-lambda` のデプロイとタイムアウト3秒→5秒。
-- `toytalker-device-setting-lambda` のデプロイ。
-- 0.7.1の `beta` 発行と、試験機の `fw_channel=beta`。
+- S3バケット `toytalker-firmware`（ap-northeast-1、パブリックアクセス全遮断、SSE-S3、バージョニング有効、タグ project=toytalker / purpose=esp32-firmware-ota）。
+- Soniox Lambda と デバイス設定 Lambda はCDKスタック `ToyTalker-rnd` 経由で反映（タイムアウト5秒、devices書き込み権限、`toytalker-firmware` 読み取り権限、環境変数 `FIRMWARE_BUCKET`）。**この2本は2026-09-15にCDK管理へ移っており、`deploy.sh` で触るとドリフトになる。** 反映は `cd infra && npx cdk deploy --context stage=rnd`（[複数アカウント計画](multi-account-iac-plan.md)）。
+- 発行済み: 0.7.1（beta→試験機へUSB書き込み）、0.7.2（beta、OTAで試験機へ）。`stable` は未設定なので、beta以外の機には更新提案が出ない。配布機へ広げるときは `publish-firmware.sh stable --promote`。
 
 ### 見込みと制約
 
-- 所要時間は未計測。見込みはダウンロード5〜20秒（1.49MB、PSRAM上のTLS）、書き込みは並行で数秒上乗せ、再起動は現行と同じ。更新のある起動だけ15〜40秒遅れる想定。更新の無い起動は変わらない。
+- 所要時間の実測は上の「実機検証」2。自宅Wi-Fiで約17秒（1.49MB）。更新の無い起動は変わらない。
 - 配布済みの実機は現行ファームにOTAコードが無いので、初回だけUSB書き込みが必要。
 - 本文Lambda・Soniox WSの `setInsecure()` は今回触らない。
 - 署名付きURLはLambdaの一時認証情報を含むため2KB前後になる。本体のJSON読み取りはArduinoJson 7で容量制限が無く、URL長の上限は4096にしている。
