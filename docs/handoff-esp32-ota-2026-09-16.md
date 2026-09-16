@@ -36,7 +36,7 @@ OTA実装セッションの引き継ぎ。新しいセッションでは最初�
 - Soniox Lambda はマニフェストを60秒キャッシュする。発行直後の起動で提案が出ないときは1分待つ。
 - 本体の `ALLOWED_HOST` はバケット名固定。複数アカウント化でバケット名に環境名が付くときは、接続先と同様にビルドフラグで切り替える（[複数アカウント計画](multi-account-iac-plan.md)）。
 - アプリ側の `fw_channel` 切替UIと版の表示は未実装（API は `PUT /devices/{id}` に入っている）。
-- CLAUDE.md の「Lambdaを修正したら deploy.sh」の記述はCDK管理の関数には当てはまらない。CDK側セッションが CLAUDE.md を更新中なので、こちらでは触っていない。
+- CLAUDE.md のLambdaデプロイ手順は CDK 側セッションが `cdk diff` → `cdk deploy` に更新済み（main 878d1a5 で取り込み）。`deploy.sh` はもう使わない。
 
 ### 新しく見つかった問題: 検索を使ったターンの誤停止（OTAとは別件）
 
