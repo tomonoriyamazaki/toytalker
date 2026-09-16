@@ -95,7 +95,7 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 - NLP既定はAGGR（2026-09-16にNORMALから変更。実機構成と同じ）。NORMALで比較するときは `--build-property 'compiler.cpp.extra_flags=-DTOYTALKER_AEC_NLP_LEVEL=0'`。
 - AEC調整は一旦終了。「途中停止は減ったが、声で止めるには近づく必要がある」というトレードオフは既知で、最終的な限界とは扱わない。AEC本体の時刻整列・入力飽和・フィルタ等に未検証の改善候補あり。
 - 未確認: stream終端の切断・救済経路の実機再現、Soniox再接続後の録音停止（別件）、検出前・未接続中の音声保持（未実装）。
-- **OTAは2026-09-15実装、2026-09-16に試験機で 0.7.1→0.7.2 の更新成功（17秒）。** 未検証: 途中電源断、SHA改ざん、ロールバック、更新後の会話。 **フォルダは v0.7 の1つで、配布した版は git タグ `fw-<版>` で残す**（版ごとのフォルダは作らない。2026-09-16決定）。配布する版は `bash devices/mcu/esp32_s3/tools/publish-firmware.sh beta` でS3へ発行、`stable --promote` で全機へ。更新確認は起動時にSoniox一時キー取得の応答で行い、本体はS3から直接取る。仕様・検証手順・未実施の本番操作は [OTA実装](docs/esp32-ota-settings-plan.md)。
+- **OTAは2026-09-15実装、2026-09-16に試験機で 0.7.1→0.7.2 の更新成功（17秒）。** 未検証: 途中電源断、SHA改ざん、ロールバック。検索を挟んだ返答で再開直後に音声割り込みが誤発火する件（OTAとは別件）と残タスクは [引き継ぎ](docs/handoff-esp32-ota-2026-09-16.md)。 **フォルダは v0.7 の1つで、配布した版は git タグ `fw-<版>` で残す**（版ごとのフォルダは作らない。2026-09-16決定）。配布する版は `bash devices/mcu/esp32_s3/tools/publish-firmware.sh beta` でS3へ発行、`stable --promote` で全機へ。更新確認は起動時にSoniox一時キー取得の応答で行い、本体はS3から直接取る。仕様・検証手順・未実施の本番操作は [OTA実装](docs/esp32-ota-settings-plan.md)。
 - スマホから音声割り込み・相槌を再起動なしでON/OFFする案は未実装。相槌設定の本体反映は起動時、音声割り込みはファーム内固定。[設定同期の相談記録](docs/esp32-ota-settings-plan.md)。
 
 ### 環境・ビルド
