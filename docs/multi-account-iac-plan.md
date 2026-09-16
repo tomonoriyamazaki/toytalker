@@ -42,7 +42,7 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 4. **済（2026-09-16 05:00 JST）RnDの既存資源を `cdk import` で引き取った。** 手順は [infra/README.md](../infra/README.md)。`cdk bootstrap` → SSMへ11件投入（`migrate-secrets-from-lambda.ts`）→ `--context importPhase=true` のテンプレート（36資源）で `cdk import`。import前後でLambda 8本の設定・コードハッシュ・環境変数が同一であることを確認した（更新日時だけCloudFormationのタグ付けで変わる）。IAMロールはimportせず、次のdeployでCDK管理の最小権限ロール（関数ごと、使うテーブルだけ）へ差し替えた。
 5. **済（同日 05:16 JST）初回 `cdk deploy` でドリフトなし。** Replaceなし。変わったもの: ロール9つ新設と差し替え、Node 22→24（3本）、ESP32用メインのメモリ 2024→2048、Function URL公開許可と温めルールのPermission追加（旧Sidは残る）。deploy直後に実機からの会話1件がDynamoDB・LLM・検索・TTSまで新ロールで成功。ドリフト検出は IN_SYNC。**ここでdeploy.shの役目が終わった。以後RnDへの反映は `cdk deploy --context stage=rnd`。**
    - 同日06:24 JST、ESP32 OTA（main b18c70d）に合わせて2回目のdeploy: Soniox鍵発行Lambdaのタイムアウト3→5、`toytalker-devices` 書き込み、ファーム配布バケット `toytalker-firmware`（手作業で作成、CDKは `fromBucketName` で参照のみ。名前は `stages.ts` の `firmwareBucketName`）の読み取り、環境変数 `FIRMWARE_BUCKET`。デバイス設定Lambdaもmainの版へ。
-   - 未処理: 旧ロール `toytalk-lambda-role-dev` `toytalker-ops-monthly-role` `toytalker-ops-monthly-scheduler-role` と、旧Permission（Sid `FunctionURLAllowPublicAccess` `FunctionURLAllowInvokeAction` `toytalker-warmer`）の削除。実機の連続会話試験が済んでから消す。
+   - 同日、アプリ（会話・読み上げ・設定保存・クローンボイス登録）とESP32（会話・OTA）の確認後に後片付け: 旧ロール `toytalker-ops-monthly-role` `toytalker-ops-monthly-scheduler-role` と旧Permission（Sid `FunctionURLAllowPublicAccess` `FunctionURLAllowInvokeAction` `toytalker-warmer`）を削除。**`toytalk-lambda-role-dev` は残した**（v1の旧Lambda `toytalk-openai-api-dev` `toytalk-api-raspi` がまだ使っている。API Gateway `toytalk-chat-apigateway-dev` ともども、消すなら別途判断）。
 6. **済（スクリプトのみ）マスターデータの投入スクリプト。** `infra/scripts/export-master-data.ts` / `import-master-data.ts`。出力先 `infra/master-data/` はGit対象外（人格プロンプトを含む）。
 7. **STGアカウントを作って `cdk bootstrap` → `cdk deploy`。** `stages.ts` の `account` を埋め、SSMに鍵を入れ、マスターデータを投入し、アプリとESP32の接続先をSTGへ向けて実機確認。
 8. **エンドポイントの固定名化。** Function URLはアカウントごとにホスト名が変わるので、CloudFrontを前段に置いて `api-stg.zakicorp.com` のような固定名にする（ストリーミングはCloudFront経由でも通る）。アプリは `eas.json` のビルドプロファイルで、ESP32はビルドフラグで接続先を切り替える。現在のハードコード箇所: `app/app/(tabs)/chat.tsx`・`settings.tsx`・`toy.tsx`・`app/components/ReadAloud.tsx`、ESP32は各版の `.ino`。
@@ -89,6 +89,18 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 | `toytalker-ops-monthly-lambda` | `toytalker-<env>-ops-monthly` | 月次レポート |
 
 テーブルは `toytalker-<env>-devices` のように接頭辞を替えるだけ。S3は `toytalker-<env>-tts-speakers`。ロググループは関数名に追従。
+
+### 名前は3層あり、一度に変える
+
+| 層 | 今 | 決めているもの |
+|---|---|---|
+| スタック名 | `ToyTalker-rnd` | IAMロール名の先頭、CloudFormationの一覧 |
+| 部品ID（CDKコード内の名前） | `StreamHandler`、`DevicesTable` など | ロール名の中身、CloudFormationの論理ID |
+| 資源の固定名 | `toytalk-stream-handler-lambda`、`toytalker-devices` など | 実際のLambda名・テーブル名。アプリやコードが参照するのはこれ |
+
+IAMロールはCDKが名前を付けている（例 `ToyTalker-rnd-OpsMonthlyServiceRoleDC20ED87-UWLuVIYTH2C7`）ので、環境の区別はスタック名で既についている。固定名は付けない。
+
+部品IDを変えると、その資源はCloudFormation上で別物になり作り直しになる（テーブルも同じ）。固定名を変える時点で作り直しは避けられないので、スタック名（`toytalker-<env>` に小文字で揃える）・部品ID（`StreamHandler` → `ChatApp` など）・固定名は同時に変え、作り直しを1回で済ませる。
 
 ### 名前を変えたときに起きること
 
