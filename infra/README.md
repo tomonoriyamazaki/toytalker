@@ -9,7 +9,7 @@ ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル
 | `bin/toytalker.ts` | 入口。`--context stage=<rnd\|stg\|prod\|prod-dg>` で環境を選び、資格情報のアカウントが一致するか確認し、SSMから秘密を読んでスタックを作る |
 | `config/stages.ts` | 環境ごとの秘密でない設定（アカウントID・リージョン・通知先・ZakiCorp URL・S3バケット名・アーキテクチャ） |
 | `lib/secrets.ts` | SSM Parameter Store（SecureString）の名前一覧と読み出し。名前は全環境共通 `/toytalker/<key>` |
-| `lib/toytalker-stack.ts` | 資源定義。Lambdaは `backend/<dir>/index.mjs` をesbuildでまとめる（deploy.shと同じ指定） |
+| `lib/toytalker-stack.ts` | 資源定義。Lambdaは `backend/<dir>/index.mjs` をesbuildでまとめる（旧deploy.shと同じ指定。deploy.shは2026-09-16に削除） |
 | `scripts/` | 初回移行用（下記） |
 
 ## 使い方

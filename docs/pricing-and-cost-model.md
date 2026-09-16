@@ -120,14 +120,13 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 ### 構築と運用
 
 - ディレクトリ: `backend/toytalker-ops-monthly-lambda/`
-- 初回構築: `bash setup.sh <メールアドレス>`。SNSトピックとメール購読、実行ロール `toytalker-ops-monthly-role`、Lambda（Node.js 24、5分、256MB）、EventBridge Scheduler `toytalker-ops-monthly`（`cron(0 9 1 * ? *)`、Asia/Tokyo）を作る。再実行しても更新扱いで壊れない。購読はメール内のリンクで確認が必要（2026-09-13確認済み）。
-- コード更新: `bash deploy.sh`。
+- 構築・更新はCDK（`infra/`、2026-09-16から）。SNSトピックとメール購読（宛先は `infra/config/stages.ts` の `opsEmail`）、実行ロール、Lambda（Node.js 24、5分、256MB）、EventBridge Scheduler `toytalker-ops-monthly`（`cron(0 9 1 * ? *)`、Asia/Tokyo）をスタックが作る。コード更新も `cd infra && npx cdk deploy --context stage=rnd`。新しいアカウントでは初回deploy後にメール内のリンクで購読を確認する。以前の `setup.sh` / `deploy.sh` は削除済み。
 - 手動実行: `{"month":"2026-08","send":false}` のように対象月と送信有無を指定できる。`send:false` は戻り値の `report` に本文を返すだけでメールを送らない。`fx:false` で為替更新を省略。
 - 環境変数:
 
 | 変数 | 内容 |
 |---|---|
-| `OPS_SNS_TOPIC_ARN` | 必須。setup.sh が設定 |
+| `OPS_SNS_TOPIC_ARN` | 必須。CDKが設定 |
 | `FX_OVERWRITE` | `true` で当月の為替行を毎回上書き。既定は無い月だけ作成 |
 | `STALE_PRICE_DAYS` | 単価行の鮮度しきい値。既定180 |
 | `OPENAI_ADMIN_KEY` / `ANTHROPIC_ADMIN_KEY` | 任意。組織の請求額をAPIで取る管理者キー。読み取り専用に絞れず漏洩時の影響が大きいため、当面は置かない方針（レポートの数字と各社ダッシュボードを手で見比べる） |
