@@ -7,14 +7,14 @@ PC再起動後、人がログオンする前にクローン音声を復旧させ
 管理対象は既存の `C:\Users\exodj\projects\tts-models\faster-qwen3-tts\api_server.py` とngrok。アプリのリトライ修正とは独立している。
 
 - 実装: `tools/tts-service/supervisor.py`
-- 登録: `tools/tts-service/install.ps1`（管理者PowerShell）
+- 登録: `tools/tts-service/install.ps1`（管理者PowerShell）。タスクを登録し直すとき専用（PC入れ替え、タスクの破損、旧 `setup-tasks.ps1` の誤実行後、タスク設定の変更）。日常の切り替えは `switch-api.ps1`。既存の `config.json` があれば `api_script`・`public_url` などを引き継ぐ（2026-09-29。それ以前は毎回作り直し、固定URLとバッチ版の指定が消えた）。`-ShowConfig` で、何も変えずに書き込まれる設定を表示する。
 - 配置先: `.local/tts-service/`（Git対象外）。登録時にスクリプトのコピーを配置するため、ブランチ切替だけで実行中のサービスは変わらない。改修適用は保守時間にタスクを停止してから再登録する。稼働中の上書き登録はインストーラーが拒否する。
 - 実行アカウント: 既存TTSタスクのユーザー、S4U・通常権限。パスワード保存なしの非対話実行。Windows認証を必要とするネットワーク共有やEFSには依存させない。CUDAと実際のHTTPS/API接続は事前プローブで検証する。
 - 起動: OS起動30秒後、実行時間の上限なし。監視スクリプト自体が異常終了した場合は1分後に再試行（タスク設定の上限999回）。
 
 監視は15秒間隔。既存のAPI/ngrokプロセスを引き継ぎ、二重起動を避ける。APIは実行ファイル・引数・作業ディレクトリを照合する。プロセス終了後は30秒待って再起動する。自分が起動したプロセスについて、ヘルスチェックが10分間連続で失敗した場合にも再起動する。引き継いだ既存プロセスはヘルス失敗だけでは停止しない。
 
-`/health`は現行APIの起動処理（モデルロード・ウォームアップ）後に応答する。公開URLの`/health`も確認してから、6つのLambda（`supervisor.py` の `FUNCTIONS`）のURLを照合する。URL変更時のみ更新し、他の環境変数を保持し、RevisionIdによって同時変更の上書きを防ぐ。通信不通なら次の監視周期で再試行する。音声生成自体の継続的な成功まではヘルスチェックだけでは保証しない。
+`/health`は現行APIの起動処理（モデルロード・ウォームアップ）後に応答する。公開URLの`/health`も確認してから、6つのLambda（`supervisor.py` の `FUNCTIONS`）のURLを照合する。固定URL（`public_url` 設定時）は照合と警告だけで書き込まない（正本はCDK）。ngrok経路ではURL変更時のみ更新し、他の環境変数を保持し、RevisionIdによって同時変更の上書きを防ぐ。通信不通なら次の監視周期で再試行する。音声生成自体の継続的な成功まではヘルスチェックだけでは保証しない。
 
 認証情報は従来の `.env`、AWSプロファイル、ngrok設定を参照し、Gitへコピーしない。APIキーが空の場合は起動を拒否する。ログは `.local/tts-service/logs/` に保存する。APIログには会話関連情報が含まれる可能性があるため共有前に確認する。現段階ではログの自動世代管理は未実装。
 
@@ -28,7 +28,7 @@ Get-ScheduledTaskInfo -TaskName TTS-BootProbe
 Get-Content .\.local\tts-service\logs\probe.log
 ```
 
-プローブは既存TTSを停止せず、非対話タスク内でCUDA割当、設定読込、ローカル・公開ヘルス、AWS Lambda設定の読み取りを確認する。`LastTaskResult=0`と`PROBE PASSED`を確認した後に適用:
+先に `install.ps1 -ShowConfig` で、書き込まれる設定（`api_script` と `public_url`）が今の構成どおりか確認する。プローブは既存TTSを停止せず、非対話タスク内でCUDA割当、設定読込、ローカル・公開ヘルス、AWS Lambda設定の読み取りを確認する。`LastTaskResult=0`と`PROBE PASSED`を確認した後に適用:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\tts-service\install.ps1
@@ -93,7 +93,7 @@ Route 53の `zakicorp.com` ホストゾーンは2026-09-13にユーザーが削�
 
 ## APIの版の切り替え（元の `api_server.py` とバッチ版 `api_server_batch.py`）
 
-2026-09-13追加。`config.json` の `api_script`（省略時 `api_server.py`）で監視が起動するAPIを選ぶ。`supervisor.py` はこの値を起動コマンドと既存プロセスの照合の両方に使う。`install.ps1 -ApiScript api_server_batch.py` で登録時に指定することもできる。
+2026-09-13追加。`config.json` の `api_script`（省略時 `api_server.py`）で監視が起動するAPIを選ぶ。`supervisor.py` はこの値を起動コマンドと既存プロセスの照合の両方に使う。`install.ps1 -ApiScript api_server_batch.py` で登録時に指定することもできる（指定しなければ既存の `config.json` の値を引き継ぐ）。
 
 登録し直さずに切り替えるには、管理者PowerShellでリポジトリルートから:
 
