@@ -46,7 +46,7 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 6. **済（スクリプトのみ）マスターデータの投入スクリプト。** `infra/scripts/export-master-data.ts` / `import-master-data.ts`。出力先 `infra/master-data/` はGit対象外（人格プロンプトを含む）。
 7. **STGアカウントを作って `cdk bootstrap` → `cdk deploy`。** `stages.ts` の `account` を埋め、SSMに鍵を入れ、マスターデータを投入し、アプリとESP32の接続先をSTGへ向けて実機確認。
 8. **エンドポイントの固定名化。** Function URLはアカウントごとにホスト名が変わるので、CloudFrontを前段に置いて `api-stg.zakicorp.com` のような固定名にする（ストリーミングはCloudFront経由でも通る）。アプリは `eas.json` のビルドプロファイルで、ESP32はビルドフラグで接続先を切り替える。現在のハードコード箇所: `app/app/(tabs)/chat.tsx`・`settings.tsx`・`toy.tsx`・`app/components/ReadAloud.tsx`、ESP32は各版の `.ino`。
-9. **ZakiCorp TTSのURL同期を止める。** 公開URLが `https://tts.zakicorp.com` で固定になったので `stages.ts` の値にした。`tools/tts-service/supervisor.py` の同期はimport後に不要になる（CDKがdeployのたびに環境変数を上書きするので、同期を残すと互いに書き合う）。
+9. **済（コードのみ、このPCへの反映は未実施）ZakiCorp TTSのURL同期を止める。** 固定URLのときは照合と警告だけにし、書き込みはngrok経路に限った。 公開URLが `https://tts.zakicorp.com` で固定になったので `stages.ts` の値にした。`tools/tts-service/supervisor.py` の同期はimport後に不要になる（CDKがdeployのたびに環境変数を上書きするので、同期を残すと互いに書き合う）。
 10. STGで一通り動いたら、同じスタックを自分用本番、DG向け本番の順に出す。
 11. 本番が2つになったらGitHub Actions + OIDC（アカウントごとにOIDC用ロール1つ。権限はCDKのロール群を借りるだけ。これもCDKで書く）。
 

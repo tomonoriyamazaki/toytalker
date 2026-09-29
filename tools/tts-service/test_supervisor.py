@@ -74,6 +74,16 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(aws.call_args_list), len(service.FUNCTIONS))
         self.assertTrue(all(call.args[2] == "get-function-configuration" for call in aws.call_args_list))
 
+    @patch.object(service, "aws")
+    def test_fixed_url_check_never_writes(self, aws):
+        aws.return_value = {"RevisionId": "revision-1", "Environment": {"Variables": {"ZAKICORP_TTS_URL": "https://old.test"}}}
+        with self.assertLogs(service.LOG, level="WARNING") as logs:
+            self.assertFalse(service.check_urls({}, "https://example.test"))
+        self.assertIn("Not updating", logs.output[0])
+        self.assertTrue(all(call.args[2] == "get-function-configuration" for call in aws.call_args_list))
+        aws.return_value = {"Environment": {"Variables": {"ZAKICORP_TTS_URL": "https://example.test"}}}
+        self.assertTrue(service.check_urls({}, "https://example.test"))
+
 
 if __name__ == "__main__":
     unittest.main()

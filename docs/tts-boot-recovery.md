@@ -42,7 +42,7 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 
 ## 公開経路: Cloudflare Tunnel（2026-09-13切替）
 
-本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 6本の `ZAKICORP_TTS_URL` はこの値で、監視タスクが `config.json` の `public_url` を使って照合・維持する。`public_url` が設定されている間、監視タスクはngrokを起動しない（2026-09-13 18:02に撤去。起動していれば停止する）。`public_url` を空にするとngrokを再び起動して予備経路に戻る。
+本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 6本の `ZAKICORP_TTS_URL` はこの値で、正本は `infra/config/stages.ts` の `zakicorpTtsUrl`（CDKがdeployのたびに配る）。監視タスクは `config.json` の `public_url` と照合するだけで、書き換えない（違えばログに警告）。URLを変えるときは `stages.ts` と `config.json` の両方を直す。`public_url` が設定されている間、監視タスクはngrokを起動しない（2026-09-13 18:02に撤去。起動していれば停止する）。`public_url` を空にするとngrokを再び起動して予備経路に戻る。
 
 | 項目 | 値・場所 |
 |---|---|
@@ -53,7 +53,7 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 | 認証情報（Git対象外、秘密） | `C:\Users\exodj\.cloudflared\cert.pem`（`cloudflared tunnel login` で取得）、`C:\Users\exodj\.cloudflared\8bc0e7f0-….json`（トンネル資格情報）。同じ3ファイルの複製が `C:\Windows\System32\config\systemprofile\.cloudflared\` にもある |
 | 常駐 | Windowsサービス `cloudflared`（自動起動、LocalSystem）。`service install` は `--config` を保存しないため、`tools/tts-service/cloudflared-service-fix.ps1`（管理者）でImagePathに `--config` と `--logfile` を明示している |
 | ログ | `.local/tts-service/logs/cloudflared-service.log`（サービス）、`cloudflared.log`（手動実行時） |
-| 監視 | `supervisor.py` は `public_url` があればその `/health` を確認してLambdaへ同期する。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る |
+| 監視 | `supervisor.py` は `public_url` があればその `/health` を確認し、Lambdaの値は照合のみ行う（書き込みはngrok経路のときだけ）。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る |
 
 ### 正常確認
 
@@ -71,7 +71,7 @@ Get-Content .\.local\tts-service\logs\cloudflared-service.log -Tail 5
 - サービスが止まった: 管理者PowerShellで `Start-Service cloudflared`。起動直後に落ちる場合は `cloudflared-service-fix.ps1` を再実行（ImagePathの引数が消えた場合の対処）。
 - PC再起動後: サービスは自動起動。監視タスクとは独立。
 - トンネルを作り直す: `cloudflared tunnel login`（ブラウザで承認）→ `tunnel create <名前>` → `config.yml` の `tunnel`/`credentials-file` を新IDに → `tunnel route dns <名前> tts.zakicorp.com` → `cloudflared-service-fix.ps1`。
-- **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。`public_url` が空になると監視タスクがngrokを起動し、そのURLをLambda 6本へ同期する（約1〜2分。ngrokの認証設定 `ngrok.yml` は残してある）。Cloudflareへ戻すときは `-PublicUrl 'https://tts.zakicorp.com'`。
+- **ngrokへ戻す**: 管理者PowerShellで `switch-api.ps1 -ApiScript api_server_batch.py -PublicUrl ''`。`public_url` が空になると監視タスクがngrokを起動し、そのURLをLambda 6本へ同期する（次の `cdk deploy` で `stages.ts` の値に戻るので、ngrok運用中はdeployしないか `stages.ts` も直す。約1〜2分。ngrokの認証設定 `ngrok.yml` は残してある）。Cloudflareへ戻すときは `-PublicUrl 'https://tts.zakicorp.com'`。
 
 ### 拠点での遮断: 合言葉ヘッダー（2026-09-13 17:30ごろ有効化）
 
@@ -133,7 +133,7 @@ Enable-ScheduledTask -TaskName TTS-AutoStart
 Start-ScheduledTask -TaskName TTS-AutoStart
 ```
 
-モデルロードを待ち、ログに`api ready`と`Service ready; public health and Lambda URLs verified`が出るか確認する。タスクがすでにRunningの場合は重複実行されないため、この操作では再起動にならない。
+モデルロードを待ち、ログに`api ready`と`Service ready; public health verified; Lambda URLs match (managed by CDK)`が出るか確認する（ngrok経路では`Service ready; public health and Lambda URLs verified`）。タスクがすでにRunningの場合は重複実行されないため、この操作では再起動にならない。
 
 ### 3. ヘルスと音声を確認する
 

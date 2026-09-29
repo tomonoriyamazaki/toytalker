@@ -141,19 +141,19 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 - 公開URLは固定の **`https://tts.zakicorp.com`**。Cloudflare Tunnel `toytalker-tts`（ID `8bc0e7f0-…`、locally-managed）を Windowsサービス `cloudflared`（自動起動）が張る。東京拠点、無料プラン、転送量課金なし。
 - `zakicorp.com` のDNSはRoute 53からCloudflare（無料）へ移行済み。`toytalk.zakicorp.com`（S3+CloudFrontのサイト）とACM検証用CNAMEもCloudflare側に置いた（どちらもDNS only）。登録先はお名前.com、期限は自動更新。
-- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認してLambda 6本の `ZAKICORP_TTS_URL` を維持する。 CDK化後は同じ値を `infra/config/stages.ts` の `zakicorpTtsUrl` も持つ（deployのたびに上書き）。値が同じなので衝突しないが、URLを変えるときは両方を直す。監視タスクの同期は計画の9番で止める。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
+- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認する。Lambda 6本の `ZAKICORP_TTS_URL` の正本は `infra/config/stages.ts` の `zakicorpTtsUrl`（CDKがdeployのたびに配る）で、監視タスクは照合して違えば警告するだけで書き換えない。URLを変えるときは両方を直す。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
 - 設定・認証情報の所在、正常確認、復旧、ngrokへの戻し方（`switch-api.ps1 -PublicUrl ''`）は [起動・復旧](docs/tts-boot-recovery.md) の「公開経路」節。`cloudflared service install` は `--config` を保存しないので `tools/tts-service/cloudflared-service-fix.ps1` でImagePathに明示する。
 - 拠点での遮断: WAFカスタムルール `tts-edge-key-required` が `X-Zakicorp-Edge-Key` ヘッダー（Lambda環境変数 `ZAKICORP_EDGE_KEY`、サーバー側 `.env` にも同値）の無い要求を403で落とす（2026-09-13）。期限なし。公開側 `/health` は `status` のみ、話者登録名は英数字と `-_` に限定。詳細と鍵の入れ替え手順はランブック。
 - ngrokは2026-09-13 18:02に撤去（`public_url` 設定中は監視タスクが起動しない。`switch-api.ps1 -PublicUrl ''` で復活）。再起動試験済み（17:48、ログイン前にトンネル・API・監視が復帰）。Route 53の `zakicorp.com` ホストゾーンは2026-09-13に削除済み（`zackey.xyz` は残る）。
 
 ### 起動・監視
 
-- タスクスケジューラ `TTS-AutoStart` がOS起動30秒後に非対話実行（S4U、通常権限、ログオン不要）。APIサーバー + ngrokを監視し、終了後に再起動。`public_url` が設定されていればそのURLを、無ければngrokのURLをLambda環境変数 `ZAKICORP_TTS_URL`（5つ）へ同期する。
+- タスクスケジューラ `TTS-AutoStart` がOS起動30秒後に非対話実行（S4U、通常権限、ログオン不要）。APIサーバー + ngrokを監視し、終了後に再起動。`public_url` が設定されていればLambda環境変数 `ZAKICORP_TTS_URL` を照合するだけで、無ければngrokのURLを6本へ書き込む（次の `cdk deploy` で戻る）。
 - 実装・登録: `tools/tts-service/supervisor.py` / `install.ps1`。実際の配置は `.local/tts-service/`（Git対象外）、ログは `.local/tts-service/logs/`。再適用は保守時間にタスクを停止してから登録する。
 - 元のTTSリポジトリの `setup-tasks.ps1` を実行するとログオン起動に戻る。[起動・復旧手順](docs/tts-boot-recovery.md)。
 - Windows更新は自動更新を受け入れ、アクティブ時間07:00〜翌01:00。[設定記録](docs/windows-update-restart-control.md)。
 
-`ZAKICORP_TTS_URL` の同期対象（`public_url` 未設定時はngrok URL変更のたびに更新）:
+`ZAKICORP_TTS_URL` の照合対象（`public_url` 未設定時はngrok URL変更のたびに書き込み）:
 
 1. `toytalk-stream-handler-lambda` (app TTS)
 2. `toytalk-api-stream-for-esp32-lambda` (ESP32 TTS)

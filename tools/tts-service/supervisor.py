@@ -129,6 +129,19 @@ def synchronize_urls(config, url):
         LOG.info("Updated TTS URL for %s", name)
 
 
+def check_urls(config, url):
+    """Read-only. With a fixed public_url the Lambda value is owned by CDK (infra/config/stages.ts)."""
+    stale = []
+    for name in FUNCTIONS:
+        state = aws(config, "lambda", "get-function-configuration", "--function-name", name)
+        if state.get("Environment", {}).get("Variables", {}).get("ZAKICORP_TTS_URL") != url:
+            stale.append(name)
+    if stale:
+        LOG.warning("ZAKICORP_TTS_URL differs from %s on: %s. Not updating; fix zakicorpTtsUrl in "
+                    "infra/config/stages.ts and run cdk deploy", url, ", ".join(stale))
+    return not stale
+
+
 def probe(config):
     import torch
     if not torch.cuda.is_available():
@@ -158,8 +171,10 @@ def run(config):
     public_url = (config.get("public_url") or "").rstrip("/") or None
     LOG.info("API entry point: %s; public URL: %s", api_script, public_url or "ngrok (dynamic)")
     # "public_url" (a Cloudflare Tunnel hostname served by its own Windows service) is a fixed address:
-    # publish it to the Lambdas and do not run ngrok at all. Clearing public_url brings ngrok back
-    # (see docs/tts-boot-recovery.md). ngrok is only used when public_url is unset.
+    # do not run ngrok, and do not write it to the Lambdas. CDK owns ZAKICORP_TTS_URL and rewrites it on
+    # every deploy, so writing here would make the two fight; the supervisor only checks and warns.
+    # Clearing public_url brings ngrok back (see docs/tts-boot-recovery.md). The ngrok URL changes on
+    # every start, so that emergency path still writes it to the Lambdas (until the next cdk deploy).
     tunnel = None
     if public_url:
         stray = find_process(config["ngrok"], "8000")
@@ -193,9 +208,15 @@ def run(config):
                 # Do not publish an endpoint until it actually responds through ngrok.
                 if get_json(url + "/health").get("status") != "ok":
                     raise RuntimeError("Public TTS not ready")
-                synchronize_urls(config, url)
-                if url != synced_url:
-                    LOG.info("Service ready; public health and Lambda URLs verified")
+                if public_url:
+                    matched = check_urls(config, url)
+                    if url != synced_url:
+                        LOG.info("Service ready; public health verified; Lambda URLs %s (managed by CDK)",
+                                 "match" if matched else "DIFFER")
+                else:
+                    synchronize_urls(config, url)
+                    if url != synced_url:
+                        LOG.info("Service ready; public health and Lambda URLs verified")
                 synced_url, next_sync = url, time.monotonic() + 300
             last_error = None
         except Exception as error:
