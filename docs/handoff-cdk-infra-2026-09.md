@@ -26,7 +26,7 @@
 2. **命名の決定**（計画メモの案を確定。テーブルのキー名を変えるならここで）
 3. **STGアカウント作成 → `cdk bootstrap` → SSM投入 → `cdk deploy` → マスターデータ投入**（`stages.ts` の `account` を埋める。投入スクリプトは infra/scripts）
 4. **CloudFront固定ドメイン**（`api-stg.zakicorp.com` 等。アプリとESP32の接続先切替）
-5. RnDの改名（4の後）
+5. RnDの改名（4の後）→ **自分用本番**（CMK込み）→ **DG向け本番**。本番が2つになったらGitHub Actions + OIDC
 
 判断待ち・別機会:
 
