@@ -30,7 +30,6 @@ npx cdk deploy --context stage=rnd
 - 必須: `lib/secrets.ts` の `REQUIRED_SECRETS`（OpenAI・Anthropic・Google・ElevenLabs・FishAudio・Sakura・Cartesia・ZakiCorp API/Edge・Serper・Soniox）
 - 任意: OpenAI/Anthropicの管理キー（月次レポートが各社の請求を取るときだけ）
 - 1件入れる: `printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts <stage> OPENAI_API_KEY`
-- RnDの既存Lambda環境変数から一括で写す: `npx tsx scripts/migrate-secrets-from-lambda.ts rnd [--dry-run]`
 - Lambdaは実行時にSSMから読み、メモリに保持する（`backend/shared/secrets.mjs`）。環境変数には鍵を置かず、関数ごとの対象名だけを `SECRET_PARAMS` で渡す。どの関数がどの鍵を読めるかは `lib/toytalker-stack.ts` の `secrets`
 - 鍵を入れ替えるときはSSMを変えるだけ。稼働中のLambdaは5分を過ぎた次の呼び出しで取り直す（deploy不要）
 - Lambdaに鍵を新しく使わせるとき: `lib/secrets.ts` に名前を足し、その関数の `secrets` に加え、コードでは `secret("名前")` で読む
@@ -43,7 +42,7 @@ CloudFormationはimport操作中に新しい資源を作れないので、2段�
 ```bash
 # 0. 事前準備（各1回）
 npx cdk bootstrap aws://342082316736/ap-northeast-1
-npx tsx scripts/migrate-secrets-from-lambda.ts rnd
+npx tsx scripts/migrate-secrets-from-lambda.ts rnd   # 2026-10-06に削除済み（Lambda環境変数からSSMへ写すスクリプト。移行は完了）
 
 # 1. import段階: ロール・ポリシー・Lambda Permissionを含まないテンプレートで既存資源を引き取る
 npx cdk synth --context stage=rnd --context importPhase=true

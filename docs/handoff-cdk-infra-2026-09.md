@@ -33,7 +33,6 @@
 - v1の残骸を消すか: `toytalk-lambda-role-dev`、`toytalk-openai-api-dev`、`toytalk-api-raspi`、API Gateway `toytalk-chat-apigateway-dev`、孤立ロググループ `/aws/lambda/toytalk-stream-handler-for-esp32-lambda`
 - Windows機で: `infra/` の動作確認は済（2026-09-29、Node v22.19.0・Git Bash。`npm ci`、`install-lambda-deps.sh`、型チェック、`cdk diff --context stage=rnd` が差分なし。deployは未実行）。`supervisor.py` の `ZAKICORP_TTS_URL` 同期停止はコード修正済みで、このPCの `.local/tts-service/` への反映が未実施
 - `toytalker-firmware` を1資源だけ `cdk import` で引き取るか
-- `infra/scripts/migrate-secrets-from-lambda.ts` と `lib/secrets.ts` の `loadSecretsFromLambda` を消すか（Lambda環境変数に鍵が無くなったので、もう動かない）
 - Soniox鍵発行Lambda（128MB）はコールドスタート時のSSM取得に約0.9秒かかる（他は1〜2GBで約0.2秒）。温めで普段は起きないが、気になるなら256MBへ
 
 ## 落とし穴
