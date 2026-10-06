@@ -10,6 +10,7 @@ import OpenAI from "openai";
 import { Mp3Encoder } from "@breezystack/lamejs";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { ensureSecrets, secret } from "../shared/secrets.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -18,7 +19,17 @@ const USAGE_TABLE          = "toytalker-usage";
 const UNIT_PRICES_TABLE    = "toytalker-api-unit-prices";
 const EXCHANGE_RATES_TABLE = "toytalker-exchange-rates";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+// 鍵はSSMから実行時に取るので、クライアントは最初に使うときに作る（鍵が変わったら作り直す）
+let openaiClient = null;
+let openaiClientKey = null;
+function getOpenAI() {
+  const key = secret("OPENAI_API_KEY");
+  if (!openaiClient || key !== openaiClientKey) {
+    openaiClient = new OpenAI({ apiKey: key });
+    openaiClientKey = key;
+  }
+  return openaiClient;
+}
 
 const TTS_DEFAULT   = "OpenAI";
 const VOICE_DEFAULT = "alloy";
@@ -140,13 +151,13 @@ function parseWav(wavBuf) {
 }
 
 async function ttsToBase64OpenAI(text, voice, ttsModel) {
-  const tts = await openai.audio.speech.create({ model: ttsModel, input: text, voice, format: "mp3" });
+  const tts = await getOpenAI().audio.speech.create({ model: ttsModel, input: text, voice, format: "mp3" });
   const buf = Buffer.from(await tts.arrayBuffer());
   return buf.toString("base64");
 }
 
 async function ttsToBase64Google(text, { voiceName = "ja-JP-Neural2-B", speakingRate = 1.3, pitch = 3.0, sampleRateHertz = 24000 } = {}) {
-  const key = process.env.GOOGLE_API_KEY;
+  const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
   const parts = String(voiceName).split("-");
   const languageCode = parts.length >= 2 ? `${parts[0]}-${parts[1]}` : "ja-JP";
@@ -166,7 +177,7 @@ async function ttsToBase64Google(text, { voiceName = "ja-JP-Neural2-B", speaking
 }
 
 async function ttsToBase64Gemini(text, { model = "gemini-2.5-flash-preview-tts", voiceName = "leda" } = {}) {
-  const key = process.env.GOOGLE_API_KEY;
+  const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
   const ttsPrompt = `Read the following text aloud: ${text}`;
   const maxRetries = 2;
@@ -195,7 +206,7 @@ async function ttsToBase64Gemini(text, { model = "gemini-2.5-flash-preview-tts",
 }
 
 async function ttsToBase64ElevenLabs(text, { model = "eleven_turbo_v2_5", voiceId = "hMK7c1GPJmptCzI4bQIu" } = {}) {
-  const key = process.env.ELEVENLABS_API_KEY;
+  const key = secret("ELEVENLABS_API_KEY");
   if (!key) throw new Error("ELEVENLABS_API_KEY is not set");
   const resp = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=mp3_44100_128&optimize_streaming_latency=0`,
@@ -213,7 +224,7 @@ async function ttsToBase64ElevenLabs(text, { model = "eleven_turbo_v2_5", voiceI
 // Cartesia TTS → base64(mp3) ネイティブmp3出力を要求
 const CARTESIA_API_VERSION = "2026-08-14";
 async function ttsToBase64Cartesia(text, { model = "sonic-3.6", voiceId } = {}) {
-  const key = process.env.CARTESIA_API_KEY;
+  const key = secret("CARTESIA_API_KEY");
   if (!key) throw new Error("CARTESIA_API_KEY is not set");
   const id = voiceId || process.env.CARTESIA_DEFAULT_VOICE_ID;
   if (!id) throw new Error("Cartesia voice ID is not set (CARTESIA_DEFAULT_VOICE_ID)");
@@ -231,7 +242,7 @@ async function ttsToBase64Cartesia(text, { model = "sonic-3.6", voiceId } = {}) 
 }
 
 async function ttsToBase64FishAudio(text, { referenceId = "6fdaebea7db042129f03ecb0a57ea7b6" } = {}) {
-  const key = process.env.FISHAUDIO_API_KEY;
+  const key = secret("FISHAUDIO_API_KEY");
   if (!key) throw new Error("FISHAUDIO_API_KEY is not set");
   const resp = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
@@ -244,7 +255,7 @@ async function ttsToBase64FishAudio(text, { referenceId = "6fdaebea7db042129f03e
 }
 
 async function ttsToBase64Sakura(text, { model = "zundamon", style = "normal" } = {}) {
-  const key = process.env.SAKURA_API_KEY;
+  const key = secret("SAKURA_API_KEY");
   if (!key) throw new Error("SAKURA_API_KEY is not set");
   const resp = await fetch("https://api.ai.sakura.ad.jp/v1/audio/speech", {
     method: "POST",
@@ -258,14 +269,14 @@ async function ttsToBase64Sakura(text, { model = "zundamon", style = "normal" } 
 }
 
 async function ttsToBase64ZakiCorp(text, { speaker = "vivian", language = "Japanese" } = {}) {
-  const key = process.env.ZAKICORP_API_KEY;
+  const key = secret("ZAKICORP_API_KEY");
   const baseUrl = process.env.ZAKICORP_TTS_URL;
   if (!key || !baseUrl) throw new Error("ZAKICORP_API_KEY or ZAKICORP_TTS_URL is not set");
   const resp = await fetch(`${baseUrl}/v1/tts/stream`, {
     method: "POST",
     // X-Zakicorp-Edge-Key: Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
     headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json",
-               ...(process.env.ZAKICORP_EDGE_KEY ? { "X-Zakicorp-Edge-Key": process.env.ZAKICORP_EDGE_KEY } : {}) },
+               ...(secret("ZAKICORP_EDGE_KEY") ? { "X-Zakicorp-Edge-Key": secret("ZAKICORP_EDGE_KEY") } : {}) },
     body: JSON.stringify({ text, language, speaker }),
   });
   if (!resp.ok) throw new Error(`ZakiCorp TTS failed: ${resp.status} ${await resp.text()}`);
@@ -415,6 +426,7 @@ async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len }) {
 
 // ===== ハンドラ =====
 export const handler = awslambda.streamifyResponse(async (event, responseStream) => {
+  await ensureSecrets();
   let body;
   try {
     body = event.body ? JSON.parse(event.body) : {};

@@ -6,7 +6,7 @@ ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル
 
 | ファイル | 役割 |
 |---|---|
-| `bin/toytalker.ts` | 入口。`--context stage=<rnd\|stg\|prod\|prod-dg>` で環境を選び、資格情報のアカウントが一致するか確認し、SSMから秘密を読んでスタックを作る |
+| `bin/toytalker.ts` | 入口。`--context stage=<rnd\|stg\|prod\|prod-dg>` で環境を選び、資格情報のアカウントが一致するか確認し、SSMに秘密が登録済みか確かめてスタックを作る |
 | `config/stages.ts` | 環境ごとの秘密でない設定（アカウントID・リージョン・通知先・ZakiCorp URL・S3バケット名・アーキテクチャ） |
 | `lib/secrets.ts` | SSM Parameter Store（SecureString）の名前一覧と読み出し。名前は全環境共通 `/toytalker/<key>` |
 | `lib/toytalker-stack.ts` | 資源定義。Lambdaは `backend/<dir>/index.mjs` をesbuildでまとめる（旧deploy.shと同じ指定。deploy.shは2026-09-16に削除） |
@@ -31,7 +31,10 @@ npx cdk deploy --context stage=rnd
 - 任意: OpenAI/Anthropicの管理キー（月次レポートが各社の請求を取るときだけ）
 - 1件入れる: `printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts <stage> OPENAI_API_KEY`
 - RnDの既存Lambda環境変数から一括で写す: `npx tsx scripts/migrate-secrets-from-lambda.ts rnd [--dry-run]`
-- 鍵を入れ替えたら `cdk deploy` し直す（synth時に読んでLambda環境変数へ焼くため）
+- Lambdaは実行時にSSMから読み、メモリに保持する（`backend/shared/secrets.mjs`）。環境変数には鍵を置かず、関数ごとの対象名だけを `SECRET_PARAMS` で渡す。どの関数がどの鍵を読めるかは `lib/toytalker-stack.ts` の `secrets`
+- 鍵を入れ替えるときはSSMを変えるだけ。稼働中のLambdaは5分を過ぎた次の呼び出しで取り直す（deploy不要）
+- Lambdaに鍵を新しく使わせるとき: `lib/secrets.ts` に名前を足し、その関数の `secrets` に加え、コードでは `secret("名前")` で読む
+- 環境変数方式の環境を移すときだけ2段階でdeployする（コードと設定の更新が別々に行われ、その間に鍵が読めなくなるのを避ける）: `npx cdk deploy --context stage=<stage> --context keepEnvSecrets=true` → ログの `[secrets] loaded n/n from SSM` と動作を確認 → フラグ無しで `npx cdk deploy`。新しく作る環境は最初からフラグ無し
 
 ## RnDの既存資源をimportで引き取る手順
 

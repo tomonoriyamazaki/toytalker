@@ -8,6 +8,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { Agent, setGlobalDispatcher } from "undici";
+import { ensureSecrets, secret } from "../shared/secrets.mjs";
 
 // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
 // 会話の間が空くとLLM/TTSへのTLS接続が閉じられ、次の相槌でハンドシェイクからやり直しになる
@@ -123,7 +124,7 @@ async function resolveCharacter(characterId) {
 
 // ---- LLM (相槌生成 - Gemini Flash) ----
 async function generateBackchannel(partialText, personalityPrompt, history = [], pastBackchannels = []) {
-  const key = process.env.GOOGLE_API_KEY;
+  const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
 
   const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", hour: "numeric", minute: "numeric" });
@@ -175,7 +176,7 @@ async function generateBackchannel(partialText, personalityPrompt, history = [],
 // ---- TTS functions (raw PCM Buffer) ----
 
 async function ttsPcmOpenAI(text, { model = "gpt-4o-mini-tts", voice = "alloy" } = {}) {
-  const key = process.env.OPENAI_API_KEY;
+  const key = secret("OPENAI_API_KEY");
   if (!key) throw new Error("OPENAI_API_KEY is not set");
   const resp = await fetch("https://api.openai.com/v1/audio/speech", {
     method: "POST",
@@ -187,7 +188,7 @@ async function ttsPcmOpenAI(text, { model = "gpt-4o-mini-tts", voice = "alloy" }
 }
 
 async function ttsPcmGoogle(text, { voiceName = "ja-JP-Neural2-B", sampleRateHertz = 24000 } = {}) {
-  const key = process.env.GOOGLE_API_KEY;
+  const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
   const parts = String(voiceName).split("-");
   const languageCode = parts.length >= 2 ? `${parts[0]}-${parts[1]}` : "ja-JP";
@@ -209,7 +210,7 @@ async function ttsPcmGoogle(text, { voiceName = "ja-JP-Neural2-B", sampleRateHer
 }
 
 async function ttsPcmGemini(text, { model = "gemini-2.5-flash-preview-tts", voiceName = "Kore" } = {}) {
-  const key = process.env.GOOGLE_API_KEY;
+  const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
   const resp = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
@@ -234,7 +235,7 @@ async function ttsPcmGemini(text, { model = "gemini-2.5-flash-preview-tts", voic
 }
 
 async function ttsPcmElevenLabs(text, { model = "eleven_turbo_v2_5", voiceId = "hMK7c1GPJmptCzI4bQIu" } = {}) {
-  const key = process.env.ELEVENLABS_API_KEY;
+  const key = secret("ELEVENLABS_API_KEY");
   if (!key) throw new Error("ELEVENLABS_API_KEY is not set");
   const resp = await fetch(
     `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=pcm_24000&optimize_streaming_latency=0`,
@@ -251,7 +252,7 @@ async function ttsPcmElevenLabs(text, { model = "eleven_turbo_v2_5", voiceId = "
 // Cartesia TTS → raw PCM Buffer (24kHz/16bit/mono)
 const CARTESIA_API_VERSION = "2026-08-14";
 async function ttsPcmCartesia(text, { model = "sonic-3.6", voiceId } = {}) {
-  const key = process.env.CARTESIA_API_KEY;
+  const key = secret("CARTESIA_API_KEY");
   if (!key) throw new Error("CARTESIA_API_KEY is not set");
   const id = voiceId || process.env.CARTESIA_DEFAULT_VOICE_ID;
   if (!id) throw new Error("Cartesia voice ID is not set (CARTESIA_DEFAULT_VOICE_ID)");
@@ -269,7 +270,7 @@ async function ttsPcmCartesia(text, { model = "sonic-3.6", voiceId } = {}) {
 }
 
 async function ttsPcmFishAudio(text, { referenceId = "e58b0d7efca34eb38d5c4985e9e1e3e6" } = {}) {
-  const key = process.env.FISHAUDIO_API_KEY;
+  const key = secret("FISHAUDIO_API_KEY");
   if (!key) throw new Error("FISHAUDIO_API_KEY is not set");
   const resp = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
@@ -281,7 +282,7 @@ async function ttsPcmFishAudio(text, { referenceId = "e58b0d7efca34eb38d5c4985e9
 }
 
 async function ttsPcmSakura(text, { model = "zundamon", style = "normal" } = {}) {
-  const key = process.env.SAKURA_API_KEY;
+  const key = secret("SAKURA_API_KEY");
   if (!key) throw new Error("SAKURA_API_KEY is not set");
   const resp = await fetch("https://api.ai.sakura.ad.jp/v1/audio/speech", {
     method: "POST",
@@ -302,14 +303,14 @@ async function ttsPcmSakura(text, { model = "zundamon", style = "normal" } = {})
 
 // ZakiCorp TTS (clone voice via local GPU) → raw PCM Buffer
 async function ttsPcmZakiCorp(text, { speaker = "vivian", language = "Japanese" } = {}) {
-  const key = process.env.ZAKICORP_API_KEY;
+  const key = secret("ZAKICORP_API_KEY");
   const baseUrl = process.env.ZAKICORP_TTS_URL;
   if (!key || !baseUrl) throw new Error("ZAKICORP_API_KEY or ZAKICORP_TTS_URL is not set");
   const resp = await fetch(`${baseUrl}/v1/tts/stream`, {
     method: "POST",
     // X-Zakicorp-Edge-Key: Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
     headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json",
-               ...(process.env.ZAKICORP_EDGE_KEY ? { "X-Zakicorp-Edge-Key": process.env.ZAKICORP_EDGE_KEY } : {}) },
+               ...(secret("ZAKICORP_EDGE_KEY") ? { "X-Zakicorp-Edge-Key": secret("ZAKICORP_EDGE_KEY") } : {}) },
     body: JSON.stringify({ text, language, speaker }),
   });
   if (!resp.ok) throw new Error(`ZakiCorp TTS failed: ${resp.status} ${await resp.text()}`);
@@ -355,6 +356,7 @@ async function generateTTSPcm(text, vendor, voice) {
 export const handler = async (event) => {
   const start = Date.now();
   try {
+    await ensureSecrets();
     const body = event.body ? JSON.parse(event.body) : {};
     if (body.warmup) return { statusCode: 200, body: "warm" };  // EventBridgeウォームアップping
     prewarmSpareInstance();  // 処理中に予備インスタンスを温める（同時2人目対策）

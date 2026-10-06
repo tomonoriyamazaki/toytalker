@@ -2,6 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { ensureSecrets, secret } from "../shared/secrets.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -79,14 +80,15 @@ function recordDeviceReport(deviceId, query) {
 
 export const handler = async (event) => {
   try {
+    await ensureSecrets();
     // EventBridgeウォームアップping（コールドスタート対策）
     if (event.body === '{"warmup":true}') return { statusCode: 200, body: "warm" };
 
-    const SONIOX_API_KEY = process.env.SONIOX_API_KEY;
+    const SONIOX_API_KEY = secret("SONIOX_API_KEY");
     if (!SONIOX_API_KEY) {
       return {
         statusCode: 500,
-        body: JSON.stringify({ error: "Missing SONIOX_API_KEY env var" }),
+        body: JSON.stringify({ error: "Missing SONIOX_API_KEY" }),
       };
     }
 

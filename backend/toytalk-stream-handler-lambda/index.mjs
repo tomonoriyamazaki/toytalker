@@ -7,6 +7,7 @@
   import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
   import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
   import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+  import { ensureSecrets, secret } from "../shared/secrets.mjs";
 
   // ---- 予備インスタンスの事前ウォームアップ ----
   // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -21,9 +22,8 @@
   }
 
   // ---- Web検索（Serper） ----
-  const SERPER_API_KEY = process.env.SERPER_API_KEY;
-
   async function searchWeb(query, numResults = 3) {
+    const SERPER_API_KEY = secret("SERPER_API_KEY");
     if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY is not set");
     const resp = await fetch("https://google.serper.dev/search", {
       method: "POST",
@@ -201,7 +201,17 @@
     }
   }
 
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  // 鍵はSSMから実行時に取るので、クライアントは最初に使うときに作る（鍵が変わったら作り直す）
+  let openaiClient = null;
+  let openaiClientKey = null;
+  function getOpenAI() {
+    const key = secret("OPENAI_API_KEY");
+    if (!openaiClient || key !== openaiClientKey) {
+      openaiClient = new OpenAI({ apiKey: key });
+      openaiClientKey = key;
+    }
+    return openaiClient;
+  }
 
   // ---- チューニング定数 ----
   const HEAD_MIN_CHARS = 24;      // 今回は使わない（ヘッドTTS無効）
@@ -258,7 +268,7 @@
 
   // OpenAI TTS → base64
   async function ttsToBase64OpenAI(text, voice, ttsModel) {
-    const tts = await openai.audio.speech.create({
+    const tts = await getOpenAI().audio.speech.create({
       model: ttsModel,
       input: text,
       voice,
@@ -360,7 +370,7 @@
       audioEncoding = "LINEAR16", // ← WAVに包む前提
     } = {}
   ) {
-    const key = process.env.GOOGLE_API_KEY;
+    const key = secret("GOOGLE_API_KEY");
     if (!key) throw new Error("GOOGLE_API_KEY is not set");
     // 例: "ja-JP-Neural2-B" → "ja-JP"
     const parts = String(voiceName).split("-");
@@ -407,7 +417,7 @@
 
   // Gemini Speech Generation → { b64, audioTokens } （APIキーは GOOGLE_API_KEY を共用）
   async function ttsToBase64Gemini(text, { model = "gemini-2.5-flash-preview-tts", voiceName = "Kore" } = {}) {
-    const key = process.env.GOOGLE_API_KEY;
+    const key = secret("GOOGLE_API_KEY");
     if (!key) throw new Error("GOOGLE_API_KEY is not set");
     const ttsPrompt = `Read the following text aloud: ${text}`;
 
@@ -442,7 +452,7 @@
 
   // ElevenLabs TTS → base64(WAV)
   async function ttsToBase64ElevenLabs(text, { model = "eleven_turbo_v2_5", voiceId = "hMK7c1GPJmptCzI4bQIu" } = {}) {
-    const key = process.env.ELEVENLABS_API_KEY;
+    const key = secret("ELEVENLABS_API_KEY");
     if (!key) throw new Error("ELEVENLABS_API_KEY is not set");
 
     const resp = await fetch(
@@ -480,7 +490,7 @@
   // Cartesia TTS 共通: /tts/bytes を呼び、要求した形式の音声バイナリをBufferで返す
   const CARTESIA_API_VERSION = "2026-08-14";
   async function ttsBytesCartesia(text, { model, voiceId, outputFormat }) {
-    const key = process.env.CARTESIA_API_KEY;
+    const key = secret("CARTESIA_API_KEY");
     if (!key) throw new Error("CARTESIA_API_KEY is not set");
     const id = voiceId || process.env.CARTESIA_DEFAULT_VOICE_ID;
     if (!id) throw new Error("Cartesia voice ID is not set (CARTESIA_DEFAULT_VOICE_ID)");
@@ -535,7 +545,7 @@
 
   // Fish Audio TTS → base64(WAV)
   async function ttsToBase64FishAudio(text, { referenceId = "6fdaebea7db042129f03ecb0a57ea7b6" } = {}) {
-    const key = process.env.FISHAUDIO_API_KEY;
+    const key = secret("FISHAUDIO_API_KEY");
     if (!key) throw new Error("FISHAUDIO_API_KEY is not set");
 
     const resp = await fetch("https://api.fish.audio/v1/tts", {
@@ -592,7 +602,7 @@
 
   // Sakura Internet TTS (VOICEVOX) → base64(WAV)
   async function ttsToBase64Sakura(text, { model = "zundamon", style = "normal" } = {}) {
-    const key = process.env.SAKURA_API_KEY;
+    const key = secret("SAKURA_API_KEY");
     if (!key) throw new Error("SAKURA_API_KEY is not set");
     const resp = await fetch("https://api.ai.sakura.ad.jp/v1/audio/speech", {
       method: "POST",
@@ -637,7 +647,7 @@
 
   // ZakiCorp TTS (clone voice via local GPU) — streaming chunks
   async function ttsToBase64ZakiCorp(text, { speaker = "vivian", language = "Japanese" } = {}) {
-    const key = process.env.ZAKICORP_API_KEY;
+    const key = secret("ZAKICORP_API_KEY");
     const baseUrl = process.env.ZAKICORP_TTS_URL;
     if (!key || !baseUrl) throw new Error("ZAKICORP_API_KEY or ZAKICORP_TTS_URL is not set");
     const resp = await fetch(`${baseUrl}/v1/tts/stream`, {
@@ -646,7 +656,7 @@
         "Authorization": `Bearer ${key}`,
         "Content-Type": "application/json",
         // Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
-        ...(process.env.ZAKICORP_EDGE_KEY ? { "X-Zakicorp-Edge-Key": process.env.ZAKICORP_EDGE_KEY } : {}),
+        ...(secret("ZAKICORP_EDGE_KEY") ? { "X-Zakicorp-Edge-Key": secret("ZAKICORP_EDGE_KEY") } : {}),
       },
       body: JSON.stringify({ text, language, speaker }),
     });
@@ -707,6 +717,7 @@
 
   export const handler = awslambda.streamifyResponse(async (event, res) => {
     res.setContentType("text/event-stream");
+    await ensureSecrets();
 
     const body      = event.body ? JSON.parse(event.body) : {};
     if (body.warmup) { res.end(); return; }  // EventBridgeウォームアップping（コールドスタート対策）
@@ -799,7 +810,7 @@
     const backchannelHint = backchannelFired ? "\n【重要】相槌は別途再生済みです。冒頭の相槌・挨拶・オウム返しは不要です。本題から返答を始めてください。口調や温かさはいつも通りのままにしてください。" : "";
     // 検索後の「前置きなし」指示はシステムプロンプトに置かず、検索結果を返すメッセージ側（TOOL_RESULT_INSTRUCTION）に添える。
     // システムプロンプトに置くと通常ターンの口調まで素っ気なくなるため。
-    const toolHint = SERPER_API_KEY ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。" : "";
+    const toolHint = secret("SERPER_API_KEY") ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。" : "";
     const basePrompt = `あなたは子供向けの友好的な音声アシスタントです。簡潔に答えて、自然に会話を続けてください。単語の間に半角スペースを入れないでください。現在の日時は${now}です。日時を聞かれたら年は省略して簡潔に答えてください。相手が話した言語で返答してください。${backchannelHint}${toolHint}`;
     const systemContent = personalityPrompt ? `${personalityPrompt}\n\n${basePrompt}` : basePrompt;
     const messagesWithSystem = [{ role: "system", content: systemContent }, ...messages];
@@ -821,7 +832,7 @@
     // ---- LLM ストリーム生成 ----
     function streamLLMOpenAI(msgs, model) {
       return (async function* () {
-        const llm = await openai.chat.completions.create({
+        const llm = await getOpenAI().chat.completions.create({
           model,
           temperature: 0.7,
           stream: true,
@@ -868,7 +879,7 @@
         reqBody.tools = [{ function_declarations: tools }];
       }
 
-      const key = process.env.GOOGLE_API_KEY;
+      const key = secret("GOOGLE_API_KEY");
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${key}`;
 
       return (async function* () {
@@ -929,7 +940,7 @@
         reqBody.system = systemMsg.content;
       }
 
-      const key = process.env.ANTHROPIC_API_KEY;
+      const key = secret("ANTHROPIC_API_KEY");
 
       return (async function* () {
         const resp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -975,7 +986,7 @@
       })();
     }
 
-    const enableTools = llmProvider === "google" && SERPER_API_KEY;
+    const enableTools = llmProvider === "google" && secret("SERPER_API_KEY");
     const toolsDef = enableTools ? [WEB_SEARCH_TOOL] : null;
 
     function createLLMStream(msgs) {

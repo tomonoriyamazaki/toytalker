@@ -10,6 +10,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
 import { CloudWatchLogsClient, FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
+import { ensureSecrets, secret } from "../shared/secrets.mjs";
 
 const REGION = "ap-northeast-1";
 const ddb  = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -157,7 +158,7 @@ async function aggregateUsage(month) {
 
 // ---- 4. 各社の実績（APIがある社だけ） ----
 async function fetchOpenAiCost(month) {
-  const key = process.env.OPENAI_ADMIN_KEY;
+  const key = secret("OPENAI_ADMIN_KEY");
   if (!key) return { status: "skipped", note: "OPENAI_ADMIN_KEY 未設定" };
   const { start, end } = monthRange(month);
   let sum = 0, page = null, guard = 0;
@@ -176,7 +177,7 @@ async function fetchOpenAiCost(month) {
 }
 
 async function fetchAnthropicCost(month) {
-  const key = process.env.ANTHROPIC_ADMIN_KEY;
+  const key = secret("ANTHROPIC_ADMIN_KEY");
   if (!key) return { status: "skipped", note: "ANTHROPIC_ADMIN_KEY 未設定" };
   const { start, end } = monthRange(month);
   let cents = 0, page = null, guard = 0;
@@ -196,7 +197,7 @@ async function fetchAnthropicCost(month) {
 }
 
 async function fetchElevenLabsUsage() {
-  const key = process.env.ELEVENLABS_API_KEY;
+  const key = secret("ELEVENLABS_API_KEY");
   if (!key) return { status: "skipped", note: "ELEVENLABS_API_KEY 未設定" };
   const j = await fetchJson("https://api.elevenlabs.io/v1/user/subscription", { headers: { "xi-api-key": key } });
   return {
@@ -352,6 +353,7 @@ function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing
 
 // ---- Handler ----
 export const handler = async (event = {}) => {
+  await ensureSecrets();
   const now = new Date();
   const month = typeof event.month === "string" && /^\d{4}-\d{2}$/.test(event.month) ? event.month : prevMonthOf(now);
   const send = event.send !== false;

@@ -1,8 +1,9 @@
-// 秘密の値はアカウントごとのSSM Parameter Store（SecureString）に置き、synth時に読んでLambda環境変数へ焼く。
-// 名前は全環境で同じ。中身だけアカウントごとに違う。鍵を入れ替えたら `cdk deploy` し直す。
+// 秘密の値はアカウントごとのSSM Parameter Store（SecureString）に置き、Lambdaが実行時に読む（backend/shared/secrets.mjs）。
+// CDKは名前をLambdaへ渡し（環境変数 SECRET_PARAMS）、読み取り権限を付け、synth時に登録漏れを確かめるだけで、値は読まない。
+// 名前は全環境で同じ。中身だけアカウントごとに違う。鍵の入れ替えはSSMを変えるだけで、deployは要らない。
 import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
 
-/** Lambda環境変数名 → SSMパラメータ名 */
+/** コード内の名前（secret("…") の引数） → SSMパラメータ名 */
 export const REQUIRED_SECRETS = {
   OPENAI_API_KEY: "/toytalker/openai-api-key",
   ANTHROPIC_API_KEY: "/toytalker/anthropic-api-key",
@@ -29,16 +30,27 @@ export type SecretName = RequiredSecretName | OptionalSecretName;
 
 export type Secrets = Record<RequiredSecretName, string> & Partial<Record<OptionalSecretName, string>>;
 
+export const SECRET_PARAMS: Record<SecretName, string> = { ...REQUIRED_SECRETS, ...OPTIONAL_SECRETS };
+
+/** 必須の秘密がSSMに登録されているか確かめる。復号しないので値は手元に来ない */
+export async function assertSecretsExist(region: string): Promise<void> {
+  await getSecrets(region, false);
+}
+
+/** 移行用（--context keepEnvSecrets=true）: 値を読んでLambda環境変数にも残す */
 export async function loadSecrets(region: string): Promise<Secrets> {
+  return getSecrets(region, true);
+}
+
+async function getSecrets(region: string, decrypt: boolean): Promise<Secrets> {
   const ssm = new SSMClient({ region });
-  const all: Record<string, string> = { ...REQUIRED_SECRETS, ...OPTIONAL_SECRETS };
-  const byParam = new Map(Object.entries(all).map(([env, param]) => [param, env]));
+  const byParam = new Map(Object.entries(SECRET_PARAMS).map(([env, param]) => [param, env]));
   const names = [...byParam.keys()];
   const found: Record<string, string> = {};
   const missing: string[] = [];
   for (let i = 0; i < names.length; i += 10) {
     const chunk = names.slice(i, i + 10);
-    const res = await ssm.send(new GetParametersCommand({ Names: chunk, WithDecryption: true }));
+    const res = await ssm.send(new GetParametersCommand({ Names: chunk, WithDecryption: decrypt }));
     for (const p of res.Parameters ?? []) {
       if (p.Name && p.Value !== undefined) found[byParam.get(p.Name)!] = p.Value;
     }

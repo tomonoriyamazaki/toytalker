@@ -14,7 +14,7 @@ import * as schedulerTargets from "aws-cdk-lib/aws-scheduler-targets";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StageConfig } from "../config/stages.js";
-import type { Secrets } from "./secrets.js";
+import { SECRET_PARAMS, type SecretName, type Secrets } from "./secrets.js";
 
 /** 全Lambda共通のランタイム。EOLのときはここ1か所を変える */
 export const LAMBDA_RUNTIME = lambda.Runtime.NODEJS_24_X;
@@ -59,7 +59,8 @@ function bundleLambda(fnDir: string, format: BundleFormat, requireShim: boolean)
 
 export interface ToyTalkerStackProps extends cdk.StackProps {
   readonly config: StageConfig;
-  readonly secrets: Secrets;
+  /** 移行用（--context keepEnvSecrets=true）。渡すと鍵をLambda環境変数にも残す。通常は渡さない */
+  readonly envSecrets?: Secrets;
   /**
    * `cdk import` 用。CloudFormationはimport操作中に新しい資源を作れないので、
    * ロール・ポリシー・Lambda Permissionを出さず、既存ロールを参照する。
@@ -87,7 +88,10 @@ interface FunctionSpec {
   /** ESMバンドル内で依存が require() を使う（undici）ので createRequire を先頭に足す */
   readonly requireShim?: boolean;
   readonly description?: string;
+  /** 秘密でない設定（環境変数） */
   readonly env: readonly string[];
+  /** 実行時にSSMから読む鍵。名前を環境変数 SECRET_PARAMS で渡し、読み取り権限を付ける */
+  readonly secrets: readonly SecretName[];
   readonly url?: {
     readonly invokeMode: "RESPONSE_STREAM" | "BUFFERED";
     readonly cors?: lambda.CfnUrl.CorsProperty;
@@ -109,17 +113,17 @@ const CORS_GET_ONLY: lambda.CfnUrl.CorsProperty = {
   exposeHeaders: ["date, content-type, transfer-encoding"],
 };
 
-const TTS_ENV = [
+const TTS_ENV = ["CARTESIA_DEFAULT_VOICE_ID", "ZAKICORP_TTS_URL"] as const;
+
+const TTS_SECRETS = [
   "OPENAI_API_KEY",
   "GOOGLE_API_KEY",
   "ELEVENLABS_API_KEY",
   "FISHAUDIO_API_KEY",
   "SAKURA_API_KEY",
   "CARTESIA_API_KEY",
-  "CARTESIA_DEFAULT_VOICE_ID",
   "ZAKICORP_API_KEY",
   "ZAKICORP_EDGE_KEY",
-  "ZAKICORP_TTS_URL",
 ] as const;
 
 const FUNCTIONS: readonly FunctionSpec[] = [
@@ -131,7 +135,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 120,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, "ANTHROPIC_API_KEY", "SERPER_API_KEY"],
+    env: [...TTS_ENV],
+    secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "SERPER_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: true,
@@ -145,7 +150,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 2048,
     timeoutSeconds: 120,
     format: "esm",
-    env: [...TTS_ENV, "ANTHROPIC_API_KEY", "SERPER_API_KEY"],
+    env: [...TTS_ENV],
+    secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "SERPER_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: true,
@@ -159,7 +165,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 1024,
     timeoutSeconds: 20,
     format: "esm",
-    env: [...TTS_ENV, "ANTHROPIC_API_KEY"],
+    env: [...TTS_ENV],
+    secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: true,
@@ -174,7 +181,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 20,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, "ANTHROPIC_API_KEY"],
+    env: [...TTS_ENV],
+    secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY"],
     url: { invokeMode: "BUFFERED" },
     warm: true,
     selfWarm: true,
@@ -188,7 +196,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 128,
     timeoutSeconds: 5, // OTA判定でS3のmanifestを読むため3→5（2026-09-16）
     format: "esm",
-    env: ["SONIOX_API_KEY", "SONIOX_MODEL", "FIRMWARE_BUCKET"],
+    env: ["SONIOX_MODEL", "FIRMWARE_BUCKET"],
+    secrets: ["SONIOX_API_KEY"],
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: false,
@@ -202,7 +211,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 256,
     timeoutSeconds: 60,
     format: "cjs",
-    env: ["CARTESIA_API_KEY", "ZAKICORP_API_KEY", "ZAKICORP_EDGE_KEY", "ZAKICORP_TTS_URL"],
+    env: ["ZAKICORP_TTS_URL"],
+    secrets: ["CARTESIA_API_KEY", "ZAKICORP_API_KEY", "ZAKICORP_EDGE_KEY"],
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY },
     warm: false,
     selfWarm: false,
@@ -220,6 +230,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 120,
     format: "esm",
     env: [...TTS_ENV],
+    secrets: [...TTS_SECRETS],
     url: {
       invokeMode: "RESPONSE_STREAM",
       cors: {
@@ -242,7 +253,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 300,
     format: "esm",
     description: "Monthly ops report: FX rate, recorded cost vs provider bills, price table checks",
-    env: ["ELEVENLABS_API_KEY", "OPENAI_ADMIN_KEY", "ANTHROPIC_ADMIN_KEY", "OPS_SNS_TOPIC_ARN"],
+    env: ["OPS_SNS_TOPIC_ARN"],
+    secrets: ["ELEVENLABS_API_KEY", "OPENAI_ADMIN_KEY", "ANTHROPIC_ADMIN_KEY"],
     warm: false,
     selfWarm: false,
     readTables: ["toytalker-usage", "toytalker-api-unit-prices"],
@@ -253,7 +265,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
 export class ToyTalkerStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: ToyTalkerStackProps) {
     super(scope, id, props);
-    const { config, secrets, importPhase } = props;
+    const { config, envSecrets, importPhase } = props;
 
     // ---- DynamoDB（データ入り。作り直さない） ----
     const tables = this.createTables();
@@ -290,8 +302,7 @@ export class ToyTalkerStack extends cdk.Stack {
       throw new Error("importPhase には config.existingRoles が必要です");
     }
 
-    const allEnv: Record<string, string | undefined> = {
-      ...secrets,
+    const allEnv: Record<string, string> = {
       CARTESIA_DEFAULT_VOICE_ID: config.cartesiaDefaultVoiceId,
       ZAKICORP_TTS_URL: config.zakicorpTtsUrl,
       SONIOX_MODEL: config.sonioxModel,
@@ -305,11 +316,13 @@ export class ToyTalkerStack extends cdk.Stack {
       const environment: Record<string, string> = {};
       for (const key of spec.env) {
         const value = allEnv[key];
-        if (value === undefined) {
-          if (key in secrets || key.endsWith("_ADMIN_KEY")) continue; // 任意の秘密は無ければ入れない
-          throw new Error(`${spec.name}: 環境変数 ${key} の値がありません`);
-        }
+        if (value === undefined) throw new Error(`${spec.name}: 環境変数 ${key} の値がありません`);
         environment[key] = value;
+      }
+      environment.SECRET_PARAMS = JSON.stringify(Object.fromEntries(spec.secrets.map((n) => [n, SECRET_PARAMS[n]])));
+      for (const name of spec.secrets) {
+        const value = envSecrets?.[name];
+        if (value !== undefined) environment[name] = value; // 移行の1段目だけ
       }
 
       const logGroup = new logs.LogGroup(this, `${spec.id}Logs`, {
@@ -361,6 +374,13 @@ export class ToyTalkerStack extends cdk.Stack {
       if (!importPhase) {
         for (const t of spec.readTables) tables[t].grantReadData(fn);
         for (const t of spec.readWriteTables) tables[t].grantReadWriteData(fn);
+        // 秘密の実行時取得。SecureStringの復号はAWS管理キー（aws/ssm）ならSSM経由で許可される
+        fn.addToRolePolicy(new iam.PolicyStatement({
+          actions: ["ssm:GetParameters"],
+          resources: spec.secrets.map((n) => this.formatArn({
+            service: "ssm", resource: "parameter", resourceName: SECRET_PARAMS[n].replace(/^\//, ""),
+          })),
+        }));
         if (spec.selfWarm) {
           // 自分自身へのInvoke。関数ARNをトークンで参照すると循環になるので固定名から組み立てる
           fn.addToRolePolicy(new iam.PolicyStatement({

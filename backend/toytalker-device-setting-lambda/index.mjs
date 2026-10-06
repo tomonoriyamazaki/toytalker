@@ -4,6 +4,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand, DeleteCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { ensureSecrets, secret } from "../shared/secrets.mjs";
 
 const client = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(client);
@@ -121,6 +122,7 @@ export const handler = async (event) => {
   console.log(`[Request] ${method} ${path}`);
 
   try {
+    await ensureSecrets();
 
     // ---- GET /llms ---- LLM一覧取得
     if (method === "GET" && path === "/llms") {
@@ -589,7 +591,7 @@ export const handler = async (event) => {
       if (provider === "Cartesia") {
         // Cartesia Instant clone: 音声をそのまま送り、返ってきたボイスUUIDを vendor_id にする。
         // 元音声はS3に控えを残す（作り直し・移行用）。
-        const cartesiaKey = process.env.CARTESIA_API_KEY;
+        const cartesiaKey = secret("CARTESIA_API_KEY");
         if (!cartesiaKey) return response(500, { error: "Cartesia not configured" });
         const mime = (mime_type || "audio/wav").toLowerCase();
         const ext = /mp3|mpeg|mpga/.test(mime) ? "mp3" : /ogg|oga/.test(mime) ? "ogg" : /flac/.test(mime) ? "flac" : /webm/.test(mime) ? "webm" : /wav/.test(mime) ? "wav" : null;
@@ -633,7 +635,7 @@ export const handler = async (event) => {
         return response(200, { voice_id: voiceId, label, provider: "Cartesia", vendor_id: cv.id });
       }
 
-      const apiKey = process.env.ZAKICORP_API_KEY;
+      const apiKey = secret("ZAKICORP_API_KEY");
       const baseUrl = process.env.ZAKICORP_TTS_URL;
       if (!apiKey || !baseUrl) return response(500, { error: "ZakiCorp TTS not configured" });
 
@@ -644,7 +646,7 @@ export const handler = async (event) => {
         method: "POST",
         // X-Zakicorp-Edge-Key: Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
         headers: { "Authorization": `Bearer ${apiKey}`, "Content-Type": "application/json",
-                   ...(process.env.ZAKICORP_EDGE_KEY ? { "X-Zakicorp-Edge-Key": process.env.ZAKICORP_EDGE_KEY } : {}) },
+                   ...(secret("ZAKICORP_EDGE_KEY") ? { "X-Zakicorp-Edge-Key": secret("ZAKICORP_EDGE_KEY") } : {}) },
         body: JSON.stringify({ name: voiceId, audio_base64, mime_type: mime_type || "audio/wav" }),
       });
       if (!ttsResp.ok) {
@@ -719,7 +721,7 @@ export const handler = async (event) => {
 
       if (existing.Item.provider === "Cartesia") {
         // Cartesia側のボイスも消す（無ければ無視）。控えの音声もS3から削除
-        const cartesiaKey = process.env.CARTESIA_API_KEY;
+        const cartesiaKey = secret("CARTESIA_API_KEY");
         if (cartesiaKey && existing.Item.vendor_id) {
           const dr = await fetch(`https://api.cartesia.ai/voices/${existing.Item.vendor_id}`, {
             method: "DELETE",

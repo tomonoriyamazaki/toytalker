@@ -1,7 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { getStage } from "../config/stages.js";
-import { loadSecrets, loadSecretsFromLambda } from "../lib/secrets.js";
+import { assertSecretsExist, loadSecrets } from "../lib/secrets.js";
 import { ToyTalkerStack } from "../lib/toytalker-stack.js";
 
 const app = new cdk.App();
@@ -16,17 +16,17 @@ if (identity.Account !== config.account) {
   );
 }
 
-// 秘密の読み出し元。既定はSSM。RnDでSSMへ移す前の確認だけ --context secretsSource=lambda で既存Lambdaの環境変数を読む
-const secretsSource = app.node.tryGetContext("secretsSource") ?? "ssm";
-if (secretsSource === "lambda" && config.stage !== "rnd") {
-  throw new Error("secretsSource=lambda はRnDの移行時だけ使えます");
-}
-const secrets = secretsSource === "lambda" ? await loadSecretsFromLambda(config.region) : await loadSecrets(config.region);
+// 秘密はLambdaが実行時にSSMから読む。ここでは登録漏れだけ確かめる。
+// 環境変数方式から移るときだけ --context keepEnvSecrets=true で値を読み、環境変数にも残す（1段目）。
+// 動作を確かめたあと、フラグ無しでdeployして環境変数から外す（2段目）。
+const keepEnvSecrets = String(app.node.tryGetContext("keepEnvSecrets")) === "true";
+const envSecrets = keepEnvSecrets ? await loadSecrets(config.region) : undefined;
+if (!keepEnvSecrets) await assertSecretsExist(config.region);
 
 new ToyTalkerStack(app, `ToyTalker-${config.stage}`, {
   env: { account: config.account, region: config.region },
   config,
-  secrets,
+  envSecrets,
   importPhase,
   terminationProtection: true,
   description: `ToyTalker ${config.stage}: Lambda, DynamoDB, S3, SNS, warmer, monthly ops`,
