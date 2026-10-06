@@ -17,7 +17,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **STTはLambdaを経由しない**: Soniox一時キーをLambdaが発行し、クライアントがSonioxへ直接WebSocket接続する。
 - **相槌(backchannel)**: メインLLMの処理中に「そうだね〜」等の短い応答を先に返す。デフォルトON。
 - **App / ESP32は対称構成**: 各々にメインLambda+相槌Lambdaがあり、出力形式だけ異なる（App=base64, ESP32=PCM）。
-- **複数アカウント展開（RnD/STG/本番×2）とCDK化は進行中。** RnDのToyTalker資源はCloudFormationスタック `ToyTalker-rnd` の管理下にある（2026-09-16にimport済み）。CDKコードは `infra/`（[README](infra/README.md)）、決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。 続きを始めるときは [CDK引き継ぎ](docs/handoff-cdk-infra-2026-09.md) を最初に読む。APIキー類の正本はSSM Parameter Store `/toytalker/<key>`。命名の見直し（環境名の付与・`toytalk`/`toytalker` の統一）は未決定で、同計画の「命名の見直し」節。
+- **複数アカウント展開（RnD/STG/本番×2）とCDK化は進行中。** RnDのToyTalker資源はCloudFormationスタック `ToyTalker-rnd` の管理下にある（2026-09-16にimport済み）。CDKコードは `infra/`（[README](infra/README.md)）、決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。 続きを始めるときは [CDK引き継ぎ](docs/handoff-cdk-infra-2026-09.md) を最初に読む。APIキー類の正本はSSM Parameter Store `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い。2026-10-06切替）。鍵の入れ替えはSSMを変えるだけで、5分以内に反映される。命名の見直し（環境名の付与・`toytalk`/`toytalker` の統一）は未決定で、同計画の「命名の見直し」節。
 
 ### TTSプロバイダー
 
@@ -71,7 +71,7 @@ DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / C
 - **本番に影響する操作（Lambdaデプロイ・AWS設定変更・DynamoDB書き込み）と削除操作は、何をするかを説明してからユーザーの明示的なOKを得て実行する。** 説明と実行を同じターンでやらない。
 - **作業は原則worktreeで行う（1つの作業ツリーに1セッション）。** 依頼を受けたら `.claude/worktrees/<name>` にブランチを切って始め、聞かない。同じ作業ツリーを複数セッションで共有すると、ファイルの選り分けや相手の作業待ちが発生する（2026-09-13）。終わったらmainへfast-forwardし、了承を得てworktreeとブランチを消す。CLAUDE.mdなど共有ファイルの大規模整理は1セッションだけで行う。
 - 「コミットして」と言われたらコミットし、そのまま現在のブランチへpushする。PR作成・マージ・ブランチクリーンアップは明示的な指示があるまでやらない。
-- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（2026-09-16から。各Lambda配下の `deploy.sh` は使わない。CDKが環境変数をSSMの値で上書きするので、`deploy.sh` や手作業で環境変数を変えても次のdeployで戻る）。
+- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（2026-09-16から。各Lambda配下の `deploy.sh` は使わない。CDKが環境変数を上書きするので、手作業で環境変数を変えても次のdeployで戻る）。
 - **Lambdaのデプロイ元はmain。** デプロイ前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する（2026-09-13に別worktreeの変更を含まない作業ツリーからデプロイし、数分間本番からCartesiaが消えた）。`cdk diff` で差分が出るLambdaが意図したものだけか確認する。
 - PowerShellでgitコマンドを実行するとき、`Set-Location` を使わず `git` から直接実行する（パーミッション設定のパターンマッチが効かなくなるため）。
 - ビルド確認と実機確認を区別して報告する。通信・音声・メモリの安定性は、ユーザーによる実機の連続会話試験とログで確認する。
@@ -164,7 +164,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 
 ### S3 / DynamoDB / 認証
 
-- APIキー `ZAKICORP_API_KEY` は `C:\Users\exodj\projects\tts-models\faster-qwen3-tts\scripts\.env`（サーバー側）と各Lambdaの環境変数にある。リポジトリには書かない。
+- APIキー `ZAKICORP_API_KEY` は `C:\Users\exodj\projects\tts-models\faster-qwen3-tts\scripts\.env`（サーバー側）とSSM `/toytalker/zakicorp-api-key`（Lambda側）にある。リポジトリには書かない。
 - S3バケット `toytalker-tts-speakers` — speaker embedding (.pt) のバックアップ
 - `toytalker-voices` のZakiCorpエントリ: provider=ZakiCorp, voice_id=zakicorp-{name}, vendor_id={name}
 
