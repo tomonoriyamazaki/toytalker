@@ -12,7 +12,7 @@
 
 | 順 | 項目 | Claudeだけで | ユーザーが要る | 状態 | 詳細 |
 |---|---|---|---|---|---|
-| 1 | 命名の決定 | 案を出す | 最終OK | 推奨案あり（下記）、未確定 | [複数アカウント計画](multi-account-iac-plan.md) の「命名の見直し」 |
+| 1 | 命名の決定 | 案を出す | 最終OK | 済（2026-10-12、下記） | [命名規則](naming-conventions.md)、新旧対応は [複数アカウント計画](multi-account-iac-plan.md) の「命名」 |
 | 2 | STGアカウント作成 → `cdk bootstrap` → SSM投入 → `cdk deploy` → マスターデータ投入 | bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 未着手 | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md)、[infra/README](../infra/README.md) |
 | 3 | CloudFront固定ドメイン（`api-stg.zakicorp.com` 等）とアプリ・ESP32の接続先切替 | CDK・アプリ・ファーム | Cloudflare DNS追加、実機確認 | 未着手 | [複数アカウント計画](multi-account-iac-plan.md) |
 | 4 | 認証（Cognito + Google / Sign in with Apple）→ 前払いポイント制 | CDK・Lambda・アプリ | Google Cloud / Apple Developer側の設定、実機確認 | 設計メモあり、未着手 | [先送り項目](deferred-items.md) の「ユーザー認証」、[原価と課金](pricing-and-cost-model.md) 第11節 |
@@ -23,12 +23,14 @@
 
 並べた理由: 1は2以降の名前の前提。4〜6は2〜3と独立なので、ユーザーの手待ちの間にClaudeが進められる。7は本番なので最後。
 
-## 1の推奨案（確定したらここを「決定」に書き換え、計画メモの節も更新する）
+## 1の決定（2026-10-12）
 
-- 計画メモの「名前の案」をそのまま採用する（`toytalker-<env>-<機能>-<相手>`、例 `toytalker-stg-chat-app`）。
+- 形は `toytalker-<機能>-<環境>`（例 `toytalker-chat-app-stg`、`toytalker-devices-stg`）。計画メモの案から環境名を最後に変え、種類の接尾辞は付けず、タグ `project` / `environment` を全資源に付ける。規則は [命名規則](naming-conventions.md)、新旧対応表と適用の順番は [複数アカウント計画](multi-account-iac-plan.md) の「命名」節。
 - **DynamoDBのキー名（`owner_id#device_id` 等）は変えない。** 変えるとデータ移行とコード全面修正が入り、環境名を付ける目的とは無関係。
 - 未ログイン端末の扱い（4で必要: ログイン必須かゲスト継続か）は4の着手時に決める。
+- 適用はまだ。2の最初の作業として「Lambdaコードがテーブル名を環境変数から組み立てる」直しをRnDで先に入れ、STGは最初から新名で作る。RnDの改名は7。
 
 ## 済
 
+- 命名の決定（2026-10-12）。`toytalker-<機能>-<環境>`。[命名規則](naming-conventions.md)
 - 秘密の実行時取得（2026-10-06）。Lambda 8本がSSMから鍵を読む。[CDK引き継ぎ](handoff-cdk-infra-2026-09.md)

@@ -10,7 +10,7 @@
 | CloudFormation | CDKの裏で使い続ける | CDKはTSをCloudFormationテンプレートに変換して流す。YAMLは書かない。マネコンのCloudFormation画面はスタックの閲覧・ロールバック用に使う |
 | 今のアカウント | RnDとして残し、ToyTalkerの資源はCDK管理に引き取る（2026-09-15に変更） | 当初は手作業のまま残す予定だったが、RnDを見ながらCDKを書き、当てて差分が消えるまで直せる方が確実。テーブルにはデータが入っているので作り直さず `cdk import` で引き取る。ToyTalker以外の資源はCDKの管理外のまま |
 | 環境 | RnD（現行）→ STG → 自分用本番 → DG向け本番 | Organizationsで分け、ログインはIAM Identity Center。アカウントごとのアクセスキーは作らない |
-| 資源の名前 | テーブル名・Lambda名は `toytalker-*` の固定名を全環境で維持。S3バケットだけ環境名を付ける | アカウントが別なら同じ名前でぶつからない。RnDの既存資源をimportで引き取るには名前の一致が必要。S3は全世界で一意なので `toytalker-tts-speakers-<stage>` |
+| 資源の名前 | 全資源に環境名を付ける: `toytalker-<機能>-<環境>`（2026-10-12決定。[命名規則](naming-conventions.md)）。RnDは既存名のままimportで引き取り、CloudFront固定ドメインの後に改名する | 当初は「固定名を全環境で維持、S3だけ環境名」としたが、コンソールやログで環境が一目で分かる方を取った。RnDの既存資源をimportで引き取るには名前の一致が必要なので、RnDの改名は後回し |
 | 環境ごとの設定 | `infra/config/stages.ts` の1ファイルに環境ごとの塊を並べ、`cdk deploy --context stage=<env>` で選ぶ | アカウントID・リージョン・APIの固定ドメイン・通知メール・ZakiCorp URL・メモリなど。秘密ではないのでGitに入れる |
 | 秘密の値 | アカウントごとのSSM Parameter Store（SecureString）。名前は全環境で同じ（例 `/toytalker/openai-api-key`）、中身だけ違う | CDKは名前しか持たず、秘密がファイルに載らない。中身は初回にアカウントごとに手で入れる（投入スクリプト可）。CDKがデプロイ時に読んでLambda環境変数に焼くので、鍵を入れ替えたら `cdk deploy` し直す |
 | CDKが決める値 | Function URLのホスト名など、生成結果の値はファイルに書かない | CDKコード内で「このLambdaのURLをあのLambdaの環境変数へ」と配線する。人が見るのはデプロイ後の出力 |
@@ -67,28 +67,36 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 - 時期: STGを作る前。8本のコードに手が入るので実機試験が要る。先にやればSTGは最初から環境変数に鍵の無い状態で立ち上がる。
 - 秘密でない設定（`ZAKICORP_TTS_URL`・`CARTESIA_DEFAULT_VOICE_ID`・`SONIOX_MODEL`・`FIRMWARE_BUCKET`・`OPS_SNS_TOPIC_ARN`）は環境変数のまま。
 
-## 命名の見直し（2026-09-16、未決定）
+## 命名（決定）
 
-今の名前は `toytalk-`/`toytalker-` が混在し、環境名が無い。計画では「固定名を全環境で維持」としたが、環境名を付ける方向で見直したい（コンソールやログで環境が一目で分かる。S3は既に環境名が必須）。案は接頭辞 `toytalker-<env>-`、envは `rnd` / `stg` / `prd` / `prd-dg`（例: `toytalker-stg-devices`、`toytalker-stg-stream-handler`）。
+2026-09-16に案を出し、2026-10-12に決定。**規則は [命名規則](naming-conventions.md)**（`toytalker-<機能>-<環境>`、環境は `rnd` / `stg` / `prd` / `prd-dg`、種類の接尾辞なし、タグ `project` / `environment`）。ここには既存RnD資源の新旧対応と、改名の影響・順番だけを置く。`stages.ts` の `prod` / `prod-dg` はSTG着手時に `prd` / `prd-dg` へ直す（アカウント未作成なので資源への影響なし）。
 
-### 名前の案（2026-09-16）
+### Lambda
 
-- 形は `toytalker-<env>-<機能>-<相手>`。環境名を前に置くと一覧が環境ごとに固まり、IAMで `toytalker-stg-*` の前方一致が書ける。
-- `-lambda` `-table` のような種類は付けない（コンソールもログの `/aws/lambda/…` も種類を示す）。
-- 相手は `app`（スマホ）と `mcu`（ESP32。`devices/mcu/` に合わせ、基板が変わっても持つ名前）。両方から使うものは付けない。
+| 今 | 決定 | CDK部品ID（今 → 決定） | 中身 |
+|---|---|---|---|
+| `toytalk-stream-handler-lambda` | `toytalker-chat-app-<環境>` | `StreamHandler` → `ChatApp` | App用メイン（LLM+TTS） |
+| `toytalk-api-stream-for-esp32-lambda` | `toytalker-chat-mcu-<環境>` | `Esp32Stream` → `ChatMcu` | ESP32用メイン |
+| `toytalker-backchannel-for-app-lambda` | `toytalker-backchannel-app-<環境>` | `BackchannelApp`（変更なし） | App用相槌 |
+| `toytalker-backchannel-for-esp32-lambda` | `toytalker-backchannel-mcu-<環境>` | `BackchannelEsp32` → `BackchannelMcu` | ESP32用相槌 |
+| `toytalk-soniox-stt-lambda` | `toytalker-stt-token-<環境>` | `SonioxStt` → `SttToken` | Soniox一時キー発行（両方から使う） |
+| `toytalker-device-setting-lambda` | `toytalker-settings-app-<環境>` | `DeviceSetting` → `SettingsApp` | デバイス登録・ボイス設定・コスト（「デバイス設定」より広い） |
+| `toytalker-tts-only-lambda` | `toytalker-read-aloud-app-<環境>` | `TtsOnly` → `ReadAloudApp` | 読み上げ。実装（TTSのみ）より機能名 |
+| `toytalker-ops-monthly-lambda` | `toytalker-ops-monthly-<環境>` | `OpsMonthly`（変更なし） | 月次レポート |
 
-| 今 | 案 | 中身 |
+### Lambda以外
+
+| 種類 | 今 | 決定 |
 |---|---|---|
-| `toytalk-stream-handler-lambda` | `toytalker-<env>-chat-app` | App用メイン（LLM+TTS） |
-| `toytalk-api-stream-for-esp32-lambda` | `toytalker-<env>-chat-mcu` | ESP32用メイン |
-| `toytalker-backchannel-for-app-lambda` | `toytalker-<env>-backchannel-app` | App用相槌 |
-| `toytalker-backchannel-for-esp32-lambda` | `toytalker-<env>-backchannel-mcu` | ESP32用相槌 |
-| `toytalk-soniox-stt-lambda` | `toytalker-<env>-stt-token` | Soniox一時キー発行（両方から使う） |
-| `toytalker-device-setting-lambda` | `toytalker-<env>-settings-app` | デバイス登録・ボイス設定・コスト（「デバイス設定」より広い） |
-| `toytalker-tts-only-lambda` | `toytalker-<env>-read-aloud-app` | 読み上げ。実装（TTSのみ）より機能名 |
-| `toytalker-ops-monthly-lambda` | `toytalker-<env>-ops-monthly` | 月次レポート |
-
-テーブルは `toytalker-<env>-devices` のように接頭辞を替えるだけ。S3は `toytalker-<env>-tts-speakers`。ロググループは関数名に追従。
+| スタック名 | `ToyTalker-rnd` | `toytalker-<環境>`（小文字で揃える） |
+| DynamoDB 8テーブル | `toytalker-devices` など | `toytalker-devices-<環境>` など末尾に環境名。部品IDは `DevicesTable` のまま |
+| S3 | `toytalker-tts-speakers`、`toytalker-firmware` | `toytalker-tts-speakers-<環境>`、`toytalker-firmware-<環境>`（`stages.ts` のSTG以降の値と同じ形） |
+| SNS・温めルール・Scheduler | `toytalker-ops-monthly`、`toytalker-lambda-warmer` | `toytalker-ops-monthly-<環境>`、`toytalker-warmer-<環境>` |
+| ロググループ | `/aws/lambda/<関数名>` | 関数名に追従 |
+| IAMロール | CDKが付ける（スタック名が先頭） | 固定名は付けない。スタック名の変更で環境名が付く |
+| SSM | `/toytalker/<key>` | 変えない（アカウントごとなので環境名不要） |
+| `backend/` のディレクトリ名 | `toytalk-stream-handler-lambda` など | `backend/<機能>`（`backend/chat-app` など、環境名は付けない）。RnDの改名と同時に直す。それまでは旧名のまま |
+| 固定ドメイン（ロードマップ3） | 未定 | 3の着手時に決める。`api-stg.zakicorp.com` の形が案 |
 
 ### 名前は3層あり、一度に変える
 
@@ -98,9 +106,7 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 | 部品ID（CDKコード内の名前） | `StreamHandler`、`DevicesTable` など | ロール名の中身、CloudFormationの論理ID |
 | 資源の固定名 | `toytalk-stream-handler-lambda`、`toytalker-devices` など | 実際のLambda名・テーブル名。アプリやコードが参照するのはこれ |
 
-IAMロールはCDKが名前を付けている（例 `ToyTalker-rnd-OpsMonthlyServiceRoleDC20ED87-UWLuVIYTH2C7`）ので、環境の区別はスタック名で既についている。固定名は付けない。
-
-部品IDを変えると、その資源はCloudFormation上で別物になり作り直しになる（テーブルも同じ）。固定名を変える時点で作り直しは避けられないので、スタック名（`toytalker-<env>` に小文字で揃える）・部品ID（`StreamHandler` → `ChatApp` など）・固定名は同時に変え、作り直しを1回で済ませる。
+部品IDを変えると、その資源はCloudFormation上で別物になり作り直しになる（テーブルも同じ）。固定名を変える時点で作り直しは避けられないので、スタック名・部品ID・固定名は同時に変え、作り直しを1回で済ませる。
 
 ### 名前を変えたときに起きること
 
@@ -109,17 +115,16 @@ CDKで固定名を変えると、その資源は「作り直し（Replace）」�
 | 資源 | 影響 |
 |---|---|
 | IAMロール | CDKが名前を付けるので変える場面がない。作り直しても実害なし |
-| Lambda関数名 | **Function URLのホスト名が変わる。** アプリとESP32の接続先を配り直す必要がある。ロググループ名、`supervisor.py` の関数名一覧、月次レポートのログ検索対象も追従 |
+| Lambda関数名 | **Function URLのホスト名が変わる。** アプリとESP32の接続先を配り直す必要がある。ロググループ名、`supervisor.py` の関数名一覧、月次レポートのログ検索対象（`toytalker-ops-monthly-lambda/index.mjs` 冒頭の `/aws/lambda/…` 一覧）も追従 |
 | DynamoDBテーブル名 | 新テーブルは空。マスター4テーブルは `export/import-master-data.ts` で移せる。会話ログ・利用量は件数が多い |
-| DynamoDBキー名 | テーブル名変更に加えて、データの詰め替えとLambdaコードの書き換えが要る。一番重い。変えるならSTGを作る前に決める |
 | S3バケット名 | `aws s3 sync` で写すだけ（34オブジェクト） |
 | SNS・温めルール・Scheduler | 影響なし。メール購読は再確認メールが届く |
 
-### 進め方の案
+### 適用の順番（決定）
 
-1. **Lambdaコードがテーブル名を環境変数から組み立てるように直す**（例: `TABLE_PREFIX`）。名前はまだ変えない。CDKが環境変数を配るので、名前を知っているのは `stages.ts` だけになる。ここは無リスク。
+1. **Lambdaコードがテーブル名を環境変数から組み立てるように直す**（`TABLE_SUFFIX` を1つ配り、`devices${TABLE_SUFFIX}` のように組む。RnDは空文字）。2026-10-12時点で8本の `index.mjs` に文字列直書きが計36か所。名前はまだ変えない。CDKが環境変数を配るので、名前を知っているのは `stages.ts` だけになる。タグ2つもこのとき足す（RnDの既存資源にも付く。Replaceは起きない）。ここは無リスクで、ロードマップ2（STG）の最初の作業。
 2. **STGは最初から新しい名前で作る。** まっさらなので追加の手間はない。
-3. **RnDは、CloudFrontの固定ドメイン（進め方8）の後に改名する。** 配布済みの実機があるので、Function URLのホスト名が変わっても困らない状態にしてから。接頭辞の統一と環境名の付与は1回で済ませる。
+3. **RnDは、CloudFrontの固定ドメイン（進め方8）の後に改名する**（ロードマップ7）。配布済みの実機があるので、Function URLのホスト名が変わっても困らない状態にしてから。接頭辞の統一・環境名の付与・`backend/` ディレクトリ名・`supervisor.py` の関数名一覧を1回で済ませる。
 
 ## CDK化のついでに入れるもの
 
