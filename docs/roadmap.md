@@ -13,7 +13,7 @@
 | 順 | 項目 | Claudeだけで | ユーザーが要る | 状態 | 詳細 |
 |---|---|---|---|---|---|
 | 1 | 命名の決定 | 案を出す | 最終OK | 済（2026-10-12、下記） | [命名規則](naming-conventions.md)、新旧対応は [複数アカウント計画](multi-account-iac-plan.md) の「命名」 |
-| 2 | テーブル名の環境変数化とタグ（RnDへdeploy） → STGアカウント作成 → `cdk bootstrap` → SSM投入 → `cdk deploy` → マスターデータ投入 | 環境変数化・タグ・bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 環境変数化とタグは済（2026-10-13、RnDへdeploy済み）。次はSTGアカウント作成（ユーザー） | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md)、[infra/README](../infra/README.md) |
+| 2 | テーブル名の環境変数化とタグ（RnDへdeploy） → STGアカウント作成 → `cdk bootstrap` → SSM投入 → `cdk deploy` → マスターデータ投入 | 環境変数化・タグ・bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 環境変数化とタグは済（2026-10-13、RnDへdeploy済み）。組織・Identity Centerは既存を使うと決定（同日）。次は子アカウントのメール変更とSTG作成（Claude、OKを得て実行） | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md)、[infra/README](../infra/README.md) |
 | 3 | CloudFront固定ドメイン（`api-stg.zakicorp.com` 等）とアプリ・ESP32の接続先切替 | CDK・アプリ・ファーム | Cloudflare DNS追加、実機確認 | 未着手 | [複数アカウント計画](multi-account-iac-plan.md) |
 | 4 | 認証（Cognito + Google / Sign in with Apple）→ 前払いポイント制 | CDK・Lambda・アプリ | Google Cloud / Apple Developer側の設定、実機確認 | 設計メモあり、未着手 | [先送り項目](deferred-items.md) の「ユーザー認証」、[原価と課金](pricing-and-cost-model.md) 第11節 |
 | 5 | Cartesia 429時のずんだもんフォールバック、ZakiCorp TTS待ち行列の可視化 | 全部 | 実機確認 | 仕様あり、未着手 | [TTSフォールバック](tts-fallback-and-notifications.md)、[先送り項目](deferred-items.md) の「待ち行列の可視化」 |
