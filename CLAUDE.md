@@ -17,7 +17,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **STTはLambdaを経由しない**: Soniox一時キーをLambdaが発行し、クライアントがSonioxへ直接WebSocket接続する。
 - **相槌(backchannel)**: メインLLMの処理中に「そうだね〜」等の短い応答を先に返す。デフォルトON。
 - **App / ESP32は対称構成**: 各々にメインLambda+相槌Lambdaがあり、出力形式だけ異なる（App=base64, ESP32=PCM）。
-- **複数アカウント展開（RnD/STG/本番×2）とCDK化は進行中。** RnDのToyTalker資源はCloudFormationスタック `ToyTalker-rnd` の管理下にある（2026-09-16にimport済み）。CDKコードは `infra/`（[README](infra/README.md)）、決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。 続きを始めるときは [CDK引き継ぎ](docs/handoff-cdk-infra-2026-09.md) を最初に読む。APIキー類の正本はSSM Parameter Store `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い。2026-10-06切替）。鍵の入れ替えはSSMを変えるだけで、5分以内に反映される。資源の命名は `toytalker-<機能>-<環境>`（例 `toytalker-chat-app-stg`）とタグ `project` / `environment` に決定（2026-10-12）。規則は [命名規則](docs/naming-conventions.md)、新旧対応表と適用の順番は同計画の「命名」節。RnDの既存資源は改名まで旧名のまま。
+- **複数アカウント展開（RnD/STG/本番×2）とCDK化は進行中。** RnDのToyTalker資源はCloudFormationスタック `ToyTalker-rnd` の管理下にある（2026-09-16にimport済み）。CDKコードは `infra/`（[README](infra/README.md)）、決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。 続きを始めるときは [CDK引き継ぎ](docs/handoff-cdk-infra-2026-09.md) を最初に読む。APIキー類の正本はSSM Parameter Store `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い。2026-10-06切替）。鍵の入れ替えはSSMを変えるだけで、5分以内に反映される。資源の命名は `toytalker-<機能>-<環境>`（例 `toytalker-chat-app-stg`）とタグ `project` / `environment` に決定（2026-10-12）。規則は [命名規則](docs/naming-conventions.md)、新旧対応表と適用の順番は同計画の「命名」節。RnDの既存資源は改名まで旧名のまま。テーブル名はコードに書かず、CDKが配る `TABLE_SUFFIX`（RnDは空）から `backend/shared/tables.mjs` で組む（2026-10-13）。
 
 ### TTSプロバイダー
 

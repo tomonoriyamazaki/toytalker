@@ -9,6 +9,7 @@ import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { Agent, setGlobalDispatcher } from "undici";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
+import { tableName } from "../shared/tables.mjs";
 
 // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
 // 会話の間が空くとLLM/TTSへのTLS接続が閉じられ、次の相槌でハンドシェイクからやり直しになる
@@ -41,9 +42,9 @@ function prewarmSpareInstance() {
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
-const DEVICES_TABLE    = "toytalker-devices";
-const CHARACTERS_TABLE = "toytalker-characters";
-const VOICES_TABLE     = "toytalker-voices";
+const DEVICES_TABLE    = tableName("devices");
+const CHARACTERS_TABLE = tableName("characters");
+const VOICES_TABLE     = tableName("voices");
 
 // ---- TTS設定 ----
 const TTS_TABLE = {

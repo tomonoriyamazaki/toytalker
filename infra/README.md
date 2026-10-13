@@ -6,8 +6,8 @@ ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル
 
 | ファイル | 役割 |
 |---|---|
-| `bin/toytalker.ts` | 入口。`--context stage=<rnd\|stg\|prod\|prod-dg>` で環境を選び、資格情報のアカウントが一致するか確認し、SSMに秘密が登録済みか確かめてスタックを作る |
-| `config/stages.ts` | 環境ごとの秘密でない設定（アカウントID・リージョン・通知先・ZakiCorp URL・S3バケット名・アーキテクチャ） |
+| `bin/toytalker.ts` | 入口。`--context stage=<rnd\|stg\|prd\|prd-dg>` で環境を選び、資格情報のアカウントが一致するか確認し、SSMに秘密が登録済みか確かめてスタックを作る |
+| `config/stages.ts` | 環境ごとの秘密でない設定（アカウントID・リージョン・通知先・ZakiCorp URL・テーブル名の末尾・S3バケット名・アーキテクチャ） |
 | `lib/secrets.ts` | SSM Parameter Store（SecureString）の名前一覧と読み出し。名前は全環境共通 `/toytalker/<key>` |
 | `lib/toytalker-stack.ts` | 資源定義。Lambdaは `backend/<dir>/index.mjs` をesbuildでまとめる（旧deploy.shと同じ指定。deploy.shは2026-09-16に削除） |
 | `scripts/` | 初回移行用（下記） |
@@ -24,6 +24,12 @@ npx cdk deploy --context stage=rnd
 ```
 
 別アカウントへ出すときは `AWS_PROFILE=<profile>` か `--profile <profile>` を付ける。設定のアカウントIDと資格情報が違えば起動時に止まる。
+
+## 名前とタグ
+
+- 規則は [docs/naming-conventions.md](../docs/naming-conventions.md)（`toytalker-<機能>-<環境>`）。RnDの既存資源は改名まで旧名のまま。
+- DynamoDBのテーブル名はコードに書かない。`config/stages.ts` の `tableSuffix`（RnDは空、STG以降は `-stg` 等）をCDKが環境変数 `TABLE_SUFFIX` で全Lambdaへ渡し、`backend/shared/tables.mjs` の `tableName("devices")` が `toytalker-devices<suffix>` に組む。`lib/toytalker-stack.ts` のテーブルも同じ形で作る
+- タグ `project=toytalker` と `environment=<stage>` を `Tags.of(stack)` で全資源に付ける（タグ非対応のFunction URL・Schedulerには付かない）
 
 ## 秘密（SSM）
 

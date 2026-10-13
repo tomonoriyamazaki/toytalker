@@ -3,11 +3,12 @@ import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
+import { tableName } from "../shared/tables.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
 const s3 = new S3Client({ region: "ap-northeast-1" });
-const DEVICES_TABLE = "toytalker-devices";
+const DEVICES_TABLE = tableName("devices");
 
 // ---- ESP32 OTA（docs/esp32-ota-settings-plan.md）----
 // 本体は起動時に fw/hw/ota/part を付けてここへ来る。マニフェストのチャネル（既定 stable、

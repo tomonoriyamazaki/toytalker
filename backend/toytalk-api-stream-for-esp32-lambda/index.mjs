@@ -9,6 +9,7 @@
   import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
   import { Agent, setGlobalDispatcher } from "undici";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
+  import { tableName } from "../shared/tables.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
   // 会話の間が数秒空くとLLM/TTSへのTLS接続が閉じられ、次のターンで
@@ -84,14 +85,14 @@
 
   const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
   const ddb = DynamoDBDocumentClient.from(ddbClient);
-  const DEVICES_TABLE    = "toytalker-devices";
-  const VOICES_TABLE     = "toytalker-voices";
-  const CHARACTERS_TABLE = "toytalker-characters";
-  const CHAT_LOGS_TABLE  = "toytalker-chat-logs";
-  const LLMS_TABLE       = "toytalker-llms";
-  const USAGE_TABLE         = "toytalker-usage";
-  const UNIT_PRICES_TABLE   = "toytalker-api-unit-prices";
-  const EXCHANGE_RATES_TABLE = "toytalker-exchange-rates";
+  const DEVICES_TABLE    = tableName("devices");
+  const VOICES_TABLE     = tableName("voices");
+  const CHARACTERS_TABLE = tableName("characters");
+  const CHAT_LOGS_TABLE  = tableName("chat-logs");
+  const LLMS_TABLE       = tableName("llms");
+  const USAGE_TABLE         = tableName("usage");
+  const UNIT_PRICES_TABLE   = tableName("api-unit-prices");
+  const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
 
   async function saveLog(item) {
     try {

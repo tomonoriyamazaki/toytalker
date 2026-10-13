@@ -8,6 +8,7 @@
   import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
   import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
+  import { tableName } from "../shared/tables.mjs";
 
   // ---- 予備インスタンスの事前ウォームアップ ----
   // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -60,13 +61,13 @@
 
   const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
   const ddb = DynamoDBDocumentClient.from(ddbClient);
-  const CHARACTERS_TABLE    = "toytalker-characters";
-  const VOICES_TABLE        = "toytalker-voices";
-  const CHAT_LOGS_TABLE     = "toytalker-chat-logs";
-  const LLMS_TABLE          = "toytalker-llms";
-  const USAGE_TABLE         = "toytalker-usage";
-  const UNIT_PRICES_TABLE   = "toytalker-api-unit-prices";
-  const EXCHANGE_RATES_TABLE = "toytalker-exchange-rates";
+  const CHARACTERS_TABLE    = tableName("characters");
+  const VOICES_TABLE        = tableName("voices");
+  const CHAT_LOGS_TABLE     = tableName("chat-logs");
+  const LLMS_TABLE          = tableName("llms");
+  const USAGE_TABLE         = tableName("usage");
+  const UNIT_PRICES_TABLE   = tableName("api-unit-prices");
+  const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
 
   async function saveLog(item) {
     try {

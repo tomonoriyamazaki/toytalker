@@ -7,7 +7,8 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, BatchWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { resolveStage } from "./_common.js";
 
-const MASTER_TABLES = ["toytalker-characters", "toytalker-voices", "toytalker-llms", "toytalker-api-unit-prices"] as const;
+// 機能名。実名は `toytalker-<機能名><tableSuffix>`。JSONのファイル名は環境によらず `toytalker-<機能名>.json`（export-master-data.ts と同じ）
+const MASTER_TABLES = ["characters", "voices", "llms", "api-unit-prices"] as const;
 
 const { config, flags } = await resolveStage(process.argv.slice(2));
 const from = [...flags].find((f) => f.startsWith("--from="))?.slice("--from=".length);
@@ -18,8 +19,9 @@ if (!flags.has("--yes")) throw new Error(`${config.stage} のテーブルへ書�
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: config.region }));
 const here = path.dirname(new URL(import.meta.url).pathname);
 
-for (const table of MASTER_TABLES) {
-  const file = path.join(here, "..", "master-data", from, `${table}.json`);
+for (const key of MASTER_TABLES) {
+  const table = `toytalker-${key}${config.tableSuffix}`;
+  const file = path.join(here, "..", "master-data", from, `toytalker-${key}.json`);
   const items: Record<string, unknown>[] = JSON.parse(fs.readFileSync(file, "utf8"));
   for (let i = 0; i < items.length; i += 25) {
     let requests = items.slice(i, i + 25).map((Item) => ({ PutRequest: { Item } }));

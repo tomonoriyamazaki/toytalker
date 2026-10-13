@@ -11,15 +11,16 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from "@aw
 import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
 import { CloudWatchLogsClient, FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
+import { tableName } from "../shared/tables.mjs";
 
 const REGION = "ap-northeast-1";
 const ddb  = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
 const sns  = new SNSClient({ region: REGION });
 const logs = new CloudWatchLogsClient({ region: REGION });
 
-const USAGE_TABLE          = "toytalker-usage";
-const UNIT_PRICES_TABLE    = "toytalker-api-unit-prices";
-const EXCHANGE_RATES_TABLE = "toytalker-exchange-rates";
+const USAGE_TABLE          = tableName("usage");
+const UNIT_PRICES_TABLE    = tableName("api-unit-prices");
+const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
 const FX_FALLBACK_RATE     = 150;  // 本文Lambdaが為替行を見つけられないときに使う既定値（点検表示用）
 
 // 記録側Lambdaのロググループ。単価行が無くて記録されなかった警告をここから拾う

@@ -68,15 +68,19 @@ export interface ToyTalkerStackProps extends cdk.StackProps {
   readonly importPhase: boolean;
 }
 
-type TableName =
-  | "toytalker-devices"
-  | "toytalker-characters"
-  | "toytalker-voices"
-  | "toytalker-llms"
-  | "toytalker-chat-logs"
-  | "toytalker-usage"
-  | "toytalker-api-unit-prices"
-  | "toytalker-exchange-rates";
+/**
+ * DynamoDBテーブルの機能名。実名は `toytalker-<機能名><config.tableSuffix>`（docs/naming-conventions.md）。
+ * Lambdaには環境変数 TABLE_SUFFIX を渡し、コード側は backend/shared/tables.mjs の tableName() で同じ形に組む。
+ */
+type TableKey =
+  | "devices"
+  | "characters"
+  | "voices"
+  | "llms"
+  | "chat-logs"
+  | "usage"
+  | "api-unit-prices"
+  | "exchange-rates";
 
 interface FunctionSpec {
   readonly id: string;
@@ -100,8 +104,8 @@ interface FunctionSpec {
   readonly warm: boolean;
   /** 実リクエスト中に自分自身へwarmup pingを投げる（予備インスタンス温め）。自分へのInvoke権限が要る */
   readonly selfWarm: boolean;
-  readonly readTables: readonly TableName[];
-  readonly readWriteTables: readonly TableName[];
+  readonly readTables: readonly TableKey[];
+  readonly readWriteTables: readonly TableKey[];
 }
 
 // Function URLのCORS。既存設定をそのまま再現している（AllowHeadersがカンマ区切りの1要素なのも現状どおり）
@@ -140,8 +144,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: true,
-    readTables: ["toytalker-devices", "toytalker-characters", "toytalker-voices", "toytalker-llms", "toytalker-api-unit-prices", "toytalker-exchange-rates"],
-    readWriteTables: ["toytalker-chat-logs", "toytalker-usage"],
+    readTables: ["devices", "characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
+    readWriteTables: ["chat-logs", "usage"],
   },
   {
     id: "StreamHandler",
@@ -155,8 +159,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: true,
-    readTables: ["toytalker-characters", "toytalker-voices", "toytalker-llms", "toytalker-api-unit-prices", "toytalker-exchange-rates"],
-    readWriteTables: ["toytalker-chat-logs", "toytalker-usage"],
+    readTables: ["characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
+    readWriteTables: ["chat-logs", "usage"],
   },
   {
     id: "BackchannelApp",
@@ -170,7 +174,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: true,
-    readTables: ["toytalker-characters", "toytalker-voices"],
+    readTables: ["characters", "voices"],
     readWriteTables: [],
   },
   {
@@ -186,7 +190,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "BUFFERED" },
     warm: true,
     selfWarm: true,
-    readTables: ["toytalker-devices", "toytalker-characters", "toytalker-voices"],
+    readTables: ["devices", "characters", "voices"],
     readWriteTables: [],
   },
   {
@@ -202,7 +206,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     warm: true,
     selfWarm: false,
     readTables: [],
-    readWriteTables: ["toytalker-devices"], // firmware_version 等を UpdateItem で記録
+    readWriteTables: ["devices"], // firmware_version 等を UpdateItem で記録
   },
   {
     id: "DeviceSetting",
@@ -218,8 +222,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     selfWarm: false,
     readTables: [],
     readWriteTables: [
-      "toytalker-devices", "toytalker-characters", "toytalker-voices", "toytalker-llms",
-      "toytalker-chat-logs", "toytalker-usage", "toytalker-api-unit-prices", "toytalker-exchange-rates",
+      "devices", "characters", "voices", "llms",
+      "chat-logs", "usage", "api-unit-prices", "exchange-rates",
     ],
   },
   {
@@ -242,8 +246,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     },
     warm: false,
     selfWarm: false,
-    readTables: ["toytalker-voices", "toytalker-api-unit-prices", "toytalker-exchange-rates"],
-    readWriteTables: ["toytalker-usage"],
+    readTables: ["voices", "api-unit-prices", "exchange-rates"],
+    readWriteTables: ["usage"],
   },
   {
     id: "OpsMonthly",
@@ -257,8 +261,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     secrets: ["ELEVENLABS_API_KEY", "OPENAI_ADMIN_KEY", "ANTHROPIC_ADMIN_KEY"],
     warm: false,
     selfWarm: false,
-    readTables: ["toytalker-usage", "toytalker-api-unit-prices"],
-    readWriteTables: ["toytalker-exchange-rates"],
+    readTables: ["usage", "api-unit-prices"],
+    readWriteTables: ["exchange-rates"],
   },
 ];
 
@@ -267,8 +271,12 @@ export class ToyTalkerStack extends cdk.Stack {
     super(scope, id, props);
     const { config, envSecrets, importPhase } = props;
 
+    // ---- タグ（全資源。docs/naming-conventions.md） ----
+    cdk.Tags.of(this).add("project", "toytalker");
+    cdk.Tags.of(this).add("environment", config.stage);
+
     // ---- DynamoDB（データ入り。作り直さない） ----
-    const tables = this.createTables();
+    const tables = this.createTables(config.tableSuffix);
 
     // ---- S3: speaker embedding のバックアップ ----
     const speakersBucket = new s3.Bucket(this, "SpeakersBucket", {
@@ -319,6 +327,7 @@ export class ToyTalkerStack extends cdk.Stack {
         if (value === undefined) throw new Error(`${spec.name}: 環境変数 ${key} の値がありません`);
         environment[key] = value;
       }
+      environment.TABLE_SUFFIX = config.tableSuffix; // backend/shared/tables.mjs がテーブル名を組む
       environment.SECRET_PARAMS = JSON.stringify(Object.fromEntries(spec.secrets.map((n) => [n, SECRET_PARAMS[n]])));
       for (const name of spec.secrets) {
         const value = envSecrets?.[name];
@@ -450,23 +459,24 @@ export class ToyTalkerStack extends cdk.Stack {
     opsSchedule.applyRemovalPolicy(RETAIN);
   }
 
-  private createTables(): Record<TableName, dynamodb.Table> {
+  private createTables(tableSuffix: string): Record<TableKey, dynamodb.Table> {
     const S = dynamodb.AttributeType.STRING;
-    const defs: Record<TableName, { pk: string; sk?: string }> = {
-      "toytalker-devices": { pk: "device_id" },
-      "toytalker-characters": { pk: "character_id" },
-      "toytalker-voices": { pk: "voice_id" },
-      "toytalker-llms": { pk: "llm_id" },
-      "toytalker-chat-logs": { pk: "owner_id#device_id", sk: "session_id#timestamp" },
-      "toytalker-usage": { pk: "owner_id", sk: "date#device_id#api_type" },
-      "toytalker-api-unit-prices": { pk: "provider#api_type", sk: "version" },
-      "toytalker-exchange-rates": { pk: "month", sk: "currency" },
+    const defs: Record<TableKey, { pk: string; sk?: string }> = {
+      "devices": { pk: "device_id" },
+      "characters": { pk: "character_id" },
+      "voices": { pk: "voice_id" },
+      "llms": { pk: "llm_id" },
+      "chat-logs": { pk: "owner_id#device_id", sk: "session_id#timestamp" },
+      "usage": { pk: "owner_id", sk: "date#device_id#api_type" },
+      "api-unit-prices": { pk: "provider#api_type", sk: "version" },
+      "exchange-rates": { pk: "month", sk: "currency" },
     };
-    const tables = {} as Record<TableName, dynamodb.Table>;
-    for (const [name, def] of Object.entries(defs) as [TableName, { pk: string; sk?: string }][]) {
-      const id = name.replace(/^toytalker-/, "").replace(/(^|-)(\w)/g, (_, __, c: string) => c.toUpperCase()) + "Table";
-      tables[name] = new dynamodb.Table(this, id, {
-        tableName: name,
+    const tables = {} as Record<TableKey, dynamodb.Table>;
+    for (const [key, def] of Object.entries(defs) as [TableKey, { pk: string; sk?: string }][]) {
+      // 部品IDは環境名を含めない（DevicesTable など。スタック名が環境を持つ）
+      const id = key.replace(/(^|-)(\w)/g, (_, __, c: string) => c.toUpperCase()) + "Table";
+      tables[key] = new dynamodb.Table(this, id, {
+        tableName: `toytalker-${key}${tableSuffix}`,
         partitionKey: { name: def.pk, type: S },
         sortKey: def.sk ? { name: def.sk, type: S } : undefined,
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,

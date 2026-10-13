@@ -69,7 +69,7 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 
 ## 命名（決定）
 
-2026-09-16に案を出し、2026-10-12に決定。**規則は [命名規則](naming-conventions.md)**（`toytalker-<機能>-<環境>`、環境は `rnd` / `stg` / `prd` / `prd-dg`、種類の接尾辞なし、タグ `project` / `environment`）。ここには既存RnD資源の新旧対応と、改名の影響・順番だけを置く。`stages.ts` の `prod` / `prod-dg` はSTG着手時に `prd` / `prd-dg` へ直す（アカウント未作成なので資源への影響なし）。
+2026-09-16に案を出し、2026-10-12に決定。**規則は [命名規則](naming-conventions.md)**（`toytalker-<機能>-<環境>`、環境は `rnd` / `stg` / `prd` / `prd-dg`、種類の接尾辞なし、タグ `project` / `environment`）。ここには既存RnD資源の新旧対応と、改名の影響・順番だけを置く。`stages.ts` の `prod` / `prod-dg` は2026-10-13に `prd` / `prd-dg` へ直した（アカウント未作成なので資源への影響なし）。
 
 ### Lambda
 
@@ -122,7 +122,7 @@ CDKで固定名を変えると、その資源は「作り直し（Replace）」�
 
 ### 適用の順番（決定）
 
-1. **Lambdaコードがテーブル名を環境変数から組み立てるように直す**（`TABLE_SUFFIX` を1つ配り、`devices${TABLE_SUFFIX}` のように組む。RnDは空文字）。2026-10-12時点で8本の `index.mjs` に文字列直書きが計36か所。名前はまだ変えない。CDKが環境変数を配るので、名前を知っているのは `stages.ts` だけになる。タグ2つもこのとき足す（RnDの既存資源にも付く。Replaceは起きない）。ここは無リスクで、ロードマップ2（STG）の最初の作業。
+1. **Lambdaコードがテーブル名を環境変数から組み立てるように直す**（`TABLE_SUFFIX` を1つ配り、`devices${TABLE_SUFFIX}` のように組む。RnDは空文字）。2026-10-12時点で8本の `index.mjs` に文字列直書きが計36か所。名前はまだ変えない。CDKが環境変数を配るので、名前を知っているのは `stages.ts` だけになる。タグ2つもこのとき足す（RnDの既存資源にも付く。Replaceは起きない）。ここは無リスクで、ロードマップ2（STG）の最初の作業。**済（2026-10-13）**: `backend/shared/tables.mjs` の `tableName()`、`stages.ts` の `tableSuffix`、タグ2つをRnDへdeployした。`cdk diff` にReplaceなし、テーブル名の読み取り（`/llms` `/voices` `/characters`）とログを確認。
 2. **STGは最初から新しい名前で作る。** まっさらなので追加の手間はない。
 3. **RnDは、CloudFrontの固定ドメイン（進め方8）の後に改名する**（ロードマップ7）。配布済みの実機があるので、Function URLのホスト名が変わっても困らない状態にしてから。接頭辞の統一・環境名の付与・`backend/` ディレクトリ名・`supervisor.py` の関数名一覧を1回で済ませる。
 

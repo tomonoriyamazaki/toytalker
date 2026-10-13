@@ -7,7 +7,8 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { resolveStage } from "./_common.js";
 
-export const MASTER_TABLES = ["toytalker-characters", "toytalker-voices", "toytalker-llms", "toytalker-api-unit-prices"] as const;
+// 機能名。実名は `toytalker-<機能名><tableSuffix>`（lib/toytalker-stack.ts と同じ）。JSONのファイル名は環境によらず `toytalker-<機能名>.json`
+export const MASTER_TABLES = ["characters", "voices", "llms", "api-unit-prices"] as const;
 
 const { config } = await resolveStage(process.argv.slice(2));
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({ region: config.region }));
@@ -15,7 +16,8 @@ const here = path.dirname(new URL(import.meta.url).pathname);
 const outDir = path.join(here, "..", "master-data", config.stage);
 fs.mkdirSync(outDir, { recursive: true });
 
-for (const table of MASTER_TABLES) {
+for (const key of MASTER_TABLES) {
+  const table = `toytalker-${key}${config.tableSuffix}`;
   const items: Record<string, unknown>[] = [];
   let ExclusiveStartKey: Record<string, unknown> | undefined;
   do {
@@ -23,7 +25,7 @@ for (const table of MASTER_TABLES) {
     items.push(...(res.Items ?? []));
     ExclusiveStartKey = res.LastEvaluatedKey;
   } while (ExclusiveStartKey);
-  const file = path.join(outDir, `${table}.json`);
+  const file = path.join(outDir, `toytalker-${key}.json`);
   fs.writeFileSync(file, JSON.stringify(items, null, 2) + "\n");
   console.log(`${table}: ${items.length} items → ${path.relative(process.cwd(), file)}`);
 }

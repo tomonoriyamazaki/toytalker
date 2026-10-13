@@ -11,13 +11,14 @@ import { Mp3Encoder } from "@breezystack/lamejs";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
+import { tableName } from "../shared/tables.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
-const VOICES_TABLE         = "toytalker-voices";
-const USAGE_TABLE          = "toytalker-usage";
-const UNIT_PRICES_TABLE    = "toytalker-api-unit-prices";
-const EXCHANGE_RATES_TABLE = "toytalker-exchange-rates";
+const VOICES_TABLE         = tableName("voices");
+const USAGE_TABLE          = tableName("usage");
+const UNIT_PRICES_TABLE    = tableName("api-unit-prices");
+const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
 
 // 鍵はSSMから実行時に取るので、クライアントは最初に使うときに作る（鍵が変わったら作り直す）
 let openaiClient = null;

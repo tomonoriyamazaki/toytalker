@@ -1,7 +1,7 @@
 // 環境ごとの設定。秘密でない値だけを置く（秘密は各アカウントのSSM Parameter Store。lib/secrets.ts）。
 // 選択は `cdk deploy --context stage=<name>`。
 
-export type StageName = "rnd" | "stg" | "prod" | "prod-dg";
+export type StageName = "rnd" | "stg" | "prd" | "prd-dg";
 
 export interface StageConfig {
   readonly stage: StageName;
@@ -16,6 +16,11 @@ export interface StageConfig {
   readonly sonioxModel: string;
   /** Cartesiaの既定ボイスID */
   readonly cartesiaDefaultVoiceId: string;
+  /**
+   * DynamoDBテーブル名の末尾（`toytalker-devices` + suffix）。Lambdaには環境変数 TABLE_SUFFIX で渡し、
+   * コードは `backend/shared/tables.mjs` で組み立てる。RnDは改名（ロードマップ7）まで旧名なので空文字。
+   */
+  readonly tableSuffix: string;
   /** speaker embedding (.pt) のバックアップ先。S3バケット名は全世界で一意なので環境名を付ける */
   readonly speakersBucketName: string;
   /** ESP32ファームのOTA配布先（manifest.json と .bin）。Soniox鍵発行Lambdaが読んで署名付きURLを返す */
@@ -49,6 +54,7 @@ export const stages: Record<StageName, StageConfig> = {
     ...common,
     stage: "rnd",
     account: "342082316736",
+    tableSuffix: "", // 既存テーブル名をそのまま維持。改名時に "-rnd" へ
     speakersBucketName: "toytalker-tts-speakers", // 既存バケット名をそのまま維持
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
     existingRoles: {
@@ -62,22 +68,25 @@ export const stages: Record<StageName, StageConfig> = {
     ...common,
     stage: "stg",
     account: "",
+    tableSuffix: "-stg",
     speakersBucketName: "toytalker-tts-speakers-stg",
     firmwareBucketName: "toytalker-firmware-stg",
   },
-  prod: {
+  prd: {
     ...common,
-    stage: "prod",
+    stage: "prd",
     account: "",
-    speakersBucketName: "toytalker-tts-speakers-prod",
-    firmwareBucketName: "toytalker-firmware-prod",
+    tableSuffix: "-prd",
+    speakersBucketName: "toytalker-tts-speakers-prd",
+    firmwareBucketName: "toytalker-firmware-prd",
   },
-  "prod-dg": {
+  "prd-dg": {
     ...common,
-    stage: "prod-dg",
+    stage: "prd-dg",
     account: "",
-    speakersBucketName: "toytalker-tts-speakers-prod-dg",
-    firmwareBucketName: "toytalker-firmware-prod-dg",
+    tableSuffix: "-prd-dg",
+    speakersBucketName: "toytalker-tts-speakers-prd-dg",
+    firmwareBucketName: "toytalker-firmware-prd-dg",
   },
 };
 

@@ -5,6 +5,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanCommand, DeleteCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
+import { tableName } from "../shared/tables.mjs";
 
 const client = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(client);
@@ -19,14 +20,14 @@ function sortVoices(items) {
 }
 
 // ---- テーブル定義 ----
-const DEVICES_TABLE        = "toytalker-devices";
-const VOICES_TABLE         = "toytalker-voices";
-const CHARACTERS_TABLE     = "toytalker-characters";
-const CHAT_LOGS_TABLE      = "toytalker-chat-logs";
-const LLMS_TABLE           = "toytalker-llms";
-const USAGE_TABLE          = "toytalker-usage";
-const EXCHANGE_RATES_TABLE = "toytalker-exchange-rates";
-const UNIT_PRICES_TABLE    = "toytalker-api-unit-prices";
+const DEVICES_TABLE        = tableName("devices");
+const VOICES_TABLE         = tableName("voices");
+const CHARACTERS_TABLE     = tableName("characters");
+const CHAT_LOGS_TABLE      = tableName("chat-logs");
+const LLMS_TABLE           = tableName("llms");
+const USAGE_TABLE          = tableName("usage");
+const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
+const UNIT_PRICES_TABLE    = tableName("api-unit-prices");
 
 // ---- 単価キャッシュ（コスト計算用） ----
 let cachedPrices = null;

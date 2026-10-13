@@ -6,6 +6,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
+import { tableName } from "../shared/tables.mjs";
 
 // ---- 予備インスタンスの事前ウォームアップ ----
 // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -21,8 +22,8 @@ function prewarmSpareInstance() {
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
-const CHARACTERS_TABLE = "toytalker-characters";
-const VOICES_TABLE     = "toytalker-voices";
+const CHARACTERS_TABLE = tableName("characters");
+const VOICES_TABLE     = tableName("voices");
 
 // ---- TTS設定 ----
 const TTS_TABLE = {
