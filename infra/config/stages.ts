@@ -26,6 +26,11 @@ export interface StageConfig {
   /** ESP32ファームのOTA配布先（manifest.json と .bin）。Soniox鍵発行Lambdaが読んで署名付きURLを返す */
   readonly firmwareBucketName: string;
   /**
+   * Organizations の組織ID。管理アカウントの環境（RnD）にだけ置く。これがある環境では
+   * 組織全体で1つの資源（CloudTrail 組織トレイル）を持つスタック `toytalker-org` も合成する。
+   */
+  readonly organizationId?: string;
+  /**
    * 固定名を改名前の旧名（`toytalk-stream-handler-lambda`、スタック `ToyTalker-rnd` など）にするか。
    * RnDだけ true（改名はロードマップ7。部品IDも旧のまま）。false なら docs/naming-conventions.md の
    * `toytalker-<機能>-<環境>` とスタック `toytalker-<環境>`、部品IDは機能名のPascalCase。
@@ -64,6 +69,7 @@ export const stages: Record<StageName, StageConfig> = {
     tableSuffix: "", // 既存テーブル名をそのまま維持。改名時に "-rnd" へ
     speakersBucketName: "toytalker-tts-speakers", // 既存バケット名をそのまま維持
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
+    organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
       lambdaRoleArn: "arn:aws:iam::342082316736:role/toytalk-lambda-role-dev",
       opsLambdaRoleArn: "arn:aws:iam::342082316736:role/toytalker-ops-monthly-role",

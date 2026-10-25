@@ -499,6 +499,8 @@ export class ToyTalkerStack extends cdk.Stack {
         sortKey: def.sk ? { name: def.sk, type: S } : undefined,
         billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
         deletionProtection: true,
+        // 誤った書き換え・削除・投入ミスから35日以内の任意の時点へ戻せるようにする（2026-10-25）
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
     }

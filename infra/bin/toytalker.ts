@@ -3,6 +3,7 @@ import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { getStage, stackName } from "../config/stages.js";
 import { assertSecretsExist, loadSecrets } from "../lib/secrets.js";
 import { ToyTalkerStack } from "../lib/toytalker-stack.js";
+import { ToyTalkerOrgStack } from "../lib/toytalker-org-stack.js";
 
 const app = new cdk.App();
 const config = getStage(app.node.tryGetContext("stage"));
@@ -31,3 +32,13 @@ new ToyTalkerStack(app, stackName(config), {
   terminationProtection: true,
   description: `ToyTalker ${config.stage}: Lambda, DynamoDB, S3, SNS, warmer, monthly ops`,
 });
+
+// 組織全体で1つの資源（CloudTrail 組織トレイル）は管理アカウントの環境にだけ出す
+if (config.organizationId) {
+  new ToyTalkerOrgStack(app, "toytalker-org", {
+    env: { account: config.account, region: config.region },
+    organizationId: config.organizationId,
+    terminationProtection: true,
+    description: "ToyTalker org-wide: CloudTrail organization trail",
+  });
+}
