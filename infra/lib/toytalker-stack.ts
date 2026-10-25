@@ -83,8 +83,11 @@ type TableKey =
   | "exchange-rates";
 
 interface FunctionSpec {
-  readonly id: string;
-  readonly name: string;
+  /** 機能名（docs/naming-conventions.md）。新名は `toytalker-<key>-<環境>`、部品IDは PascalCase（chat-app → ChatApp） */
+  readonly key: string;
+  /** 改名前のRnDで使う部品IDと固定名（config.legacyNames のとき）。変えると作り直しになる */
+  readonly legacy: { readonly id: string; readonly name: string };
+  /** backend/ のディレクトリ名（RnDの改名と同時に機能名へ直す） */
   readonly dir: string;
   readonly memorySize: number;
   readonly timeoutSeconds: number;
@@ -130,10 +133,20 @@ const TTS_SECRETS = [
   "ZAKICORP_EDGE_KEY",
 ] as const;
 
+/** 環境ごとの部品IDと固定名（docs/naming-conventions.md）。RnDは改名まで旧名 */
+function resolveNames(spec: FunctionSpec, config: StageConfig): { id: string; name: string } {
+  if (config.legacyNames) return spec.legacy;
+  const id = spec.key.replace(/(^|-)(\w)/g, (_, __, c: string) => c.toUpperCase());
+  return { id, name: `toytalker-${spec.key}-${config.stage}` };
+}
+
+/** 月次レポートが「単価行なし」の警告を拾う記録側Lambda */
+const RECORDING_FUNCTION_KEYS = ["chat-app", "chat-mcu", "read-aloud-app"] as const;
+
 const FUNCTIONS: readonly FunctionSpec[] = [
   {
-    id: "Esp32Stream",
-    name: "toytalk-api-stream-for-esp32-lambda",
+    key: "chat-mcu",
+    legacy: { id: "Esp32Stream", name: "toytalk-api-stream-for-esp32-lambda" },
     dir: "toytalk-api-stream-for-esp32-lambda",
     memorySize: 2048,
     timeoutSeconds: 120,
@@ -148,8 +161,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     readWriteTables: ["chat-logs", "usage"],
   },
   {
-    id: "StreamHandler",
-    name: "toytalk-stream-handler-lambda",
+    key: "chat-app",
+    legacy: { id: "StreamHandler", name: "toytalk-stream-handler-lambda" },
     dir: "toytalk-stream-handler-lambda",
     memorySize: 2048,
     timeoutSeconds: 120,
@@ -163,8 +176,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     readWriteTables: ["chat-logs", "usage"],
   },
   {
-    id: "BackchannelApp",
-    name: "toytalker-backchannel-for-app-lambda",
+    key: "backchannel-app",
+    legacy: { id: "BackchannelApp", name: "toytalker-backchannel-for-app-lambda" },
     dir: "toytalker-backchannel-for-app-lambda",
     memorySize: 1024,
     timeoutSeconds: 20,
@@ -178,8 +191,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     readWriteTables: [],
   },
   {
-    id: "BackchannelEsp32",
-    name: "toytalker-backchannel-for-esp32-lambda",
+    key: "backchannel-mcu",
+    legacy: { id: "BackchannelEsp32", name: "toytalker-backchannel-for-esp32-lambda" },
     dir: "toytalker-backchannel-for-esp32-lambda",
     memorySize: 1024,
     timeoutSeconds: 20,
@@ -194,8 +207,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     readWriteTables: [],
   },
   {
-    id: "SonioxStt",
-    name: "toytalk-soniox-stt-lambda",
+    key: "stt-token",
+    legacy: { id: "SonioxStt", name: "toytalk-soniox-stt-lambda" },
     dir: "toytalk-soniox-stt-lambda",
     memorySize: 128,
     timeoutSeconds: 5, // OTA判定でS3のmanifestを読むため3→5（2026-09-16）
@@ -209,8 +222,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     readWriteTables: ["devices"], // firmware_version 等を UpdateItem で記録
   },
   {
-    id: "DeviceSetting",
-    name: "toytalker-device-setting-lambda",
+    key: "settings-app",
+    legacy: { id: "DeviceSetting", name: "toytalker-device-setting-lambda" },
     dir: "toytalker-device-setting-lambda",
     memorySize: 256,
     timeoutSeconds: 60,
@@ -227,8 +240,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     ],
   },
   {
-    id: "TtsOnly",
-    name: "toytalker-tts-only-lambda",
+    key: "read-aloud-app",
+    legacy: { id: "TtsOnly", name: "toytalker-tts-only-lambda" },
     dir: "toytalker-tts-only-lambda",
     memorySize: 2048,
     timeoutSeconds: 120,
@@ -250,14 +263,14 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     readWriteTables: ["usage"],
   },
   {
-    id: "OpsMonthly",
-    name: "toytalker-ops-monthly-lambda",
+    key: "ops-monthly",
+    legacy: { id: "OpsMonthly", name: "toytalker-ops-monthly-lambda" },
     dir: "toytalker-ops-monthly-lambda",
     memorySize: 256,
     timeoutSeconds: 300,
     format: "esm",
     description: "Monthly ops report: FX rate, recorded cost vs provider bills, price table checks",
-    env: ["OPS_SNS_TOPIC_ARN"],
+    env: ["OPS_SNS_TOPIC_ARN", "RECORDING_LOG_GROUPS"],
     secrets: ["ELEVENLABS_API_KEY", "OPENAI_ADMIN_KEY", "ANTHROPIC_ADMIN_KEY"],
     warm: false,
     selfWarm: false,
@@ -291,7 +304,14 @@ export class ToyTalkerStack extends cdk.Stack {
     // ---- SNS: 月次運用レポートの宛先 ----
     // スタックを消しても既存資源が消えないよう、データ以外も RETAIN にする（Function URLは消えるとホスト名が変わる）
     const RETAIN = cdk.RemovalPolicy.RETAIN;
-    const opsTopic = new sns.Topic(this, "OpsMonthlyTopic", { topicName: "toytalker-ops-monthly" });
+    // Lambda以外の固定名（旧名は環境名なし）
+    const fixed = config.legacyNames
+      ? { opsTopic: "toytalker-ops-monthly", warmer: "toytalker-lambda-warmer", opsSchedule: "toytalker-ops-monthly" }
+      : { opsTopic: `toytalker-ops-monthly-${config.stage}`, warmer: `toytalker-warmer-${config.stage}`, opsSchedule: `toytalker-ops-monthly-${config.stage}` };
+    const names = new Map(FUNCTIONS.map((spec) => [spec.key, resolveNames(spec, config)] as const));
+    const nameOf = (key: string) => names.get(key)!;
+
+    const opsTopic = new sns.Topic(this, "OpsMonthlyTopic", { topicName: fixed.opsTopic });
     opsTopic.applyRemovalPolicy(RETAIN);
     opsTopic.addSubscription(new subs.EmailSubscription(config.opsEmail));
     for (const sub of opsTopic.node.findAll()) if (sub instanceof sns.CfnSubscription) sub.applyRemovalPolicy(RETAIN);
@@ -316,15 +336,17 @@ export class ToyTalkerStack extends cdk.Stack {
       SONIOX_MODEL: config.sonioxModel,
       FIRMWARE_BUCKET: config.firmwareBucketName,
       OPS_SNS_TOPIC_ARN: opsTopic.topicArn,
+      RECORDING_LOG_GROUPS: JSON.stringify(RECORDING_FUNCTION_KEYS.map((k) => `/aws/lambda/${nameOf(k).name}`)),
     };
 
     const functions = new Map<string, lambda.Function>();
     const logGroups = new Map<string, logs.ILogGroup>();
     for (const spec of FUNCTIONS) {
+      const { id, name } = nameOf(spec.key);
       const environment: Record<string, string> = {};
       for (const key of spec.env) {
         const value = allEnv[key];
-        if (value === undefined) throw new Error(`${spec.name}: 環境変数 ${key} の値がありません`);
+        if (value === undefined) throw new Error(`${name}: 環境変数 ${key} の値がありません`);
         environment[key] = value;
       }
       environment.TABLE_SUFFIX = config.tableSuffix; // backend/shared/tables.mjs がテーブル名を組む
@@ -334,15 +356,15 @@ export class ToyTalkerStack extends cdk.Stack {
         if (value !== undefined) environment[name] = value; // 移行の1段目だけ
       }
 
-      const logGroup = new logs.LogGroup(this, `${spec.id}Logs`, {
-        logGroupName: `/aws/lambda/${spec.name}`,
+      const logGroup = new logs.LogGroup(this, `${id}Logs`, {
+        logGroupName: `/aws/lambda/${name}`,
         retention: logs.RetentionDays.INFINITE,
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
-      logGroups.set(spec.name, logGroup);
+      logGroups.set(spec.key, logGroup);
 
-      const fn = new lambda.Function(this, spec.id, {
-        functionName: spec.name,
+      const fn = new lambda.Function(this, id, {
+        functionName: name,
         description: spec.description,
         code: bundleLambda(path.join(BACKEND_DIR, spec.dir), spec.format, spec.requireShim ?? false),
         handler: "index.handler",
@@ -352,13 +374,13 @@ export class ToyTalkerStack extends cdk.Stack {
         timeout: cdk.Duration.seconds(spec.timeoutSeconds),
         environment,
         logGroup,
-        role: spec.id === "OpsMonthly" ? existingOpsRole : existingLambdaRole,
+        role: spec.key === "ops-monthly" ? existingOpsRole : existingLambdaRole,
       });
       fn.applyRemovalPolicy(RETAIN);
-      functions.set(spec.name, fn);
+      functions.set(spec.key, fn);
 
       if (spec.url) {
-        const url = new lambda.CfnUrl(this, `${spec.id}Url`, {
+        const url = new lambda.CfnUrl(this, `${id}Url`, {
           targetFunctionArn: fn.functionArn,
           authType: "NONE",
           invokeMode: spec.url.invokeMode,
@@ -366,18 +388,18 @@ export class ToyTalkerStack extends cdk.Stack {
         });
         url.applyRemovalPolicy(RETAIN);
         if (!importPhase) {
-          fn.addPermission(`${spec.id}UrlPublicAccess`, {
+          fn.addPermission(`${id}UrlPublicAccess`, {
             principal: new iam.AnyPrincipal(),
             action: "lambda:InvokeFunctionUrl",
             functionUrlAuthType: lambda.FunctionUrlAuthType.NONE,
           });
-          fn.addPermission(`${spec.id}UrlInvokeAction`, {
+          fn.addPermission(`${id}UrlInvokeAction`, {
             principal: new iam.AnyPrincipal(),
             action: "lambda:InvokeFunction",
             invokedViaFunctionUrl: true,
           });
         }
-        new cdk.CfnOutput(this, `${spec.id}FunctionUrl`, { value: url.attrFunctionUrl });
+        new cdk.CfnOutput(this, `${id}FunctionUrl`, { value: url.attrFunctionUrl });
       }
 
       if (!importPhase) {
@@ -394,24 +416,24 @@ export class ToyTalkerStack extends cdk.Stack {
           // 自分自身へのInvoke。関数ARNをトークンで参照すると循環になるので固定名から組み立てる
           fn.addToRolePolicy(new iam.PolicyStatement({
             actions: ["lambda:InvokeFunction"],
-            resources: [this.formatArn({ service: "lambda", resource: "function", resourceName: spec.name, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })],
+            resources: [this.formatArn({ service: "lambda", resource: "function", resourceName: name, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })],
           }));
         }
       }
     }
 
     // ---- デバイス設定Lambda: クローンボイス登録でS3へ保存・削除 ----
-    if (!importPhase) speakersBucket.grantReadWrite(functions.get("toytalker-device-setting-lambda")!);
+    if (!importPhase) speakersBucket.grantReadWrite(functions.get("settings-app")!);
 
     // ---- ESP32ファームのOTA配布バケット（手作業で作成、CDKは参照のみ） ----
     // Soniox鍵発行Lambdaが manifest.json を読み、.bin の署名付きURL（10分）を返す。署名はロールの資格情報なので読み取り権限が要る
     const firmwareBucket = s3.Bucket.fromBucketName(this, "FirmwareBucket", config.firmwareBucketName);
-    if (!importPhase) firmwareBucket.grantRead(functions.get("toytalk-soniox-stt-lambda")!);
+    if (!importPhase) firmwareBucket.grantRead(functions.get("stt-token")!);
 
     // ---- 温めルール（5分ごと、5本へ {"warmup":true}） ----
-    const warmTargets = FUNCTIONS.filter((s) => s.warm).map((s) => functions.get(s.name)!);
+    const warmTargets = FUNCTIONS.filter((s) => s.warm).map((s) => functions.get(s.key)!);
     const warmer = new events.CfnRule(this, "WarmerRule", {
-      name: "toytalker-lambda-warmer",
+      name: fixed.warmer,
       description: "ToyTalker Lambda cold start warmer",
       scheduleExpression: "rate(5 minutes)",
       state: "ENABLED",
@@ -432,20 +454,16 @@ export class ToyTalkerStack extends cdk.Stack {
     }
 
     // ---- 月次運用レポート（毎月1日 09:00 JST） ----
-    const opsFn = functions.get("toytalker-ops-monthly-lambda")!;
+    const opsFn = functions.get("ops-monthly")!;
     if (!importPhase) {
       opsTopic.grantPublish(opsFn);
       opsFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ["logs:FilterLogEvents"],
-        resources: [
-          "toytalk-stream-handler-lambda",
-          "toytalk-api-stream-for-esp32-lambda",
-          "toytalker-tts-only-lambda",
-        ].map((n) => logGroups.get(n)!.logGroupArn),
+        resources: RECORDING_FUNCTION_KEYS.map((k) => logGroups.get(k)!.logGroupArn),
       }));
     }
     const opsSchedule = new scheduler.Schedule(this, "OpsMonthlySchedule", {
-      scheduleName: "toytalker-ops-monthly",
+      scheduleName: fixed.opsSchedule,
       description: "ToyTalker monthly cost report",
       schedule: scheduler.ScheduleExpression.cron({
         minute: "0", hour: "9", day: "1", month: "*", year: "*",

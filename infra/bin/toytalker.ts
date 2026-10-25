@@ -1,6 +1,6 @@
 import * as cdk from "aws-cdk-lib";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { getStage } from "../config/stages.js";
+import { getStage, stackName } from "../config/stages.js";
 import { assertSecretsExist, loadSecrets } from "../lib/secrets.js";
 import { ToyTalkerStack } from "../lib/toytalker-stack.js";
 
@@ -23,7 +23,7 @@ const keepEnvSecrets = String(app.node.tryGetContext("keepEnvSecrets")) === "tru
 const envSecrets = keepEnvSecrets ? await loadSecrets(config.region) : undefined;
 if (!keepEnvSecrets) await assertSecretsExist(config.region);
 
-new ToyTalkerStack(app, `ToyTalker-${config.stage}`, {
+new ToyTalkerStack(app, stackName(config), {
   env: { account: config.account, region: config.region },
   config,
   envSecrets,

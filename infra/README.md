@@ -1,6 +1,6 @@
 # ToyTalker infra（AWS CDK / TypeScript）
 
-ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル・S3・SNS・温めルール・月次Scheduler）を1スタック `ToyTalker-<stage>` で管理する。決定事項と進め方は [docs/multi-account-iac-plan.md](../docs/multi-account-iac-plan.md)。
+ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル・S3・SNS・温めルール・月次Scheduler）を1スタック `toytalker-<stage>`（RnDは改名まで旧名 `ToyTalker-rnd`。`config/stages.ts` の `legacyNames` と `stackName()`）で管理する。決定事項と進め方は [docs/multi-account-iac-plan.md](../docs/multi-account-iac-plan.md)。
 
 ## 構成
 
@@ -40,6 +40,18 @@ npx cdk deploy --context stage=rnd
 - 鍵を入れ替えるときはSSMを変えるだけ。稼働中のLambdaは5分を過ぎた次の呼び出しで取り直す（deploy不要）
 - Lambdaに鍵を新しく使わせるとき: `lib/secrets.ts` に名前を足し、その関数の `secrets` に加え、コードでは `secret("名前")` で読む
 - 環境変数方式の環境を移すときだけ2段階でdeployする（コードと設定の更新が別々に行われ、その間に鍵が読めなくなるのを避ける）: `npx cdk deploy --context stage=<stage> --context keepEnvSecrets=true` → ログの `[secrets] loaded n/n from SSM` と動作を確認 → フラグ無しで `npx cdk deploy`。新しく作る環境は最初からフラグ無し
+
+## 新しい環境の立ち上げ（STGで2026-10-15に実施）
+
+1. 管理アカウントで `aws organizations create-account --account-name toytalker-<環境> --email exodjp+toytalker-<環境>@gmail.com`。ルート資格情報なしで作られる（ルートアクセスの集中管理が有効）。IDを `config/stages.ts` の `account` に書く
+2. Identity Center でグループ `admins` に `AdministratorAccess` を割り当てる（`aws sso-admin create-account-assignment`）
+3. **bootstrapは cdk.json の無いディレクトリから実行する。** `infra/` で実行するとアプリを読み込み、SSMに鍵が無いので止まる。資格情報は管理アカウントから `aws sts assume-role --role-arn arn:aws:iam::<id>:role/OrganizationAccountAccessRole ...` で取るか、SSOプロファイルを使う
+   ```bash
+   cd "$TMPDIR" && /path/to/toytalker/infra/node_modules/.bin/cdk bootstrap aws://<id>/ap-northeast-1
+   ```
+4. SSMへ鍵11件を投入（`npx tsx scripts/put-secret.ts`、値はユーザー）
+5. `npx cdk diff --context stage=<環境>` → `npx cdk deploy --context stage=<環境>`
+6. マスターデータ: `npx tsx scripts/export-master-data.ts rnd` → `npx tsx scripts/import-master-data.ts <環境> --from=rnd --yes`
 
 ## RnDの既存資源をimportで引き取る手順
 

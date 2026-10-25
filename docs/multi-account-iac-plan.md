@@ -18,6 +18,25 @@
 | Lambda起動の高速化 | 今はやらない | 温め設計が効いている（下記） |
 | Terraform | 見送り | AWS単独ならCDKの方が学ぶことが少ない。Cloudflare側（DNS・WAF・Tunnel）もコード化したくなったら再検討 |
 
+## アカウント一覧（2026-10-14）
+
+組織 `o-lbme8l7xtz`（管理アカウント = RnD。組織上の名前は `management`、2026-10-15に `toytalker-rnd` から変更）。名前の規則は [命名規則](naming-conventions.md) の「AWSアカウント」節。2026-10-14に名前3件と子2つの主メールを変更し、STGを作成済み（下表は実測値）。`create-account` で作ったアカウントには、管理アカウントから `sts assume-role` で入れる `OrganizationAccountAccessRole`（AdministratorAccess）が自動で付く。ルートのパスワードは未設定（必要なら「パスワードを忘れた」で主メール宛てに再設定）。
+
+| 用途 | 組織上の名前 | アカウントID | 主メール | CLIプロファイル | 状態 |
+|---|---|---|---|---|---|
+| 管理アカウント（ToyTalkerのRnDが同居） | `management` | 342082316736 | `exodjp@gmail.com`（変えない） | `management`（当面は `default`、IAMユーザー `zackey` のアクセスキー） | 稼働中。他プロジェクトの資源・公開S3もある。ToyTalker分は CloudFormation `ToyTalker-rnd`、`stages.ts` の `rnd` |
+| STG | `toytalker-stg` | 131746731200 | `exodjp+toytalker-stg@gmail.com` | `toytalker-stg` | 2026-10-14作成（`create-account`、8秒で完了）。2026-10-15 `cdk bootstrap` 済み（`CDKToolkit`）。SSM投入・deployは未 |
+| 自分用本番 | `toytalker-prd` | 未作成 | `exodjp+toytalker-prd@gmail.com` | `toytalker-prd` | ロードマップ7 |
+| DG向け本番 | `toytalker-prd-dg` | 未作成 | `exodjp+toytalker-prd-dg@gmail.com` | `toytalker-prd-dg` | ロードマップ7 |
+| 検証用（2019年参加の旧子アカウント） | `sandbox-1` | 586464890779 | `exodjp+sandbox-1@gmail.com`（旧 `exodjp@nifty.com`、解約済み） | `sandbox-1` | 中身未確認。費用$0。ToyTalkerには使わない |
+| 検証用（同上） | `sandbox-2` | 499135248182 | `exodjp+sandbox-2@gmail.com`（旧 `exodjp@yahoo.co.jp`） | `sandbox-2` | 同上 |
+
+- 請求は一括請求で管理アカウントに集まる。子アカウントに支払い方法は要らない（組織から出すときだけ必要）。管理アカウントのルートにはMFAあり（2026-10-15確認）。
+- 子アカウントのルート資格情報は無い（2026-10-15、ルートアクセスの集中管理を有効化して削除。詳細は [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) の「組織とアカウント」）。子にはIdentity Centerか、管理アカウントからの `OrganizationAccountAccessRole` で入る。
+- 管理アカウントの主メールは Account Management API では変えられない（ルートでBillingコンソールから変える）。gmailのままで困らないので変えない。
+- 名前変更は `aws account put-account-name`（管理アカウントから子を指定できる。信頼されたアクセス `account.amazonaws.com` が必要で、2026-10-14に有効化済み）。主メール変更は `start-primary-email-update` → 新アドレスに届く6桁コードで `accept-primary-email-update`。どちらも請求・資源・Identity Centerの割り当てには影響しない。名前は何度でも付け替えられるので、用途が変わったら改名する。
+- Identity Centerの入口は `https://d-95671d6109.awsapps.com/start`（ユーザー `yamazaki`、グループ `admins`、権限セット `AdministratorAccess`。規則は [命名規則](naming-conventions.md) の「IAM Identity Center」）。CLIは `aws configure sso` でプロファイルを作り、`cdk deploy --profile <プロファイル名> --context stage=<環境>` で使う（SSOプロファイルへの移行は未実施。今は `default` のアクセスキー）。
+
 ## 現状の棚卸し（2026-09-15、RnDアカウント）
 
 CDKで再現する対象。
@@ -115,7 +134,7 @@ CDKで固定名を変えると、その資源は「作り直し（Replace）」�
 | 資源 | 影響 |
 |---|---|
 | IAMロール | CDKが名前を付けるので変える場面がない。作り直しても実害なし |
-| Lambda関数名 | **Function URLのホスト名が変わる。** アプリとESP32の接続先を配り直す必要がある。ロググループ名、`supervisor.py` の関数名一覧、月次レポートのログ検索対象（`toytalker-ops-monthly-lambda/index.mjs` 冒頭の `/aws/lambda/…` 一覧）も追従 |
+| Lambda関数名 | **Function URLのホスト名が変わる。** アプリとESP32の接続先を配り直す必要がある。ロググループ名と `supervisor.py` の関数名一覧も追従。月次レポートのログ検索対象はCDKが環境変数 `RECORDING_LOG_GROUPS` で渡すので追従不要（2026-10-16） |
 | DynamoDBテーブル名 | 新テーブルは空。マスター4テーブルは `export/import-master-data.ts` で移せる。会話ログ・利用量は件数が多い |
 | S3バケット名 | `aws s3 sync` で写すだけ（34オブジェクト） |
 | SNS・温めルール・Scheduler | 影響なし。メール購読は再確認メールが届く |
@@ -123,7 +142,7 @@ CDKで固定名を変えると、その資源は「作り直し（Replace）」�
 ### 適用の順番（決定）
 
 1. **Lambdaコードがテーブル名を環境変数から組み立てるように直す**（`TABLE_SUFFIX` を1つ配り、`devices${TABLE_SUFFIX}` のように組む。RnDは空文字）。2026-10-12時点で8本の `index.mjs` に文字列直書きが計36か所。名前はまだ変えない。CDKが環境変数を配るので、名前を知っているのは `stages.ts` だけになる。タグ2つもこのとき足す（RnDの既存資源にも付く。Replaceは起きない）。ここは無リスクで、ロードマップ2（STG）の最初の作業。**済（2026-10-13）**: `backend/shared/tables.mjs` の `tableName()`、`stages.ts` の `tableSuffix`、タグ2つをRnDへdeployした。`cdk diff` にReplaceなし、テーブル名の読み取り（`/llms` `/voices` `/characters`）とログを確認。
-2. **STGは最初から新しい名前で作る。** まっさらなので追加の手間はない。
+2. **STGは最初から新しい名前で作る。** まっさらなので追加の手間はない。**済（2026-10-16）**: `stages.ts` の `legacyNames`（RnDだけ true）で部品ID・固定名・スタック名を切り替える実装を入れ、STGの合成結果が上の表どおり（`toytalker-chat-app-stg`、スタック `toytalker-stg`、`toytalker-warmer-stg` 等）であることを確認。月次レポートのログ検索対象は環境変数 `RECORDING_LOG_GROUPS` でCDKが渡す（無ければ旧名）。RnDの差分は月次Lambdaの環境変数追加だけでReplaceなし。
 3. **RnDは、CloudFrontの固定ドメイン（進め方8）の後に改名する**（ロードマップ7）。配布済みの実機があるので、Function URLのホスト名が変わっても困らない状態にしてから。接頭辞の統一・環境名の付与・`backend/` ディレクトリ名・`supervisor.py` の関数名一覧を1回で済ませる。
 
 ## CDK化のついでに入れるもの

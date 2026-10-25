@@ -13,13 +13,13 @@
 | 順 | 項目 | Claudeだけで | ユーザーが要る | 状態 | 詳細 |
 |---|---|---|---|---|---|
 | 1 | 命名の決定 | 案を出す | 最終OK | 済（2026-10-12、下記） | [命名規則](naming-conventions.md)、新旧対応は [複数アカウント計画](multi-account-iac-plan.md) の「命名」 |
-| 2 | テーブル名の環境変数化とタグ（RnDへdeploy） → STGアカウント作成 → `cdk bootstrap` → SSM投入 → `cdk deploy` → マスターデータ投入 | 環境変数化・タグ・bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 環境変数化とタグは済（2026-10-13、RnDへdeploy済み）。組織・Identity Centerは既存を使うと決定（同日）。次は子アカウントのメール変更とSTG作成（Claude、OKを得て実行） | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md)、[infra/README](../infra/README.md) |
+| 2 | テーブル名の環境変数化とタグ（RnDへdeploy） → STGアカウント作成 → `cdk bootstrap` → SSM投入 → `cdk deploy` → マスターデータ投入 | 環境変数化・タグ・bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 環境変数化とタグは済（2026-10-13、RnDへdeploy済み）。組織・Identity Centerは既存を使うと決定（同日）。組織上の名前と子アカウントのメールを整理し、STG（131746731200）を作成（2026-10-14）。Identity Center整理・ルート集中管理・STGの `cdk bootstrap` も済（2026-10-15）。STGを新名で合成する仕組み（`legacyNames`）とSSMへの鍵11件投入も済（2026-10-16）。残りは `cdk deploy --context stage=stg` → マスターデータ投入の2手 | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md)、[infra/README](../infra/README.md) |
 | 3 | CloudFront固定ドメイン（`api-stg.zakicorp.com` 等）とアプリ・ESP32の接続先切替 | CDK・アプリ・ファーム | Cloudflare DNS追加、実機確認 | 未着手 | [複数アカウント計画](multi-account-iac-plan.md) |
 | 4 | 認証（Cognito + Google / Sign in with Apple）→ 前払いポイント制 | CDK・Lambda・アプリ | Google Cloud / Apple Developer側の設定、実機確認 | 設計メモあり、未着手 | [先送り項目](deferred-items.md) の「ユーザー認証」、[原価と課金](pricing-and-cost-model.md) 第11節 |
 | 5 | Cartesia 429時のずんだもんフォールバック、ZakiCorp TTS待ち行列の可視化 | 全部 | 実機確認 | 仕様あり、未着手 | [TTSフォールバック](tts-fallback-and-notifications.md)、[先送り項目](deferred-items.md) の「待ち行列の可視化」 |
 | 6 | ESP32: 検索後の誤停止対策、OTA検証3件（電源断・SHA改ざん・ロールバック）、`stable` 発行、配布機のUSB書き込み、アプリの版表示と `fw_channel` 切替 | コード | 実機・S3操作・USB書き込み | 誤停止は原因仮説のみ・対策未合意 | [OTA引き継ぎ](handoff-esp32-ota-2026-09-16.md) |
 | 7 | RnDの改名 → 自分用本番（CMK込み）→ DG向け本番 → GitHub Actions + OIDC | 大半 | アカウント作成×2、実機確認 | 未着手。3の後 | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) |
-| 8 | 小物: v1残骸の削除（旧ロール・旧Lambda 2本・API Gateway・孤立ロググループ）、`toytalker-firmware` のCDK取り込み、Soniox Lambda 128→256MB、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手 | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) の「判断待ち」 |
+| 8 | 小物: v1残骸の削除（旧ロール・旧Lambda 2本・API Gateway・孤立ロググループ）、`toytalker-firmware` の扱い（ファームは環境に属さず全機共通なので、環境ごとのスタックへ取り込むのは合わない。どのアカウントに置き、どう管理するかを別途決める。2026-10-25）、Soniox Lambda 128→256MB、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手 | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) の「判断待ち」 |
 
 並べた理由: 1は2以降の名前の前提。4〜6は2〜3と独立なので、ユーザーの手待ちの間にClaudeが進められる。7は本番なので最後。
 

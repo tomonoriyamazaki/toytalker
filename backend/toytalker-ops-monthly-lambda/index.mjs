@@ -23,12 +23,15 @@ const UNIT_PRICES_TABLE    = tableName("api-unit-prices");
 const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
 const FX_FALLBACK_RATE     = 150;  // 本文Lambdaが為替行を見つけられないときに使う既定値（点検表示用）
 
-// 記録側Lambdaのロググループ。単価行が無くて記録されなかった警告をここから拾う
-const RECORDING_LOG_GROUPS = [
-  "/aws/lambda/toytalk-stream-handler-lambda",
-  "/aws/lambda/toytalk-api-stream-for-esp32-lambda",
-  "/aws/lambda/toytalker-tts-only-lambda",
-];
+// 記録側Lambdaのロググループ。単価行が無くて記録されなかった警告をここから拾う。
+// 名前は環境で変わるのでCDKが環境変数 RECORDING_LOG_GROUPS（JSON配列）で渡す。無ければRnDの旧名
+const RECORDING_LOG_GROUPS = process.env.RECORDING_LOG_GROUPS
+  ? JSON.parse(process.env.RECORDING_LOG_GROUPS)
+  : [
+    "/aws/lambda/toytalk-stream-handler-lambda",
+    "/aws/lambda/toytalk-api-stream-for-esp32-lambda",
+    "/aws/lambda/toytalker-tts-only-lambda",
+  ];
 
 // 請求額をAPIで取れない社は、確認先のURLだけ案内する
 const MANUAL_CHECK_URLS = {

@@ -11,6 +11,7 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 - 種類の接尾辞（`-lambda` `-table` `-bucket`）は付けない。ARN・ロググループ・コンソールが種類を示す。
 - Lambdaのうち、同じ機能でスマホ向け・ESP32向けの2本があるものは `-app` / `-mcu` を機能名の末尾に付ける（`mcu` は `devices/mcu/` に合わせた名前で、基板が変わっても持つ）。両方から使うものには付けない。
 - 固定名を使う（CDKの生成名にしない）。コンソールやログで名前を読む運用のため。ただしコードには名前を書かず、CDKが環境変数で渡す。
+- 実装は `infra/lib/toytalker-stack.ts` の `resolveNames()`（Lambda）と `fixed`（SNS・温めルール・Scheduler）。各Lambdaは機能名 `key` と旧名 `legacy` を持ち、`stages.ts` の `legacyNames`（RnDだけ true）で切り替える。スタック名は `stages.ts` の `stackName()`。STGは2026-10-16にこの規則で合成を確認した
 
 | 種類 | 例 |
 |---|---|
@@ -35,6 +36,29 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 ### SSM Parameter Store
 
 **`/toytalker/<用途>-<種類>`**。小文字とハイフン。環境名は付けない（アカウントごとに同じ名前で中身だけ違う）。例: `/toytalker/openai-api-key`、`/toytalker/zakicorp-edge-key`、`/toytalker/openai-admin-key`。正本は `infra/lib/secrets.ts`。
+
+### AWSアカウント
+
+組織上の名前・主メール・CLIプロファイル名を同じ語で揃える。一覧は [複数アカウント計画](multi-account-iac-plan.md) の「アカウント一覧」。
+
+| 項目 | 規則 | 例 |
+|---|---|---|
+| 組織上の名前 | ToyTalkerの環境は `toytalker-<環境>`。環境は資源名と同じ `stg` / `prd` / `prd-dg`。ToyTalker以外の検証用は `sandbox-<番号>`。管理アカウントは `management`（他プロジェクトの資源も持ち、ToyTalkerのRnDはここに同居する。RnDであることは `stages.ts` の `rnd` とタグが示す） | `toytalker-stg`、`sandbox-1`、`management` |
+| 主メール | `exodjp+<組織上の名前>@gmail.com`（gmailのプラスアドレス。受信箱は1つで、アカウントごとに別アドレスという要件を満たす）。管理アカウント（RnD）だけは既存の `exodjp@gmail.com` のまま | `exodjp+toytalker-stg@gmail.com` |
+| CLIプロファイル名 | 組織上の名前と同じ。Identity Center（SSO）のプロファイルで、アクセスキーは作らない。管理アカウントは当面 `default`（IAMユーザーのアクセスキー）も残る | `--profile toytalker-stg` |
+| `stages.ts` の環境名 | `<環境>` の部分と同じ（`rnd` / `stg` / `prd` / `prd-dg`） | `--context stage=stg` |
+
+人の名前（`Tomonori Yamazaki`）は組織上のアカウント名に使わない。3アカウントが同名で区別できなかったため（2026-10-13）。
+
+### IAM Identity Center
+
+| 項目 | 規則 | 例 |
+|---|---|---|
+| ユーザー名 | 姓のローマ字小文字。作成後は変えられないので、接尾辞（`-sso` など）を付けない。表示名はフルネーム、メールは本人の受信できるアドレス | `yamazaki` |
+| グループ | 役割の複数形、小文字（グループは人の集まりなので複数形。AWSの例も `Administrators`） | `admins` |
+| 権限セット | AWS管理ポリシー1つを包むならそのポリシー名。独自に作るなら kebab-case の役割名。中身の無い権限セットは残さない | `AdministratorAccess`、`ReadOnlyAccess` |
+
+2026-10-15時点の実体: ユーザー `yamazaki`（gmail）1人、グループ `admins`（`yamazaki` が所属）、権限セット `AdministratorAccess`（セッション8時間）が4アカウント全部へ `admins` に割り当て済み。
 
 ### 固定ドメイン（未定）
 

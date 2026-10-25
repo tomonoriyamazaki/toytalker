@@ -6,10 +6,11 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { SNSClient, ListSubscriptionsByTopicCommand } from "@aws-sdk/client-sns";
 import { resolveStage } from "./_common.js";
+import { stackName } from "../config/stages.js";
 
 const { config } = await resolveStage(process.argv.slice(2));
 const here = path.dirname(new URL(import.meta.url).pathname);
-const templatePath = path.join(here, "..", "cdk.out", `ToyTalker-${config.stage}.template.json`);
+const templatePath = path.join(here, "..", "cdk.out", `${stackName(config)}.template.json`);
 const template = JSON.parse(fs.readFileSync(templatePath, "utf8"));
 const { account, region } = config;
 

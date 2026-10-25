@@ -25,6 +25,12 @@ export interface StageConfig {
   readonly speakersBucketName: string;
   /** ESP32ファームのOTA配布先（manifest.json と .bin）。Soniox鍵発行Lambdaが読んで署名付きURLを返す */
   readonly firmwareBucketName: string;
+  /**
+   * 固定名を改名前の旧名（`toytalk-stream-handler-lambda`、スタック `ToyTalker-rnd` など）にするか。
+   * RnDだけ true（改名はロードマップ7。部品IDも旧のまま）。false なら docs/naming-conventions.md の
+   * `toytalker-<機能>-<環境>` とスタック `toytalker-<環境>`、部品IDは機能名のPascalCase。
+   */
+  readonly legacyNames: boolean;
   /** Lambdaのアーキテクチャ。arm64は料金2割減。切替は実機確認とセット */
   readonly architecture: "x86_64" | "arm64";
   /**
@@ -54,6 +60,7 @@ export const stages: Record<StageName, StageConfig> = {
     ...common,
     stage: "rnd",
     account: "342082316736",
+    legacyNames: true, // 改名（ロードマップ7）まで旧名。tableSuffix も同時に "-rnd" へ
     tableSuffix: "", // 既存テーブル名をそのまま維持。改名時に "-rnd" へ
     speakersBucketName: "toytalker-tts-speakers", // 既存バケット名をそのまま維持
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
@@ -67,7 +74,8 @@ export const stages: Record<StageName, StageConfig> = {
   stg: {
     ...common,
     stage: "stg",
-    account: "",
+    account: "131746731200", // 2026-10-14 create-account で作成
+    legacyNames: false,
     tableSuffix: "-stg",
     speakersBucketName: "toytalker-tts-speakers-stg",
     firmwareBucketName: "toytalker-firmware-stg",
@@ -76,6 +84,7 @@ export const stages: Record<StageName, StageConfig> = {
     ...common,
     stage: "prd",
     account: "",
+    legacyNames: false,
     tableSuffix: "-prd",
     speakersBucketName: "toytalker-tts-speakers-prd",
     firmwareBucketName: "toytalker-firmware-prd",
@@ -84,11 +93,17 @@ export const stages: Record<StageName, StageConfig> = {
     ...common,
     stage: "prd-dg",
     account: "",
+    legacyNames: false,
     tableSuffix: "-prd-dg",
     speakersBucketName: "toytalker-tts-speakers-prd-dg",
     firmwareBucketName: "toytalker-firmware-prd-dg",
   },
 };
+
+/** CloudFormationスタック名。旧名は `ToyTalker-rnd`、新名は小文字で `toytalker-<環境>` */
+export function stackName(config: StageConfig): string {
+  return config.legacyNames ? `ToyTalker-${config.stage}` : `toytalker-${config.stage}`;
+}
 
 export function getStage(name: unknown): StageConfig {
   if (typeof name !== "string" || !(name in stages)) {
