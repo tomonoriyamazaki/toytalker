@@ -8,6 +8,7 @@
 - **Lambdaの反映は `cd infra && npx cdk diff --context stage=rnd` → `npx cdk deploy --context stage=rnd`。** `deploy.sh` / `setup.sh` は削除済み。
 - APIキー11件の正本は **SSM Parameter Store `/toytalker/<key>`**（AWS管理キーで暗号化、無料）。**Lambdaが実行時に読んでメモリに保持する**（`backend/shared/secrets.mjs`。2026-10-06に2段階deployで切替、環境変数から鍵を外した。アプリ・ESP32で実機確認済み）。環境変数にはどの鍵を読むかの名前 `SECRET_PARAMS` だけがある。鍵を替えるときはSSMを変えるだけ（5分以内に反映）。手順は infra/README の「秘密」節。
 - IAMロールはCDKが関数ごとに作った最小権限のもの（`ToyTalker-rnd-<部品ID>ServiceRole…`）。旧ロールと旧Permissionは削除済み。**`toytalk-lambda-role-dev` だけはv1の旧Lambda 2本が使っているので残している。**
+- **CLIはIdentity Center（SSO）で動かす**（2026-10-25）。IAMユーザーは `zackey`（鍵なし、緊急用コンソール）だけ。長期アクセスキーは無い。CDKの `cdk diff`/`deploy` は `aws sso login` 後にそのまま動く。[セキュリティ見直し](security-review-2026-10-25.md)
 - 動作確認済み: アプリ（会話・読み上げ・設定保存・クローンボイス登録）、ESP32（会話・OTA 0.7.1→0.7.2）。いずれも新ロールで成功。
 - Lambda 8本のバンドルは、CDK化前に本番に入っていたコードとバイト単位で一致することを確認した上で引き取った。
 - Node 22だった3本はNode 24に統一。ESP32用メインのメモリは2024→2048MB（元の値はタイプミス）。

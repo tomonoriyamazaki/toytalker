@@ -30,10 +30,10 @@
 
 | 時期 | 対策 | 性質 | 状態 |
 |---|---|---|---|
-| 今すぐ | 全テーブルにPITR（CDK） | 根治 | コード済、RnDへdeploy待ち |
-| 今すぐ | Lambda 3本の依存更新（`npm audit fix`、package.jsonの範囲内） | 根治 | コード済、RnDへdeploy待ち |
-| 今すぐ | CloudTrail組織トレイル（スタック `toytalker-org`、バケット `toytalker-cloudtrail-org`、管理アカウントに1本） | 根治 | コード済。先に信頼されたアクセス `cloudtrail.amazonaws.com` の有効化が要る |
-| 今すぐ | CLIをSSOへ移し、長期鍵3本とIAMユーザー `codecommit` `yamazaki-3tyd` を削除。`codecommit` リポジトリは中身確認後に削除 | 根治 | 未。手順は下記 |
+| 今すぐ | 全テーブルにPITR（CDK） | 根治 | 済（2026-10-25、8テーブルENABLED） |
+| 今すぐ | Lambda 3本の依存更新（`npm audit fix`、package.jsonの範囲内） | 根治 | 済（2026-10-25、RnDへdeploy。温め・会話で正常） |
+| 今すぐ | CloudTrail組織トレイル（スタック `toytalker-org`、バケット `toytalker-cloudtrail-org`、管理アカウントに1本） | 根治 | 済（2026-10-25。信頼されたアクセス有効化→deploy、Logging: true） |
+| 今すぐ | CLIをSSOへ移し、長期鍵3本とIAMユーザー `codecommit` `yamazaki-3tyd` を削除。`codecommit` リポジトリは中身確認後に削除 | 根治 | 済（2026-10-25）。残るIAMユーザーは `zackey` のみ（鍵なし、パスワード+パスキー2本、**緊急用のコンソール入口として残す**） |
 | 認証と一体（4） | Lambdaがトークンの本人を使う。デバイス・キャラ・ボイス・ログの所有者確認。再登録での `owner_id` 上書き禁止 | 根治 | 未。設計は [先送り項目](deferred-items.md) の「ユーザー認証」 |
 | 固定ドメインと一体（3） | CloudFront + WAFでレート制限・地域制限 | 根治 | 未。ゲスト会話を残す限り認証では防げない |
 | 認証後 | デバイス登録をログイン必須に | 根治 | 未 |
@@ -41,12 +41,19 @@
 
 「再登録で `owner_id` を上書き」は、端末のリセットや機種変更での正当な再ペアリングも同じ経路なので、本人確認の無い今は塞げない。認証で本人が分かってから直す。
 
-## SSOへの切替と鍵の削除（手順）
+## SSOへの切替と鍵の削除（2026-10-25に実施済み。再現用の手順）
 
 1. Identity Centerのユーザー `yamazaki` のパスワードを設定する（入口 `https://d-95671d6109.awsapps.com/start` の「パスワードを忘れた」→ gmail → MFA登録）。
 2. `aws configure sso` でプロファイルを作る（入口URL、`ap-northeast-1`、アカウント 342082316736、権限セット `AdministratorAccess`）。`aws sso login --profile <名前>` → `aws sts get-caller-identity --profile <名前>` で確認。
 3. `AWS_PROFILE` を環境変数に置き、`cdk diff --context stage=rnd` が通ることを確認する。
-4. 削除の順: `codecommit` のリポジトリ確認 → ユーザー `codecommit`（鍵・Git資格情報・ユーザー）→ ユーザー `yamazaki-3tyd`（鍵・ユーザー）→ 最後に `zackey` の鍵（ユーザーは残してもよい）。各削除は説明→OK。
+4. 削除の順: `codecommit` のリポジトリ確認 → ユーザー `codecommit`（鍵・Git資格情報・ユーザー）→ ユーザー `yamazaki-3tyd`（鍵・ユーザー）→ 最後に `zackey` の鍵。各削除は説明→OK。
+
+実施結果（2026-10-25）:
+- Identity Center: MFAは「サインインごと」「セキュリティキーと内蔵認証のみ」「未登録なら登録必須」。`yamazaki` にパスキー2本（Windows Hello、iPhone）。アクセスポータルの別名は `zackey.awsapps.com`（`d-95671d6109` と同じ）。
+- CLI: `~/.aws/config` に `[sso-session toytalker]` と `[profile toytalker-rnd]`。`[default]` も同じSSOに向けたので、`AWS_PROFILE` 無しでSSOになる。`~/.aws/credentials` は空。期限（8時間）が切れたら `aws sso login`。
+- 削除済み: ユーザー `codecommit`（鍵・Git資格情報・ポリシー）とリポジトリ `codecommit`（2020年のreadmeのみ）、ユーザー `yamazaki-3tyd`（鍵・パスワード・MFA・ポリシー）、`zackey` のアクセスキー。
+- `zackey` は残す。パスワード+パスキー2本でコンソールのみ。Identity Centerに入れなくなったときの、ルートを使わない予備口。
+- アクセスポータルの Active sessions にCLIのログインは行として出なかった。CLIの痕跡はCloudTrailの `CreateToken` / `GetRoleCredentials`（イベントソース `sso.amazonaws.com`）。
 
 ## 認証フェーズへ渡す所有者確認の一覧
 

@@ -19,7 +19,7 @@
 | 5 | Cartesia 429時のずんだもんフォールバック、ZakiCorp TTS待ち行列の可視化 | 全部 | 実機確認 | 仕様あり、未着手 | [TTSフォールバック](tts-fallback-and-notifications.md)、[先送り項目](deferred-items.md) の「待ち行列の可視化」 |
 | 6 | ESP32: 検索後の誤停止対策、OTA検証3件（電源断・SHA改ざん・ロールバック）、`stable` 発行、配布機のUSB書き込み、アプリの版表示と `fw_channel` 切替 | コード | 実機・S3操作・USB書き込み | 誤停止は原因仮説のみ・対策未合意 | [OTA引き継ぎ](handoff-esp32-ota-2026-09-16.md) |
 | 7 | RnDの改名 → 自分用本番（CMK込み）→ DG向け本番 | 大半 | アカウント作成×2、実機確認 | 未着手。3の後。GitHub Actions + OIDCは外した（[先送り項目](deferred-items.md)、2026-10-25） | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) |
-| 8 | セキュリティ強化: PITR・依存更新・CloudTrail組織トレイル・CLIのSSO化と長期鍵の削除。所有者確認は4、レート制限は3で | コード | SSOのパスワード設定、deployと削除のOK | コードは済（2026-10-25）。deploy・SSO切替・鍵削除が未 | [セキュリティ見直し](security-review-2026-10-25.md) |
+| 8 | セキュリティ強化: PITR・依存更新・CloudTrail組織トレイル・CLIのSSO化と長期鍵の削除。所有者確認は4、レート制限は3で | コード | SSOのパスワード設定、deployと削除のOK | 済（2026-10-25）。残りは4（所有者確認）と3（レート制限）の中で | [セキュリティ見直し](security-review-2026-10-25.md) |
 | 9 | 小物: v1残骸の削除（旧ロール・旧Lambda 2本・API Gateway・孤立ロググループ）、`toytalker-firmware` の扱い（ファームは環境に属さず全機共通なので、環境ごとのスタックへ取り込むのは合わない。どのアカウントに置き、どう管理するかを別途決める。2026-10-25）、Soniox Lambda 128→256MB、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手 | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) の「判断待ち」 |
 
 並べた理由: 1は2以降の名前の前提。8（セキュリティ）は4の前に済ませる。4〜6は2〜3と独立なので、ユーザーの手待ちの間にClaudeが進められる。7は本番なので最後。**3はDG向け展開の構成が決まってから**（下記）なので、当面は4〜6をRnDで進める。
@@ -38,6 +38,8 @@
 - 「Lambdaコードがテーブル名を環境変数から組み立てる」直しとタグは2026-10-13にRnDへ入れた（RnDの名前は変えていない）。STGは最初から新名で作る。RnDの改名は7。
 
 ## 済
+
+- セキュリティ強化の即効分（2026-10-25）。PITR、依存更新、CloudTrail組織トレイル、CLIのSSO化、長期鍵3本とIAMユーザー2つの削除。[セキュリティ見直し](security-review-2026-10-25.md)
 
 - STGの準備（2026-10-16）。アカウント 131746731200、`cdk bootstrap`、SSM鍵11件、`legacyNames` による新名合成。deployと投入は3へ。
 
