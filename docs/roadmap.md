@@ -1,6 +1,6 @@
 # ロードマップ: 残りの作業と順番
 
-「残っていること全部」の入口。順番と、誰の手が要るかだけを持つ。各項目の中身・経緯・手順は右端の文書へ。終わった行は消さず「済（日付）」にし、全部済んだらこの文書を消す。着手しないと決めた項目はここに書かず [先送り項目](deferred-items.md) へ。
+「残っていること全部」の入口と、インフラの「いまの状態」を持つ。順番と、誰の手が要るかだけを書き、各項目の中身・経緯・手順は右端の文書へ。終わった行は消さず「済（日付）」にし、全部済んだらこの文書を消す。着手しないと決めた項目はここに書かず [先送り項目](deferred-items.md) へ。インフラの決定と根拠は [複数アカウント計画](multi-account-iac-plan.md)、手順は [infra/README](../infra/README.md)。
 
 ## 方針（2026-10-07合意）
 
@@ -8,19 +8,35 @@
 - Claudeだけで進められる部分は、ユーザーの手待ち（アカウント作成・実機確認など）の間に先へ進める。各セッションの冒頭で「このセッションでユーザーにやってもらうこと」を先に列挙する。
 - 本番影響の操作は説明→OKの原則どおり。同種の操作をまとめて1回のOKで進めてよいかは、その場で聞く。
 
+## いまの状態（インフラ、2026-10-25時点）
+
+状態が変わったらここを上書きする。経過は書かない。
+
+- RnDアカウント（342082316736、管理アカウントと同居）のToyTalker資源36個は、CloudFormationスタック **`ToyTalker-rnd`** の管理下。ドリフトなし（2026-09-16確認）。
+- **Lambdaの反映は `cd infra && npx cdk diff --context stage=rnd` → `npx cdk deploy --context stage=rnd`。** `deploy.sh` / `setup.sh` は削除済み。
+- APIキー11件の正本は **SSM Parameter Store `/toytalker/<key>`**（AWS管理キーで暗号化）。Lambdaが実行時に読んでメモリに保持する（`backend/shared/secrets.mjs`。2026-10-06切替、アプリ・ESP32で実機確認済み）。環境変数には鍵の名前 `SECRET_PARAMS` だけ。鍵を替えるときはSSMを変えるだけ（5分以内に反映）。
+- IAMロールはCDKが関数ごとに作った最小権限のもの。旧ロールと旧Permissionは削除済み。**`toytalk-lambda-role-dev` だけはv1の旧Lambda 2本が使っているので残している**（9で削除判断）。
+- **CLIはIdentity Center（SSO）で動かす**（2026-10-25）。`~/.aws/config` の `[sso-session toytalker]` と `[profile toytalker-rnd]`、`[default]` も同じSSO。IAMユーザーは `zackey`（鍵なし、緊急用コンソール）だけ。長期アクセスキーは無い。[セキュリティ見直し](security-review-2026-10-25.md)
+- Lambda 8本はNode 24、ESP32用メインのメモリは2048MB。CDK化前に本番に入っていたコードとバイト単位で一致することを確認した上で引き取った。
+- **STGは新名で合成される**（2026-10-16）。アカウント 131746731200、`cdk bootstrap` 済み、SSM鍵11件投入済み（RnDと同じ値）。`stages.ts` の `legacyNames`（RnDだけ true）で部品ID・固定名・スタック名を切り替える。deployとマスターデータ投入は3の中で。
+- **テーブル名はコードに無い**（2026-10-13）。`stages.ts` の `tableSuffix`（RnDは空）をCDKが環境変数 `TABLE_SUFFIX` で配り、`backend/shared/tables.mjs` が組む。タグ `project` / `environment` も全資源に付けた。環境名は `rnd` / `stg` / `prd` / `prd-dg`。
+- 組織 `o-lbme8l7xtz`、Identity Center（ユーザー `yamazaki`、グループ `admins`）、ルートアクセスの集中管理は整理済み。一覧は [複数アカウント計画](multi-account-iac-plan.md) の「アカウント一覧」。
+- ファーム配布バケット `toytalker-firmware` はCDKの管理外（`fromBucketName` で参照のみ）。扱いは9で決める。
+- Windows機で `infra/` の動作確認済み（2026-09-29、Node v22.19.0・Git Bash。`npm ci`、`install-lambda-deps.sh`、型チェック、`cdk diff` が差分なし）。
+
 ## 順番
 
 | 順 | 項目 | Claudeだけで | ユーザーが要る | 状態 | 詳細 |
 |---|---|---|---|---|---|
 | 1 | 命名の決定 | 案を出す | 最終OK | 済（2026-10-12、下記） | [命名規則](naming-conventions.md)、新旧対応は [複数アカウント計画](multi-account-iac-plan.md) の「命名」 |
-| 2 | テーブル名の環境変数化とタグ（RnDへdeploy） → STGアカウント作成 → `cdk bootstrap` → SSM投入 → STGを新名で合成 | 環境変数化・タグ・bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 済（2026-10-16。下記） | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md)、[infra/README](../infra/README.md) |
+| 2 | テーブル名の環境変数化とタグ（RnDへdeploy） → STGアカウント作成 → `cdk bootstrap` → SSM投入 → STGを新名で合成 | 環境変数化・タグ・bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 済（2026-10-16。下記） | 上の「いまの状態」、[infra/README](../infra/README.md) |
 | 3 | CloudFront固定ドメイン（`api-stg.zakicorp.com` 等）→ STGへ初回 `cdk deploy` → マスターデータ投入 → アプリ・ESP32の接続先切替 → 実機確認 | CDK・アプリ・ファーム・deploy | Cloudflare DNS追加、実機確認 | 未着手。**DG向け展開の構成が決まるまで着手しない**（2026-10-25。下記） | [複数アカウント計画](multi-account-iac-plan.md) |
 | 4 | 認証（Cognito + Google / Sign in with Apple）→ 前払いポイント制 | CDK・Lambda・アプリ | Google Cloud / Apple Developer側の設定、実機確認 | 設計メモあり、未着手 | [先送り項目](deferred-items.md) の「ユーザー認証」、[原価と課金](pricing-and-cost-model.md) 第11節 |
 | 5 | Cartesia 429時のずんだもんフォールバック、ZakiCorp TTS待ち行列の可視化 | 全部 | 実機確認 | 仕様あり、未着手 | [TTSフォールバック](tts-fallback-and-notifications.md)、[先送り項目](deferred-items.md) の「待ち行列の可視化」 |
 | 6 | ESP32: 検索後の誤停止対策、OTA検証3件（電源断・SHA改ざん・ロールバック）、`stable` 発行、配布機のUSB書き込み、アプリの版表示と `fw_channel` 切替 | コード | 実機・S3操作・USB書き込み | 誤停止は原因仮説のみ・対策未合意 | [OTA引き継ぎ](handoff-esp32-ota-2026-09-16.md) |
-| 7 | RnDの改名 → 自分用本番（CMK込み）→ DG向け本番 | 大半 | アカウント作成×2、実機確認 | 未着手。3の後。GitHub Actions + OIDCは外した（[先送り項目](deferred-items.md)、2026-10-25） | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) |
+| 7 | RnDの改名 → 自分用本番（CMK込み）→ DG向け本番 | 大半 | アカウント作成×2、実機確認 | 未着手。3の後。GitHub Actions + OIDCは外した（[先送り項目](deferred-items.md)、2026-10-25） | [複数アカウント計画](multi-account-iac-plan.md) の「決めたこと」（CMKは本番で入れる）と「命名」 |
 | 8 | セキュリティ強化: PITR・依存更新・CloudTrail組織トレイル・CLIのSSO化と長期鍵の削除。所有者確認は4、レート制限は3で | コード | SSOのパスワード設定、deployと削除のOK | 済（2026-10-25）。残りは4（所有者確認）と3（レート制限）の中で | [セキュリティ見直し](security-review-2026-10-25.md) |
-| 9 | 小物: v1残骸の削除（旧ロール・旧Lambda 2本・API Gateway・孤立ロググループ）、`toytalker-firmware` の扱い（ファームは環境に属さず全機共通なので、環境ごとのスタックへ取り込むのは合わない。どのアカウントに置き、どう管理するかを別途決める。2026-10-25）、Soniox Lambda 128→256MB、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手 | [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) の「判断待ち」 |
+| 9 | 小物: v1残骸の削除（旧ロール・旧Lambda 2本・API Gateway・孤立ロググループ）、`toytalker-firmware` の扱い（ファームは環境に属さず全機共通なので、環境ごとのスタックへ取り込むのは合わない。どのアカウントに置き、どう管理するかを別途決める。2026-10-25）、Soniox Lambda 128→256MB（コールドスタート時のSSM取得が約0.9秒。他は1〜2GBで約0.2秒。温めで普段は起きない）、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手。v1残骸の内訳: `toytalk-lambda-role-dev`、`toytalk-openai-api-dev`、`toytalk-api-raspi`、API Gateway `toytalk-chat-apigateway-dev`、孤立ロググループ `/aws/lambda/toytalk-stream-handler-for-esp32-lambda` | [ZakiCorp TTS](zakicorp-tts.md) |
 
 並べた理由: 1は2以降の名前の前提。8（セキュリティ）は4の前に済ませる。4〜6は2〜3と独立なので、ユーザーの手待ちの間にClaudeが進められる。7は本番なので最後。**3はDG向け展開の構成が決まってから**（下記）なので、当面は4〜6をRnDで進める。
 
@@ -45,4 +61,4 @@
 
 - テーブル名の環境変数化とタグ（2026-10-13）。RnDの名前は変えず、CDKが配る `TABLE_SUFFIX` から `backend/shared/tables.mjs` が組む。`stages.ts` の `prod` / `prod-dg` も `prd` / `prd-dg` へ。[infra/README](../infra/README.md) の「名前とタグ」
 - 命名の決定（2026-10-12）。`toytalker-<機能>-<環境>`。[命名規則](naming-conventions.md)
-- 秘密の実行時取得（2026-10-06）。Lambda 8本がSSMから鍵を読む。[CDK引き継ぎ](handoff-cdk-infra-2026-09.md)
+- 秘密の実行時取得（2026-10-06）。Lambda 8本がSSMから鍵を読む。[複数アカウント計画](multi-account-iac-plan.md) の「秘密の実行時取得」

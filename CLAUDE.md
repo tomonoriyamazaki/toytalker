@@ -2,7 +2,18 @@
 
 Claude CodeとCodexで共有するシステム概要・開発ルール。Codexはルートの [AGENTS.md](AGENTS.md) からこのファイルを参照する。共通情報はこのファイルを更新し、両ファイルへ重複して記載しない。
 
-**このファイルの運用**: 書くのは「コードから読み取れないこと」だけ（ルール、事故の教訓、本番に出ている版、未確認の事項）。各領域の「現在の状態」は上書きし、日付付きの経過は積み上げずに `docs/` の調査メモへ書く。調査メモは領域ごとの入口1本に要点を統合し、1日単位の個別メモは統合後に削除する（2026-09-13に40本→24本へ整理）。意図的に先送りした項目と却下理由は [先送り項目](docs/deferred-items.md) に書く。**残っている作業の全体と順番は [ロードマップ](docs/roadmap.md) が入口**（2026-10-07から。項目が済んだら更新する）。
+**このファイルの運用**: 書くのは「ルール・システム構成・各領域の入口へのリンク」だけ。各領域の「現在の状態」は入口文書が持ち、上書きで更新する。日付付きの経過は積み上げず `docs/` の調査メモへ書き、要点は入口へ統合して個別メモは消す。意図的に先送りした項目と却下理由は [先送り項目](docs/deferred-items.md)。**残っている作業の全体と順番は [ロードマップ](docs/roadmap.md) が入口**（項目が済んだら更新する）。
+
+## 各領域の入口
+
+- 残作業全体: [ロードマップ](docs/roadmap.md)。やらないと決めたことは [先送り項目](docs/deferred-items.md)
+- インフラ（CDK・複数アカウント）: 状態は [ロードマップ](docs/roadmap.md) の「いまの状態」、決定と根拠は [複数アカウント計画](docs/multi-account-iac-plan.md) と [命名規則](docs/naming-conventions.md)、手順は [infra/README](infra/README.md)
+- セキュリティ: [セキュリティ見直し](docs/security-review-2026-10-25.md)
+- ESP32ファーム: [ESP32ファーム](docs/esp32-firmware.md)（状態・ビルド・調査メモ一覧）
+- ZakiCorp TTS（クローンボイス）: [ZakiCorp TTS](docs/zakicorp-tts.md)（状態・所在）、[起動・復旧](docs/tts-boot-recovery.md)（手順）、[バッチエンジン](docs/qwen3-tts-batch-engine-2026-09-12.md)（設計・計測）
+- 原価・課金・前払いポイント制: [原価と課金の考え方](docs/pricing-and-cost-model.md)
+- TTSフォールバックと通知（未実装）: [仕様](docs/tts-fallback-and-notifications.md)。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)
+- MacBookでの開発: [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md)
 
 ## システム構成
 
@@ -17,161 +28,48 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **STTはLambdaを経由しない**: Soniox一時キーをLambdaが発行し、クライアントがSonioxへ直接WebSocket接続する。
 - **相槌(backchannel)**: メインLLMの処理中に「そうだね〜」等の短い応答を先に返す。デフォルトON。
 - **App / ESP32は対称構成**: 各々にメインLambda+相槌Lambdaがあり、出力形式だけ異なる（App=base64, ESP32=PCM）。
-- セキュリティの現状（公開入口・資格情報・復旧手段）と残りの対策は [セキュリティ見直し](docs/security-review-2026-10-25.md) が入口（2026-10-25）。
-- **複数アカウント展開（RnD/STG/本番×2）とCDK化は進行中。** RnDのToyTalker資源はCloudFormationスタック `ToyTalker-rnd` の管理下にある（2026-09-16にimport済み）。CDKコードは `infra/`（[README](infra/README.md)）、決定事項と進め方は [複数アカウント計画](docs/multi-account-iac-plan.md)。 続きを始めるときは [CDK引き継ぎ](docs/handoff-cdk-infra-2026-09.md) を最初に読む。APIキー類の正本はSSM Parameter Store `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い。2026-10-06切替）。鍵の入れ替えはSSMを変えるだけで、5分以内に反映される。資源の命名は `toytalker-<機能>-<環境>`（例 `toytalker-chat-app-stg`）とタグ `project` / `environment` に決定（2026-10-12）。規則は [命名規則](docs/naming-conventions.md)、新旧対応表と適用の順番は同計画の「命名」節。RnDの既存資源は改名まで旧名のまま。テーブル名はコードに書かず、CDKが配る `TABLE_SUFFIX`（RnDは空）から `backend/shared/tables.mjs` で組む（2026-10-13）。
-
-### TTSプロバイダー
-
-DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / Cartesia / FishAudio / Sakura(ずんだもん) / ZakiCorp(自前クローンボイス, β版)。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)。
+- **TTSプロバイダー**は DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / Cartesia / FishAudio / Sakura(ずんだもん) / ZakiCorp(自前クローンボイス, β版。ローカルPCのQwen3-TTSを `https://tts.zakicorp.com` で公開)。
+- **インフラ**: RnDアカウントのToyTalker資源はCDK（`infra/`）のスタック `ToyTalker-rnd` の管理下。APIキー類の正本はSSM `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い）。テーブル名はCDKが配る `TABLE_SUFFIX` から `backend/shared/tables.mjs` で組む。
+- デバイス世代: v1 Raspberry Pi（廃止）、v2 スマホアプリ経由（現行）、v3 ESP32-S3スタンドアロン（現行、アプリ不要で直接AWS通信）。
+- **Lambda 8本**（ディレクトリは `backend/<Lambda名>`）: App用メイン `toytalk-stream-handler-lambda`、ESP32用メイン `toytalk-api-stream-for-esp32-lambda`、相槌 `toytalker-backchannel-for-app-lambda` / `-for-esp32-lambda`、Soniox一時キー発行（ESP32のOTA更新確認も同梱）`toytalk-soniox-stt-lambda`、デバイス登録・ボイス設定・コスト管理・クローンボイス登録 `toytalker-device-setting-lambda`、App用読み上げ `toytalker-tts-only-lambda`、月次運用レポート `toytalker-ops-monthly-lambda`。DynamoDB 8テーブルは `backend/shared/tables.mjs`。
 
 ### コスト記録の方針
 
-- 原価・マージン2.0・前払いポイント・プレミアムボイスの料金体系は [原価と課金の考え方](docs/pricing-and-cost-model.md)。
-- 前払いポイント制（ウォレット・台帳・Stripe Checkout・無料枠・残高0の扱い）の実装仕様は同文書の第11節（2026-09-13合意、未実装。購入機能は認証の後）。
-- 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。
-- LLMのツール呼び出しは、外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。無料ツールは何もしない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第9節。
-- 為替は毎月1日に `toytalker-ops-monthly-lambda` が自動保存し、先月の実費・各社請求・単価行の点検をメールする。単価は自動更新しない。手順は [原価と課金の考え方](docs/pricing-and-cost-model.md) の第10節。
-- Cartesiaの同時接続上限（429）に当たったときは、返答単位でずんだもんへ切り替えて会話を止めない。仕様は [TTSフォールバックとプッシュ通知](docs/tts-fallback-and-notifications.md)（2026-09-13合意、未実装）。複数アカウントでの上限回避はしない。
-- `zakicorp#tts` の単価は暫定（$0.000025/文字、Cartesiaの半額、2026-09-13登録）。正式な単価は未決定。
-
-### Lambda一覧
-
-| Lambda | 用途 | ディレクトリ |
-|---|---|---|
-| `toytalk-stream-handler-lambda` | App用メイン（LLM+TTS streaming） | `backend/toytalk-stream-handler-lambda` |
-| `toytalk-api-stream-for-esp32-lambda` | ESP32用メイン（LLM+TTS streaming） | `backend/toytalk-api-stream-for-esp32-lambda` |
-| `toytalker-backchannel-for-app-lambda` | App用相槌 | `backend/toytalker-backchannel-for-app-lambda` |
-| `toytalker-backchannel-for-esp32-lambda` | ESP32用相槌 | `backend/toytalker-backchannel-for-esp32-lambda` |
-| `toytalk-soniox-stt-lambda` | Soniox一時キー発行 | `backend/toytalk-soniox-stt-lambda` |
-| `toytalker-device-setting-lambda` | デバイス登録・ボイス設定・コスト管理 | `backend/toytalker-device-setting-lambda` |
-| `toytalker-tts-only-lambda` | App用 読み上げ（テキスト→TTSのみ、音声バイナリ直返し） | `backend/toytalker-tts-only-lambda` |
-| `toytalker-ops-monthly-lambda` | 月次運用レポート（毎月1日にメール） | `backend/toytalker-ops-monthly-lambda` |
-
-### DynamoDBテーブル一覧
-
-| テーブル | 用途 |
-|---|---|
-| `toytalker-devices` | ESP32デバイス登録 |
-| `toytalker-characters` | キャラクター定義（人格プロンプト） |
-| `toytalker-voices` | ボイス設定（プロバイダー・モデル・voice_id） |
-| `toytalker-llms` | LLM設定 |
-| `toytalker-chat-logs` | 会話履歴・トークン使用量 |
-| `toytalker-usage` | API利用量トラッキング |
-| `toytalker-api-unit-prices` | 各API単価 |
-| `toytalker-exchange-rates` | USD-JPY為替レート |
-
-### デバイス世代
-
-- v1: Raspberry Pi（廃止）
-- v2: スマホアプリ経由（現行）
-- v3: ESP32-S3スタンドアロン（現行、アプリ不要で直接AWS通信）
+- 料金体系（原価・マージン2.0・前払いポイント・プレミアムボイス）と前払いポイント制の実装仕様（未実装。購入機能は認証の後）は [原価と課金の考え方](docs/pricing-and-cost-model.md)。
+- 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。LLMのツール呼び出しは外部の有料API（Serper検索など）だけ回数課金で `tool` として記録する。
+- 為替は毎月1日に月次Lambdaが自動保存し、点検をメールする。単価は自動更新しない。`zakicorp#tts` の単価は暫定（$0.000025/文字）。
+- Cartesiaの429時は返答単位でずんだもんへ切り替えて会話を止めない（未実装）。複数アカウントでの上限回避はしない。
 
 ## ワークフロールール
 
 - 依頼範囲内の読み取り・調査・通常のコマンド実行・コード修正は、逐一確認せず進める。
 - **本番に影響する操作（Lambdaデプロイ・AWS設定変更・DynamoDB書き込み）と削除操作は、何をするかを説明してからユーザーの明示的なOKを得て実行する。** 説明と実行を同じターンでやらない。
-- **作業は原則worktreeで行う（1つの作業ツリーに1セッション）。** 依頼を受けたら `.claude/worktrees/<name>` にブランチを切って始め、聞かない。同じ作業ツリーを複数セッションで共有すると、ファイルの選り分けや相手の作業待ちが発生する（2026-09-13）。終わったらmainへfast-forwardし、了承を得てworktreeとブランチを消す。CLAUDE.mdなど共有ファイルの大規模整理は1セッションだけで行う。
+- **作業は原則worktreeで行う（1つの作業ツリーに1セッション）。** 依頼を受けたら `.claude/worktrees/<name>` にブランチを切って始め、聞かない。終わったらmainへfast-forwardし、了承を得てworktreeとブランチを消す。CLAUDE.mdなど共有ファイルの大規模整理は1セッションだけで行う。
 - 「コミットして」と言われたらコミットし、そのまま現在のブランチへpushする。PR作成・マージ・ブランチクリーンアップは明示的な指示があるまでやらない。
-- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（2026-09-16から。各Lambda配下の `deploy.sh` は使わない。CDKが環境変数を上書きするので、手作業で環境変数を変えても次のdeployで戻る）。
-- **Lambdaのデプロイ元はmain。** デプロイ前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する（2026-09-13に別worktreeの変更を含まない作業ツリーからデプロイし、数分間本番からCartesiaが消えた）。`cdk diff` で差分が出るLambdaが意図したものだけか確認する。
+- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（資格情報はSSO。CDKが環境変数を上書きするので、手作業で環境変数を変えても次のdeployで戻る）。
+- **Lambdaのデプロイ元はmain。** デプロイ前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する（2026-09-13に別worktreeの変更を含まない作業ツリーからデプロイし、数分間本番からCartesiaが消えた）。`cdk diff` で差分が出るLambdaが意図したものだけか、Replaceが無いかを確認する。
 - PowerShellでgitコマンドを実行するとき、`Set-Location` を使わず `git` から直接実行する（パーミッション設定のパターンマッチが効かなくなるため）。
 - ビルド確認と実機確認を区別して報告する。通信・音声・メモリの安定性は、ユーザーによる実機の連続会話試験とログで確認する。
-- 原因不明の問題の診断は「証拠→仮説（推測と明示）→合意→検証」の順で進め、証拠が足りない仮説を断定口調で言わない。対策を出すときは「根治か、痛み止めか」を一言で明示する。
-- 話題が変わる区切りや、コンテキストが膨らんだら、新しいセッションでの再開をこちらから提案する。「引き継ぎmd書いて」と言われたら、状況・決定事項・残タスクを `docs/` にまとめる。
+- 原因不明の問題の診断は「証拠→仮説（推測と明示）→合意→検証」の順で進め、証拠が足りない仮説を断定口調で言わない。対策は「根治か、痛み止めか」を一言で明示する。
+- 話題が変わる区切りや、コンテキストが膨らんだら、新しいセッションでの再開を提案する。「引き継ぎmd書いて」と言われたら、状況・決定事項・残タスクを該当領域の入口文書へまとめる（新しい引き継ぎ文書は作らない）。
 - 破壊的・不可逆な操作（DynamoDBの削除/更新、Lambda削除、`Remove-Item`、`git reset --hard` 等）のパーミッションは `ask` のままにし、`allow` へ移す提案はしない。
-- MacBookで開発するときは [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md) を最初に読む。Windows固有のルール（PowerShell、スクリーンショット保存先、`tools/tts-service/`）はMacでは該当しない。
+- MacBookで開発するときは [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md) を最初に読む。Windows固有のルール（PowerShell、スクリーンショット、`tools/tts-service/`）はMacでは該当しない。
 
 ### スクリーンショットの共有
 
-- 保存先は `C:\Users\exodj\Pictures\Screenshots`。
-- 「スクショ撮ったから見て」等の依頼では、保存先の画像を更新日時の新しい順に並べ、最新1枚を開く。「2枚撮った」など枚数指定があれば最新の指定枚数、ファイル名・パス指定があればそちらを優先する。
-- 開いたファイル名または撮影時刻を返答に添える。見つからなければその旨を伝える。
+- 保存先は `C:\Users\exodj\Pictures\Screenshots`。「スクショ撮ったから見て」等の依頼では、更新日時の新しい順で最新1枚を開く（枚数指定があれば最新の指定枚数、ファイル名指定があればそちら）。開いたファイル名または撮影時刻を返答に添える。
 
-## ESP32-S3ファーム開発
+### ESP32-S3ファーム開発のルール
 
-### 現在の状態（2026-09-13時点）
+現在の状態・環境・ビルドコマンド・調査メモは [ESP32ファーム](docs/esp32-firmware.md)。
 
-- 開発先は [v0.7](devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)（OTA対応、NLP既定=AGGR、`sketch.yaml` にボード設定あり）。[v0.6](devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino) は音量方式の検証版、[v0.5](devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino) は実機確認済み安定版として保持。
-- 試験機「v0.2 大スピーカー」に入っている版は 0.7.2（2026-09-16、OTAで更新、app1で稼働）。配布機は `toytalker_v07_serial_nowait`（2026-09-12夜書き込み、OTA非対応、版の報告なし）。構成: AEC後のAC RMSで音声割り込み判定、NLP=AGGR、音声割り込みON、ボタン即時消音、AEC毎ターン再作成、TLSはPSRAM固定、USBログ送信待ち0。TTSはCartesia基準。
-- NLP既定はAGGR（2026-09-16にNORMALから変更。実機構成と同じ）。NORMALで比較するときは `--build-property 'compiler.cpp.extra_flags=-DTOYTALKER_AEC_NLP_LEVEL=0'`。
-- AEC調整は一旦終了。「途中停止は減ったが、声で止めるには近づく必要がある」というトレードオフは既知で、最終的な限界とは扱わない。AEC本体の時刻整列・入力飽和・フィルタ等に未検証の改善候補あり。
-- 未確認: stream終端の切断・救済経路の実機再現、Soniox再接続後の録音停止（別件）、検出前・未接続中の音声保持（未実装）。
-- **OTAは2026-09-15実装、2026-09-16に試験機で 0.7.1→0.7.2 の更新成功（17秒）。** 未検証: 途中電源断、SHA改ざん、ロールバック。検索を挟んだ返答で再開直後に音声割り込みが誤発火する件（OTAとは別件）と残タスクは [引き継ぎ](docs/handoff-esp32-ota-2026-09-16.md)。 **フォルダは v0.7 の1つで、配布した版は git タグ `fw-<版>` で残す**（版ごとのフォルダは作らない。2026-09-16決定）。配布する版は `bash devices/mcu/esp32_s3/tools/publish-firmware.sh beta` でS3へ発行、`stable --promote` で全機へ。更新確認は起動時にSoniox一時キー取得の応答で行い、本体はS3から直接取る。仕様・検証手順・未実施の本番操作は [OTA実装](docs/esp32-ota-settings-plan.md)。
-- スマホから音声割り込み・相槌を再起動なしでON/OFFする案は未実装。相槌設定の本体反映は起動時、音声割り込みはファーム内固定。[設定同期の相談記録](docs/esp32-ota-settings-plan.md)。
+- Arduino IDE環境を維持する。ユーザーの指示なしにPlatformIO / ESP-IDFへ移行しない。利用可能なAPIは実際のインストール済みコアで確認する。
+- **フォルダは v0.7 の1つで、配布した版は git タグ `fw-<版>` で残す**（版ごとのフォルダは作らない）。
+- AEC調整は一旦終了。再開するときは入口文書の調査メモを読み、却下済みの案（入力1/4縮小、音量方式）を再提案しない。
 
-### 環境・ビルド
+### ZakiCorp TTSのルール
 
-- Arduino IDE環境を維持する。ユーザーの指示なしにPlatformIO / ESP-IDFへ移行しない。ビルド確認にはArduino IDE付属のarduino-cliも使える。
-- ビルド確認済みのコアはArduino ESP32 3.3.11 / IDF 5.5.5。利用可能なAPIは実際のインストール済みコアで確認する。起動時の `[BUILD]` で実機の版を確認する。
-- ボードはESP32-S3-MINI-1-N4R2（Flash 4MB、quad PSRAM 2MB）。
-- mbedTLSのcallocは `TlsMemory.h` で起動時にPSRAMへ固定し、内部RAMへはフォールバックしない。
+現在の状態・公開経路・監視・鍵の所在は [ZakiCorp TTS](docs/zakicorp-tts.md)。
 
-リポジトリルートから実行するビルド確認の例（書き込み時は実機のボード・ポート・IDE設定を確認する）:
-
-```powershell
-arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=no_fs,CDCOnBoot=cdc --build-path "$env:TEMP/toytalker_v07_build" devices/mcu/esp32_s3/toytalker_mini_v0.7
-```
-
-`sketch.yaml` の `default_fqbn` があるので `--fqbn` を省略してもよい。
-
-### 調査メモ
-
-- [v0.7 AEC試験手順・実機結果・復旧](docs/esp32-v07-aec.md) — AEC全般の入口。NLP=AGGRの根拠とボタン即時消音の実測もここ
-- [AC RMS判定と到達点](docs/esp32-aec-gate-ac-2026-09-12.md) — 現行判定方式、今後の改善余地、再開時の切り分け手順
-- [終端調査と修正](docs/esp32-stream-end-investigation-2026-09-12.md) — 終端救済の実装と、AEC閾値の根拠になったturn=18/20の実測
-- [USBログ待ち対策](docs/esp32-usb-log-backpressure-2026-09-12.md) — 現行実機版の最後の変更
-- [入力クリップ比較](docs/esp32-aec-input-headroom-2026-09-12.md) — 入力1/4縮小を却下した記録。再提案しないために残す
-- [音声介入第一弾（v0.6）](docs/esp32-v06-voice-barge-in.md) — 音量方式が不可と分かった根拠、RXターンごと再確保の由来
-- [TLSメモリ調査](docs/esp32-s3-tls-memory-investigation-2026-09-06.md) — Stringリーク修正の経緯と、未修正のリスク一覧
-- [v0.5 再生終了の計測](docs/esp32-playback-end-timing.md) — v0.5のみ。v0.7はI2S APIが違う
-- [配布実機の音途切れ報告（2026-09-11）](docs/device-audio-investigation-2026-09-11.md) — サーバー側調査、原因未特定。実機の版照合が未着手
-- 本文開始の高速化で保留した候補は [先送り項目](docs/deferred-items.md)
-
-## ZakiCorp TTS（クローンボイス, β版）
-
-ローカルPC (RTX 5090) でQwen3-TTSベースのクローンボイスAPIサーバーを稼働。Cloudflare Tunnelで `https://tts.zakicorp.com` として公開し、Lambdaから利用する（2026-09-13にngrokから切替、同日ngrok撤去）。
-
-### 現在の状態（2026-09-13時点）
-
-- **本番はバッチ推論エンジン第2版**（2026-09-13 12:06反映）。`tts-models/faster-qwen3-tts/api_server_batch.py` + `batch_engine.py`。要求ごとに独立したKV行を持つ。本番は `scripts/.env` の `TTS_BATCH_CLASSES=1,2,4,8,16` で同時16件構成（VRAM約11GiB、他のGPU用途と同居するため。2026-09-13夜に32件構成・約19GiBから変更）、`TTS_CONTEXT_FRAMES=12` で波形復号の左文脈12フレーム（同日19:02反映。聴取で25と区別なし、32件時の復号が約半分）。17件目以降は待ち行列。32件構成へ戻すには `.env` の行を消して再起動。元の `api_server.py` は無変更で残す。
-- 切替は `tools/tts-service/switch-api.ps1 -ApiScript <script> [-PublicUrl <url>]` を昇格実行（`.local/tts-service/config.json` の `api_script`/`public_url` を設定し監視タスク再起動、APIは約40秒停止）。復旧は `-ApiScript api_server.py`。公開URLは固定なのでLambdaの再設定は不要。
-- ユーザー確認済み（2026-09-13）: アプリでの会話、Cloudflare経由と合言葉遮断後の会話、クローンボイス登録、PC再起動後の自動復帰。未確認: 長文分割境界の聞こえ方。
-- 単独要求の元実装は `StaticCache` が1つで同時要求が互いのKV文脈を上書きする構造があった（言葉の繰り返し・抜けの原因）。バッチ版で解消。
-
-### 公開経路（2026-09-13にCloudflare Tunnelへ切替）
-
-- 公開URLは固定の **`https://tts.zakicorp.com`**。Cloudflare Tunnel `toytalker-tts`（ID `8bc0e7f0-…`、locally-managed）を Windowsサービス `cloudflared`（自動起動）が張る。東京拠点、無料プラン、転送量課金なし。
-- `zakicorp.com` のDNSはRoute 53からCloudflare（無料）へ移行済み。`toytalk.zakicorp.com`（S3+CloudFrontのサイト）とACM検証用CNAMEもCloudflare側に置いた（どちらもDNS only）。登録先はお名前.com、期限は自動更新。
-- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認する。Lambda 6本の `ZAKICORP_TTS_URL` の正本は `infra/config/stages.ts` の `zakicorpTtsUrl`（CDKがdeployのたびに配る）で、監視タスクは照合して違えば警告するだけで書き換えない。URLを変えるときは両方を直す。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
-- 設定・認証情報の所在、正常確認、復旧、ngrokへの戻し方（`switch-api.ps1 -PublicUrl ''`）は [起動・復旧](docs/tts-boot-recovery.md) の「公開経路」節。`cloudflared service install` は `--config` を保存しないので `tools/tts-service/cloudflared-service-fix.ps1` でImagePathに明示する。
-- 拠点での遮断: WAFカスタムルール `tts-edge-key-required` が `X-Zakicorp-Edge-Key` ヘッダー（Lambda環境変数 `ZAKICORP_EDGE_KEY`、サーバー側 `.env` にも同値）の無い要求を403で落とす（2026-09-13）。期限なし。公開側 `/health` は `status` のみ、話者登録名は英数字と `-_` に限定。詳細と鍵の入れ替え手順はランブック。
-- ngrokは2026-09-13 18:02に撤去（`public_url` 設定中は監視タスクが起動しない。`switch-api.ps1 -PublicUrl ''` で復活）。再起動試験済み（17:48、ログイン前にトンネル・API・監視が復帰）。Route 53の `zakicorp.com` ホストゾーンは2026-09-13に削除済み（`zackey.xyz` は残る）。
-
-### 起動・監視
-
-- タスクスケジューラ `TTS-AutoStart` がOS起動30秒後に非対話実行（S4U、通常権限、ログオン不要）。APIサーバー + ngrokを監視し、終了後に再起動。`public_url` が設定されていればLambda環境変数 `ZAKICORP_TTS_URL` を照合するだけで、無ければngrokのURLを6本へ書き込む（次の `cdk deploy` で戻る）。
-- 実装・登録: `tools/tts-service/supervisor.py` / `install.ps1`。実際の配置は `.local/tts-service/`（Git対象外）、ログは `.local/tts-service/logs/`。再適用は保守時間にタスクを停止してから登録する。
-- 元のTTSリポジトリの `setup-tasks.ps1` を実行するとログオン起動に戻る。[起動・復旧手順](docs/tts-boot-recovery.md)。
-- Windows更新は自動更新を受け入れ、アクティブ時間07:00〜翌01:00。[設定記録](docs/windows-update-restart-control.md)。
-
-`ZAKICORP_TTS_URL` の照合対象（`public_url` 未設定時はngrok URL変更のたびに書き込み）:
-
-1. `toytalk-stream-handler-lambda` (app TTS)
-2. `toytalk-api-stream-for-esp32-lambda` (ESP32 TTS)
-3. `toytalker-backchannel-for-app-lambda` (app 相槌)
-4. `toytalker-backchannel-for-esp32-lambda` (ESP32 相槌)
-5. `toytalker-tts-only-lambda` (app 読み上げ)
-6. `toytalker-device-setting-lambda` (クローンボイス登録 `/v1/speakers/register`。2026-09-13まで同期対象から漏れていた)
-
-### S3 / DynamoDB / 認証
-
-- APIキー `ZAKICORP_API_KEY` は `C:\Users\exodj\projects\tts-models\faster-qwen3-tts\scripts\.env`（サーバー側）とSSM `/toytalker/zakicorp-api-key`（Lambda側）にある。リポジトリには書かない。
-- S3バケット `toytalker-tts-speakers` — speaker embedding (.pt) のバックアップ
-- `toytalker-voices` のZakiCorpエントリ: provider=ZakiCorp, voice_id=zakicorp-{name}, vendor_id={name}
-
-### 調査メモ
-
-- [バッチエンジンの実装と検証](docs/qwen3-tts-batch-engine-2026-09-12.md) — 現行本番版。最初に読む。設計の根拠になった事前計測（見込み計測・CUDAトレース・改善候補比較）もここ
-- [調査の経緯](docs/qwen3-tts-current-status.md) — 元実装の問題発見から本番反映までの時系列、元実装の分析と却下した案
-- [元実装の1〜32件測定](docs/qwen3-tts-capacity-2026-09-12.md) — バッチ版の改善幅の比較対象
-- [計測方法と用語の定義](docs/qwen3-tts-concurrency-test-plan.md) — TTFA・生成倍率・模擬再生枯渇の定義。未実施の試験一覧
+- 公開URLの正本は `infra/config/stages.ts` の `zakicorpTtsUrl`。URLを変えるときは監視タスクの `public_url` も直す。
+- 監視タスクの再登録は保守時間にタスクを停止してから行う。APIキーとEdgeキーはリポジトリに書かない（サーバー側 `scripts/.env` とSSM）。

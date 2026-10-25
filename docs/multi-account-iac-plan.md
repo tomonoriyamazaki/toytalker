@@ -1,6 +1,6 @@
 # 複数アカウント展開とIaC化の計画（2026-09-15決定）
 
-今のAWSアカウントをRnDにし、STG → 自分用本番 → DG（西川さん）向け本番へ展開するための計画。道具はAWS CDK（TypeScript）。着手したら本文の「進め方」を進捗に合わせて上書きし、決定の根拠はこの文書に残す。
+今のAWSアカウントをRnDにし、STG → 自分用本番 → DG（西川さん）向け本番へ展開するための計画。道具はAWS CDK（TypeScript）。この文書は「何を決めたか、なぜか」を持つ。いまの状態と残作業の順番は [ロードマップ](roadmap.md)、コードと手順は [infra/README.md](../infra/README.md)。
 
 ## 決定事項
 
@@ -9,12 +9,12 @@
 | IaCの道具 | AWS CDK（TypeScript） | Lambda 8本がNode.js ESM + esbuildで、`NodejsFunction` がdeploy.shを丸ごと置き換える。ストリーミングFunction URLは `invokeMode: RESPONSE_STREAM` の1行。アプリもTS系で言語が増えない |
 | CloudFormation | CDKの裏で使い続ける | CDKはTSをCloudFormationテンプレートに変換して流す。YAMLは書かない。マネコンのCloudFormation画面はスタックの閲覧・ロールバック用に使う |
 | 今のアカウント | RnDとして残し、ToyTalkerの資源はCDK管理に引き取る（2026-09-15に変更） | 当初は手作業のまま残す予定だったが、RnDを見ながらCDKを書き、当てて差分が消えるまで直せる方が確実。テーブルにはデータが入っているので作り直さず `cdk import` で引き取る。ToyTalker以外の資源はCDKの管理外のまま |
-| 環境 | RnD（現行）→ STG → 自分用本番 → DG向け本番 | Organizationsで分け、ログインはIAM Identity Center。アカウントごとのアクセスキーは作らない。組織とIdentity Centerは2019年から既にあり、管理アカウント = RnD のまま使う（2026-10-13決定。現状と決定は [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) の「組織とアカウント」、却下理由は [先送り項目](deferred-items.md)） |
+| 環境 | RnD（現行）→ STG → 自分用本番 → DG向け本番 | Organizationsで分け、ログインはIAM Identity Center。アカウントごとのアクセスキーは作らない。組織とIdentity Centerは2019年から既にあり、管理アカウント = RnD のまま使う（2026-10-13決定。下の「組織とIdentity Center」、却下理由は [先送り項目](deferred-items.md)） |
 | 資源の名前 | 全資源に環境名を付ける: `toytalker-<機能>-<環境>`（2026-10-12決定。[命名規則](naming-conventions.md)）。RnDは既存名のままimportで引き取り、CloudFront固定ドメインの後に改名する | 当初は「固定名を全環境で維持、S3だけ環境名」としたが、コンソールやログで環境が一目で分かる方を取った。RnDの既存資源をimportで引き取るには名前の一致が必要なので、RnDの改名は後回し |
 | 環境ごとの設定 | `infra/config/stages.ts` の1ファイルに環境ごとの塊を並べ、`cdk deploy --context stage=<env>` で選ぶ | アカウントID・リージョン・APIの固定ドメイン・通知メール・ZakiCorp URL・メモリなど。秘密ではないのでGitに入れる |
-| 秘密の値 | アカウントごとのSSM Parameter Store（SecureString）。名前は全環境で同じ（例 `/toytalker/openai-api-key`）、中身だけ違う | CDKは名前しか持たず、秘密がファイルに載らない。中身は初回にアカウントごとに手で入れる（投入スクリプト可）。CDKがデプロイ時に読んでLambda環境変数に焼くので、鍵を入れ替えたら `cdk deploy` し直す |
+| 秘密の値 | アカウントごとのSSM Parameter Store（SecureString）。名前は全環境で同じ（例 `/toytalker/openai-api-key`）、中身だけ違う | CDKは名前しか持たず、秘密がファイルに載らない。中身は初回にアカウントごとに手で入れる（`put-secret.ts`）。Lambdaが実行時に読む（2026-10-06切替。下の「秘密の実行時取得」）ので、鍵の入れ替えはSSMを変えるだけで `cdk deploy` は要らない |
 | CDKが決める値 | Function URLのホスト名など、生成結果の値はファイルに書かない | CDKコード内で「このLambdaのURLをあのLambdaの環境変数へ」と配線する。人が見るのはデプロイ後の出力 |
-| デプロイ経路 | 当面ローカルから `cdk deploy --profile <env>` | GitHub Actions + OIDCは本番が2つになってから |
+| デプロイ経路 | ローカルからSSOの一時資格情報で `cdk deploy`。GitHub Actions + OIDCは見送り（2026-10-25） | 1人運用では門が増えるだけ。再検討は複数人がdeployするようになったとき（[先送り項目](deferred-items.md)） |
 | Lambda起動の高速化 | 今はやらない | 温め設計が効いている（下記） |
 | Terraform | 見送り | AWS単独ならCDKの方が学ぶことが少ない。Cloudflare側（DNS・WAF・Tunnel）もコード化したくなったら再検討 |
 
@@ -24,18 +24,40 @@
 
 | 用途 | 組織上の名前 | アカウントID | 主メール | CLIプロファイル | 状態 |
 |---|---|---|---|---|---|
-| 管理アカウント（ToyTalkerのRnDが同居） | `management` | 342082316736 | `exodjp@gmail.com`（変えない） | `management`（当面は `default`、IAMユーザー `zackey` のアクセスキー） | 稼働中。他プロジェクトの資源・公開S3もある。ToyTalker分は CloudFormation `ToyTalker-rnd`、`stages.ts` の `rnd` |
-| STG | `toytalker-stg` | 131746731200 | `exodjp+toytalker-stg@gmail.com` | `toytalker-stg` | 2026-10-14作成（`create-account`、8秒で完了）。2026-10-15 `cdk bootstrap` 済み（`CDKToolkit`）。SSM投入・deployは未 |
+| 管理アカウント（ToyTalkerのRnDが同居） | `management` | 342082316736 | `exodjp@gmail.com`（変えない） | `toytalker-rnd`（SSO。`default` も同じSSOに向けた。2026-10-25） | 稼働中。他プロジェクトの資源・公開S3もある。ToyTalker分は CloudFormation `ToyTalker-rnd`、`stages.ts` の `rnd` |
+| STG | `toytalker-stg` | 131746731200 | `exodjp+toytalker-stg@gmail.com` | `toytalker-stg` | 2026-10-14作成（`create-account`、8秒で完了）。2026-10-15 `cdk bootstrap` 済み（`CDKToolkit`）、2026-10-16 SSM鍵11件投入済み（RnDと同じ値）。deployはロードマップ3 |
 | 自分用本番 | `toytalker-prd` | 未作成 | `exodjp+toytalker-prd@gmail.com` | `toytalker-prd` | ロードマップ7 |
 | DG向け本番 | `toytalker-prd-dg` | 未作成 | `exodjp+toytalker-prd-dg@gmail.com` | `toytalker-prd-dg` | ロードマップ7 |
 | 検証用（2019年参加の旧子アカウント） | `sandbox-1` | 586464890779 | `exodjp+sandbox-1@gmail.com`（旧 `exodjp@nifty.com`、解約済み） | `sandbox-1` | 中身未確認。費用$0。ToyTalkerには使わない |
 | 検証用（同上） | `sandbox-2` | 499135248182 | `exodjp+sandbox-2@gmail.com`（旧 `exodjp@yahoo.co.jp`） | `sandbox-2` | 同上 |
 
 - 請求は一括請求で管理アカウントに集まる。子アカウントに支払い方法は要らない（組織から出すときだけ必要）。管理アカウントのルートにはMFAあり（2026-10-15確認）。
-- 子アカウントのルート資格情報は無い（2026-10-15、ルートアクセスの集中管理を有効化して削除。詳細は [CDK引き継ぎ](handoff-cdk-infra-2026-09.md) の「組織とアカウント」）。子にはIdentity Centerか、管理アカウントからの `OrganizationAccountAccessRole` で入る。
+- 子アカウントのルート資格情報は無い（2026-10-15、ルートアクセスの集中管理を有効化して削除。下の「組織とIdentity Center」）。子にはIdentity Centerか、管理アカウントからの `OrganizationAccountAccessRole` で入る。
 - 管理アカウントの主メールは Account Management API では変えられない（ルートでBillingコンソールから変える）。gmailのままで困らないので変えない。
 - 名前変更は `aws account put-account-name`（管理アカウントから子を指定できる。信頼されたアクセス `account.amazonaws.com` が必要で、2026-10-14に有効化済み）。主メール変更は `start-primary-email-update` → 新アドレスに届く6桁コードで `accept-primary-email-update`。どちらも請求・資源・Identity Centerの割り当てには影響しない。名前は何度でも付け替えられるので、用途が変わったら改名する。
-- Identity Centerの入口は `https://d-95671d6109.awsapps.com/start`（ユーザー `yamazaki`、グループ `admins`、権限セット `AdministratorAccess`。規則は [命名規則](naming-conventions.md) の「IAM Identity Center」）。CLIは `aws configure sso` でプロファイルを作り、`cdk deploy --profile <プロファイル名> --context stage=<環境>` で使う（SSOプロファイルへの移行は未実施。今は `default` のアクセスキー）。
+- Identity Centerの入口は `https://d-95671d6109.awsapps.com/start`（ユーザー `yamazaki`、グループ `admins`、権限セット `AdministratorAccess`。規則は [命名規則](naming-conventions.md) の「IAM Identity Center」）。CLIは `aws configure sso` で作ったプロファイルで `cdk deploy --profile <プロファイル名> --context stage=<環境>`（2026-10-25にSSOへ移行済み。長期アクセスキーは無い。手順は [セキュリティ見直し](security-review-2026-10-25.md)）。
+
+### 組織とIdentity Center（2026-10-13に読み取りで確認、2026-10-15に整理）
+
+- **Organizations はすでにある**（`o-lbme8l7xtz`、2019年2月作成、全機能有効、SCP未使用）。**管理アカウント = RnD（342082316736、exodjp@gmail.com）。**
+- 子アカウント2つ（`sandbox-1` / `sandbox-2`）は2019年に招待で参加。2026年7〜9月の費用は $0、中身は未確認。主メールは2026-10-14に gmail のプラスアドレスへ変更済み（旧 nifty は解約済みで受信不可だった）。
+- **IAM Identity Center は2021年から有効**（インスタンス `ssoins-7758a71eeb88ba75`、ID store `d-95671d6109`、入口 `https://d-95671d6109.awsapps.com/start`、別名 `zackey.awsapps.com`）。2026-10-15に整理済み: ユーザーは `yamazaki`（gmail）1人、グループ `admins` に権限セット `AdministratorAccess`（セッション8時間）が4アカウント全部へ割り当て済み。旧ユーザー2人（`yamazaki-3tyd-sso` / `-sso2`）と空の権限セット `dev` は削除。規則は [命名規則](naming-conventions.md) の「IAM Identity Center」。パスワードとパスキー2本は2026-10-25に設定済み。
+- 有効化済みの信頼されたアクセス: `access-analyzer`、`sso`、`account`（Account Management。2026-10-14）、`iam`（2026-10-15）、`cloudtrail`（2026-10-25、組織トレイル）。
+- **ルートアクセスの集中管理は有効**（2026-10-15。`RootCredentialsManagement` と `RootSessions` の両方）。子アカウントのルート資格情報は3つとも無し（sandbox-1のパスワード、sandbox-2のパスワードとU2Fキーを `sts assume-root` で削除。STGは最初から無し）。以後 `create-account` で作るアカウントはルート資格情報なしで作られ、子のルートで「パスワードを忘れた」もできない。ルートでしかできない操作の手順は [infra/README](../infra/README.md) の「子アカウントでルートが要る操作」。
+
+### 決めたこと（2026-10-13、組織とアカウント）
+
+- **管理アカウントはRnDのままにする。** 教科書は「管理アカウントにワークロードを置かない」だが、作り直すには組織の解散とIdentity Centerの組み直しが要り、1人運用で得るものに見合わない。却下理由は [先送り項目](deferred-items.md)。
+- **古い子アカウント2つは閉鎖せず、検証用に残す。** 料金はかからず、gmailのSSOユーザーで管理者として入れる。STG・本番には使わず新規作成する（メールを環境名で揃える、2019年の設定を引き継がない、管理アカウントから入るロールが自動で付く）。
+- **STG以降のアカウントは管理アカウントから `create-account` で作る。** メールは `exodjp+toytalker-stg@gmail.com` の形（環境ごとに別アドレスが要るが受信箱は1つ）。STGは2026-10-14に作成済み。管理アカウントの組織上の名前は `management`（他プロジェクトの資源も持つため。一度 `toytalker-rnd` にして翌日変えた）。
+- Identity Centerはそのまま使い、ユーザー名がまともな `yamazaki` を残してメールを gmail に付け替えた（2026-10-15完了）。グループは `test-group` → `admins`。
+
+### 決めたこと（2026-09-16、秘密と鍵）
+
+- 秘密はSecrets Managerでなく **SSM SecureString**（1件$0.40/月が不要。ローテーション・アカウント間共有を使わないため）。
+- 鍵はAWS管理キー。**CMKは本番アカウントで入れる**（DG向け本番で他の人が入る時点で効く。1鍵約$1/月）。RnD/STGはAWS管理キーのまま（自分1人なので門が増えない。2026-10-15再確認）。対象は環境変数から鍵を外したのでSSMだけ。ロードマップ7の着手時に決める: 自分用本番にも入れるか、DG向け本番で会話ログのDynamoDBにも入れるか（顧客への説明用）。後から足せる（SSMは入れ直し、DynamoDBは稼働中に切替可）。
+- STG用に鍵を分けるのは見送り、RnDと同じ値を写した（2026-10-16）。本番では分ける。
+- ファーム配布バケット `toytalker-firmware` はCDKの管理外（`fromBucketName` で参照のみ）。名前は `stages.ts` の `firmwareBucketName`。ファームは環境に属さず全機共通なので、環境ごとのスタックへ `cdk import` するのは合わない。置くアカウントと管理方法はロードマップ9で決める（2026-10-25）。
 
 ## 現状の棚卸し（2026-09-15、RnDアカウント）
 
@@ -50,9 +72,9 @@ CDKで再現する対象。
 - Function URLのホスト名がアプリとESP32ファームにハードコードされている
 - ZakiCorp TTSの監視タスク（`tools/tts-service/supervisor.py`）がLambda 6本の `ZAKICORP_TTS_URL` を関数名指定で同期している
 
-## 進め方
+## 進め方（CDK化の経過。2026-09-16で完了した分の記録）
 
-RnDでCDKを完成させてから、同じコードをSTG・本番にまっさらに出す。RnDへの `cdk deploy` はSTGができるまで本番デプロイと同じ扱いで、毎回 `cdk diff` で置き換え（Replace）が1つも出ないことを確認してから流す。コードは [infra/](../infra/README.md)。
+RnDでCDKを完成させてから、同じコードをSTG・本番にまっさらに出す。RnDへの `cdk deploy` は本番デプロイと同じ扱いで、毎回 `cdk diff` で置き換え（Replace）が1つも出ないことを確認してから流す。コードは [infra/](../infra/README.md)。7以降の残りは [ロードマップ](roadmap.md) の3・7が持つ。
 
 1. **済（2026-09-16）RnDの現状をAWS CLIで読み出した。** 上の棚卸しに反映。CloudFormationで全種類がimport可能なことも `get-template-summary` で確認した（Lambda::Url・Events::Rule・Scheduler::Schedule・SNS::Subscription・Logs::LogGroup を含む）。
 2. **済 CDKの骨組み。** `infra/` に1スタック `ToyTalker-<stage>`。Lambdaはesbuild APIで直接バンドルし、8本とも本番に入っているコードとバイト単位で一致することを確認した（`aws lambda get-function` で取得して比較）。温めルール・自分へのping・Scheduler・SNS購読を含む。ランタイムはNode 24で統一（`LAMBDA_RUNTIME` 1か所）。
@@ -63,11 +85,11 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
    - 同日06:24 JST、ESP32 OTA（main b18c70d）に合わせて2回目のdeploy: Soniox鍵発行Lambdaのタイムアウト3→5、`toytalker-devices` 書き込み、ファーム配布バケット `toytalker-firmware`（手作業で作成、CDKは `fromBucketName` で参照のみ。名前は `stages.ts` の `firmwareBucketName`）の読み取り、環境変数 `FIRMWARE_BUCKET`。デバイス設定Lambdaもmainの版へ。
    - 同日、アプリ（会話・読み上げ・設定保存・クローンボイス登録）とESP32（会話・OTA）の確認後に後片付け: 旧ロール `toytalker-ops-monthly-role` `toytalker-ops-monthly-scheduler-role` と旧Permission（Sid `FunctionURLAllowPublicAccess` `FunctionURLAllowInvokeAction` `toytalker-warmer`）を削除。**`toytalk-lambda-role-dev` は残した**（v1の旧Lambda `toytalk-openai-api-dev` `toytalk-api-raspi` がまだ使っている。API Gateway `toytalk-chat-apigateway-dev` ともども、消すなら別途判断）。
 6. **済（スクリプトのみ）マスターデータの投入スクリプト。** `infra/scripts/export-master-data.ts` / `import-master-data.ts`。出力先 `infra/master-data/` はGit対象外（人格プロンプトを含む）。
-7. **STGアカウントを作って `cdk bootstrap` → `cdk deploy`。** `stages.ts` の `account` を埋め、SSMに鍵を入れ、マスターデータを投入し、アプリとESP32の接続先をSTGへ向けて実機確認。
-8. **エンドポイントの固定名化。** Function URLはアカウントごとにホスト名が変わるので、CloudFrontを前段に置いて `api-stg.zakicorp.com` のような固定名にする（ストリーミングはCloudFront経由でも通る）。アプリは `eas.json` のビルドプロファイルで、ESP32はビルドフラグで接続先を切り替える。現在のハードコード箇所: `app/app/(tabs)/chat.tsx`・`settings.tsx`・`toy.tsx`・`app/components/ReadAloud.tsx`、ESP32は各版の `.ino`。
-9. **済（コードのみ、このPCへの反映は未実施）ZakiCorp TTSのURL同期を止める。** 固定URLのときは照合と警告だけにし、書き込みはngrok経路に限った。 公開URLが `https://tts.zakicorp.com` で固定になったので `stages.ts` の値にした。`tools/tts-service/supervisor.py` の同期はimport後に不要になる（CDKがdeployのたびに環境変数を上書きするので、同期を残すと互いに書き合う）。
-10. STGで一通り動いたら、同じスタックを自分用本番、DG向け本番の順に出す。
-11. 本番が2つになったらGitHub Actions + OIDC（アカウントごとにOIDC用ロール1つ。権限はCDKのロール群を借りるだけ。これもCDKで書く）。
+7. **済（2026-10-16、deployと投入を除く）STGアカウントの準備。** 作成・`cdk bootstrap`・SSM投入まで。`cdk deploy` とマスターデータ投入はロードマップ3（固定ドメインの後。理由はロードマップ）。
+8. **エンドポイントの固定名化（ロードマップ3）。** Function URLはアカウントごとにホスト名が変わるので、CloudFrontを前段に置いて `api-stg.zakicorp.com` のような固定名にする（ストリーミングはCloudFront経由でも通る）。アプリは `eas.json` のビルドプロファイルで、ESP32はビルドフラグで接続先を切り替える。現在のハードコード箇所: `app/app/(tabs)/chat.tsx`・`settings.tsx`・`toy.tsx`・`app/components/ReadAloud.tsx`、ESP32は各版の `.ino`。
+9. **済（コードのみ、このPCへの反映は未実施）ZakiCorp TTSのURL同期を止める。** 固定URLのときは照合と警告だけにし、書き込みはngrok経路に限った。 公開URLが `https://tts.zakicorp.com` で固定になったので `stages.ts` の値にした。`tools/tts-service/supervisor.py` の同期はimport後に不要になる（CDKがdeployのたびに環境変数を上書きするので、同期を残すと互いに書き合う）。反映はロードマップ9。
+10. STGで一通り動いたら、同じスタックを自分用本番、DG向け本番の順に出す（ロードマップ7）。
+11. ~~本番が2つになったらGitHub Actions + OIDC~~ → 2026-10-25に見送り（[先送り項目](deferred-items.md)）。
 
 ### 決めたこと（実装中に追加）
 

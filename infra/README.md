@@ -1,6 +1,6 @@
 # ToyTalker infra（AWS CDK / TypeScript）
 
-ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル・S3・SNS・温めルール・月次Scheduler）を1スタック `toytalker-<stage>`（RnDは改名まで旧名 `ToyTalker-rnd`。`config/stages.ts` の `legacyNames` と `stackName()`）で管理する。決定事項と進め方は [docs/multi-account-iac-plan.md](../docs/multi-account-iac-plan.md)。
+ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル・S3・SNS・温めルール・月次Scheduler）を1スタック `toytalker-<stage>`（RnDは改名まで旧名 `ToyTalker-rnd`。`config/stages.ts` の `legacyNames` と `stackName()`）で管理する。この文書は手順だけを持つ。いまの状態と残作業は [docs/roadmap.md](../docs/roadmap.md)、決定と根拠は [docs/multi-account-iac-plan.md](../docs/multi-account-iac-plan.md)。
 
 ## 構成
 
@@ -23,7 +23,26 @@ npx cdk diff   --context stage=rnd      # 本番との差分。Replace が1つ�
 npx cdk deploy --context stage=rnd
 ```
 
-別アカウントへ出すときは `AWS_PROFILE=<profile>` か `--profile <profile>` を付ける。設定のアカウントIDと資格情報が違えば起動時に止まる。
+資格情報はIdentity Center（SSO）。`aws sso login` 後にそのまま動く（`[default]` がRnDのSSOプロファイル。期限8時間）。別アカウントへ出すときは `AWS_PROFILE=<profile>` か `--profile <profile>` を付ける。設定のアカウントIDと資格情報が違えば起動時に止まる。
+
+## 落とし穴
+
+- **`cdk synth`/`diff`/`deploy` にはAWS資格情報が要る**（SSMの登録の有無を確かめるため。値は読まない）。起動時にアカウントIDが `stages.ts` と一致しないと止まる。**`cdk bootstrap` も `infra/` で実行するとアプリを読み込んで同じ検査で止まる**（新しいアカウントにはまだ鍵が無い）。bootstrapは cdk.json の無いディレクトリから実行する（下の「新しい環境の立ち上げ」。2026-10-15、STGで判明）。
+- **`NodejsFunction` は使っていない。** `npx esbuild` をリポジトリ直下で起動してインストール確認待ちで止まるため、esbuildのAPIを直接呼ぶ `bundleLambda` を使っている。
+- 各Lambdaディレクトリの `node_modules` が無いとバンドルできない。clone直後は `bash scripts/install-lambda-deps.sh`。
+- 名前を固定した資源（Lambda・テーブル・S3）の名前や部品IDを変えると作り直しになる。`cdk diff` の requires replacement を必ず見る。Lambdaの作り直しはFunction URLのホスト名が変わり、アプリとESP32が壊れる。
+- 新しいCloudFormation資源を既存スタックに `cdk import` するときは、import操作にそれ以外の変更を含められない（`--context importPhase=true` の仕組みは下の「importで引き取る手順」）。
+- CDKが環境変数を上書きするので、手作業でLambdaの環境変数を変えても次のdeployで戻る。
+
+## 子アカウントでルートが要る操作
+
+子アカウントのルート資格情報は無い（ルートアクセスの集中管理）。ルートでしかできない操作（S3バケットポリシー削除など）は管理アカウントから行う:
+
+```bash
+aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn=arn:aws:iam::aws:policy/root-task/<S3UnlockBucketPolicy|SQSUnlockQueuePolicy|IAMDeleteRootUserCredentials|IAMCreateRootUserPassword>
+```
+
+管理アカウント自身のルート（gmail、MFAあり）は対象外。
 
 ## 名前とタグ
 
