@@ -1,4 +1,5 @@
 import * as cdk from "aws-cdk-lib";
+import { AwsSolutionsChecks, ServerlessChecks } from "cdk-nag";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
 import { getStage, stackName } from "../config/stages.js";
 import { assertSecretsExist, loadSecrets } from "../lib/secrets.js";
@@ -8,6 +9,14 @@ import { ToyTalkerOrgStack } from "../lib/toytalker-org-stack.js";
 const app = new cdk.App();
 const config = getStage(app.node.tryGetContext("stage"));
 const importPhase = String(app.node.tryGetContext("importPhase")) === "true";
+
+// 静的点検（--context nag=true）。cdk-nag の AwsSolutions と Serverless のルールで全スタックを見る。
+// 違反はエラーになり synth が止まる。結果は cdk.out/<pack>-<stack>-NagReport.csv。
+// 意図して外すルールは lib/ 側で NagSuppressions に理由付きで書く（docs/security-review-2026-10-25.md）。
+if (String(app.node.tryGetContext("nag")) === "true") {
+  cdk.Validations.of(app).addPlugins(new AwsSolutionsChecks(app, { verbose: true }));
+  cdk.Validations.of(app).addPlugins(new ServerlessChecks(app, { verbose: true }));
+}
 
 // 別環境へ誤って流さないよう、資格情報のアカウントが設定と一致することを確かめる
 const identity = await new STSClient({ region: config.region }).send(new GetCallerIdentityCommand({}));

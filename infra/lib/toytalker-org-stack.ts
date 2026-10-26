@@ -43,5 +43,11 @@ export class ToyTalkerOrgStack extends cdk.Stack {
       managementEvents: cloudtrail.ReadWriteType.ALL,
       sendToCloudWatchLogs: false,
     });
+
+    // cdk-nag（--context nag=true）。理由は docs/security-review-2026-10-25.md
+    cdk.Validations.of(this).acknowledge({
+      id: "AwsSolutions-S1",
+      reason: "CloudTrail の保管先。非公開で、書くのは CloudTrail だけ。アクセスログ用バケットは増やさない",
+    });
   }
 }

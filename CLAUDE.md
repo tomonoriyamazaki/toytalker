@@ -46,7 +46,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **本番に影響する操作（Lambdaデプロイ・AWS設定変更・DynamoDB書き込み）と削除操作は、何をするかを説明してからユーザーの明示的なOKを得て実行する。** 説明と実行を同じターンでやらない。
 - **作業は原則worktreeで行う（1つの作業ツリーに1セッション）。** 依頼を受けたら `.claude/worktrees/<name>` にブランチを切って始め、聞かない。終わったらmainへfast-forwardし、了承を得てworktreeとブランチを消す。CLAUDE.mdなど共有ファイルの大規模整理は1セッションだけで行う。
 - 「コミットして」と言われたらコミットし、そのまま現在のブランチへpushする。PR作成・マージ・ブランチクリーンアップは明示的な指示があるまでやらない。
-- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（資格情報はSSO。CDKが環境変数を上書きするので、手作業で環境変数を変えても次のdeployで戻る）。
+- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk synth --context stage=rnd --context nag=true`（cdk-nagの静的点検。指摘ゼロ）→ `npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（資格情報はSSO。CDKが環境変数を上書きするので、手作業で環境変数を変えても次のdeployで戻る）。
 - **Lambdaのデプロイ元はmain。** デプロイ前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する（2026-09-13に別worktreeの変更を含まない作業ツリーからデプロイし、数分間本番からCartesiaが消えた）。`cdk diff` で差分が出るLambdaが意図したものだけか、Replaceが無いかを確認する。
 - PowerShellでgitコマンドを実行するとき、`Set-Location` を使わず `git` から直接実行する（パーミッション設定のパターンマッチが効かなくなるため）。
 - ビルド確認と実機確認を区別して報告する。通信・音声・メモリの安定性は、ユーザーによる実機の連続会話試験とログで確認する。

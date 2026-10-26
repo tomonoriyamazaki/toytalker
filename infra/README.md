@@ -19,9 +19,12 @@ cd infra
 npm ci
 bash scripts/install-lambda-deps.sh     # 各Lambdaディレクトリのnpm依存（初回・clone直後）
 npx cdk synth  --context stage=rnd      # テンプレート生成（cdk.out/）
+npx cdk synth  --context stage=rnd --context nag=true   # cdk-nag の静的点検。指摘があると止まる（deploy前に通す）
 npx cdk diff   --context stage=rnd      # 本番との差分。Replace が1つも無いことを確認してから deploy
 npx cdk deploy --context stage=rnd
 ```
+
+cdk-nag で受け入れる指摘は `lib/toytalker-stack.ts` の `acknowledgeNagFindings` に理由付きで書く（根拠は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md)）。
 
 資格情報はIdentity Center（SSO）。`aws sso login` 後にそのまま動く（`[default]` がRnDのSSOプロファイル。期限8時間）。別アカウントへ出すときは `AWS_PROFILE=<profile>` か `--profile <profile>` を付ける。設定のアカウントIDと資格情報が違えば起動時に止まる。
 
@@ -33,6 +36,7 @@ npx cdk deploy --context stage=rnd
 - 名前を固定した資源（Lambda・テーブル・S3）の名前や部品IDを変えると作り直しになる。`cdk diff` の requires replacement を必ず見る。Lambdaの作り直しはFunction URLのホスト名が変わり、アプリとESP32が壊れる。
 - 新しいCloudFormation資源を既存スタックに `cdk import` するときは、import操作にそれ以外の変更を含められない（`--context importPhase=true` の仕組みは下の「importで引き取る手順」）。
 - CDKが環境変数を上書きするので、手作業でLambdaの環境変数を変えても次のdeployで戻る。
+- `cdk synth` が `CredentialsProviderError: UnauthorizedException: Session token not found or invalid` で止まり、`aws sts get-caller-identity` は通るとき（2026-10-25、CLI 2.33.2）: `eval "$(aws configure export-credentials --format env)"` でCLIの資格情報を環境変数に出してから実行する。原因未確定（[セキュリティ見直し](../docs/security-review-2026-10-25.md) の「観察」）。
 
 ## 子アカウントでルートが要る操作
 

@@ -1,0 +1,26 @@
+# Lambda・CDK・アプリの npm 依存に修正版付きの脆弱性が出たら PR を作る（週1回、まとめて1本）。
+# 対象は package.json / package-lock.json があるディレクトリ。Lambda は esbuild で依存ごとバンドルして
+# デプロイするので、ここで上がった修正は `cdk diff` → `cdk deploy` で本番に入る（docs/security-review-2026-10-25.md）。
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /infra
+      - /backend/toytalk-api-stream-for-esp32-lambda
+      - /backend/toytalk-stream-handler-lambda
+      - /backend/toytalker-backchannel-for-esp32-lambda
+      - /backend/toytalker-device-setting-lambda
+      - /backend/toytalker-tts-only-lambda
+      - /app
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Asia/Tokyo
+    # 0 = 通常の版上げ PR は作らない（セキュリティ修正の PR だけ作られる）。全部上げたくなったら 5 などにする
+    open-pull-requests-limit: 0
+    groups:
+      # 脆弱性修正はまとめて1本の PR にする（Lambda ごとの PR が増えすぎないように）
+      security:
+        applies-to: security-updates
+        patterns: ["*"]

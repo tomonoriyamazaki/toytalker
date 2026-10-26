@@ -15,13 +15,14 @@
 - RnDアカウント（342082316736、管理アカウントと同居）のToyTalker資源36個は、CloudFormationスタック **`ToyTalker-rnd`** の管理下。ドリフトなし（2026-09-16確認）。
 - **Lambdaの反映は `cd infra && npx cdk diff --context stage=rnd` → `npx cdk deploy --context stage=rnd`。** `deploy.sh` / `setup.sh` は削除済み。
 - APIキー11件の正本は **SSM Parameter Store `/toytalker/<key>`**（AWS管理キーで暗号化）。Lambdaが実行時に読んでメモリに保持する（`backend/shared/secrets.mjs`。2026-10-06切替、アプリ・ESP32で実機確認済み）。環境変数には鍵の名前 `SECRET_PARAMS` だけ。鍵を替えるときはSSMを変えるだけ（5分以内に反映）。
-- IAMロールはCDKが関数ごとに作った最小権限のもの。旧ロールと旧Permissionは削除済み。**`toytalk-lambda-role-dev` だけはv1の旧Lambda 2本が使っているので残している**（9で削除判断）。
+- IAMロールはCDKが関数ごとに作った最小権限のもの。旧ロールと旧Permissionは削除済み。v1の旧ロール `toytalk-lambda-role-dev` と旧Lambda 2本・API Gatewayも2026-10-26に削除済み。アカウント内の `toytalk*` Lambdaは8本だけ。
 - **CLIはIdentity Center（SSO）で動かす**（2026-10-25）。`~/.aws/config` の `[sso-session toytalker]` と `[profile toytalker-rnd]`、`[default]` も同じSSO。IAMユーザーは `zackey`（鍵なし、緊急用コンソール）だけ。長期アクセスキーは無い。[セキュリティ見直し](security-review-2026-10-25.md)
 - Lambda 8本はNode 24、ESP32用メインのメモリは2048MB。CDK化前に本番に入っていたコードとバイト単位で一致することを確認した上で引き取った。
 - **STGは新名で合成される**（2026-10-16）。アカウント 131746731200、`cdk bootstrap` 済み、SSM鍵11件投入済み（RnDと同じ値）。`stages.ts` の `legacyNames`（RnDだけ true）で部品ID・固定名・スタック名を切り替える。deployとマスターデータ投入は3の中で。
 - **テーブル名はコードに無い**（2026-10-13）。`stages.ts` の `tableSuffix`（RnDは空）をCDKが環境変数 `TABLE_SUFFIX` で配り、`backend/shared/tables.mjs` が組む。タグ `project` / `environment` も全資源に付けた。環境名は `rnd` / `stg` / `prd` / `prd-dg`。
 - 組織 `o-lbme8l7xtz`、Identity Center（ユーザー `yamazaki`、グループ `admins`）、ルートアクセスの集中管理は整理済み。一覧は [複数アカウント計画](multi-account-iac-plan.md) の「アカウント一覧」。
 - ファーム配布バケット `toytalker-firmware` はCDKの管理外（`fromBucketName` で参照のみ）。扱いは9で決める。
+- **CDKの静的点検は `npx cdk synth --context stage=rnd --context nag=true`**（cdk-nag。指摘ゼロが前提で、受け入れる指摘は `lib/toytalker-stack.ts` の `acknowledgeNagFindings` に理由付きで書く。2026-10-25）。deploy前に `cdk diff` と合わせて通す。
 - Windows機で `infra/` の動作確認済み（2026-09-29、Node v22.19.0・Git Bash。`npm ci`、`install-lambda-deps.sh`、型チェック、`cdk diff` が差分なし）。
 
 ## 順番
@@ -35,8 +36,9 @@
 | 5 | Cartesia 429時のずんだもんフォールバック、ZakiCorp TTS待ち行列の可視化 | 全部 | 実機確認 | 仕様あり、未着手 | [TTSフォールバック](tts-fallback-and-notifications.md)、[先送り項目](deferred-items.md) の「待ち行列の可視化」 |
 | 6 | ESP32: 検索後の誤停止対策、OTA検証3件（電源断・SHA改ざん・ロールバック）、`stable` 発行、配布機のUSB書き込み、アプリの版表示と `fw_channel` 切替 | コード | 実機・S3操作・USB書き込み | 誤停止は原因仮説のみ・対策未合意 | [OTA引き継ぎ](handoff-esp32-ota-2026-09-16.md) |
 | 7 | RnDの改名 → 自分用本番（CMK込み）→ DG向け本番 | 大半 | アカウント作成×2、実機確認 | 未着手。3の後。GitHub Actions + OIDCは外した（[先送り項目](deferred-items.md)、2026-10-25） | [複数アカウント計画](multi-account-iac-plan.md) の「決めたこと」（CMKは本番で入れる）と「命名」 |
-| 8 | セキュリティ強化: PITR・依存更新・CloudTrail組織トレイル・CLIのSSO化と長期鍵の削除。所有者確認は4、レート制限は3で | コード | SSOのパスワード設定、deployと削除のOK | 済（2026-10-25）。残りは4（所有者確認）と3（レート制限）の中で | [セキュリティ見直し](security-review-2026-10-25.md) |
-| 9 | 小物: v1残骸の削除（旧ロール・旧Lambda 2本・API Gateway・孤立ロググループ）、`toytalker-firmware` の扱い（ファームは環境に属さず全機共通なので、環境ごとのスタックへ取り込むのは合わない。どのアカウントに置き、どう管理するかを別途決める。2026-10-25）、Soniox Lambda 128→256MB（コールドスタート時のSSM取得が約0.9秒。他は1〜2GBで約0.2秒。温めで普段は起きない）、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手。v1残骸の内訳: `toytalk-lambda-role-dev`、`toytalk-openai-api-dev`、`toytalk-api-raspi`、API Gateway `toytalk-chat-apigateway-dev`、孤立ロググループ `/aws/lambda/toytalk-stream-handler-for-esp32-lambda` | [ZakiCorp TTS](zakicorp-tts.md) |
+| 8 | セキュリティ強化: PITR・依存更新・CloudTrail組織トレイル・CLIのSSO化と長期鍵の削除（済）。**IaC点検の残り**: (a) CDK修正のdeploy（S3/SNSのTLS強制、設定Lambda・Soniox LambdaのIAM縮小）、(b) v1残骸の削除（済 2026-10-26。残りはOpenAI鍵の作り直し判断）、(c) セキュリティ連絡先とIAMパスワードポリシー、(d) GitHubでDependabot alerts / security updates をON、(e) 決める: 同時実行上限とアラーム、ログ保持期間、アカウント単位の公開ブロック。所有者確認は4、レート制限は3で | (a)(c)の実行 | (a)(c)のOK、(d)はリポジトリ設定、(e)の値 | 1回目済（2026-10-25）。2回目は(b)済、(a)(c)(d)(e)が未 | [セキュリティ見直し](security-review-2026-10-25.md) の「IaC化した設定の点検」 |
+| 9 | 小物: `toytalker-firmware` のTLS強制（CDKへの取り込みと同時に）、ToyTalker外の残骸の棚卸し（Prowlerの一覧は [セキュリティ見直し](security-review-2026-10-25.md) の「ベストプラクティス照合」）、`toytalker-firmware` の扱い（ファームは環境に属さず全機共通なので、環境ごとのスタックへ取り込むのは合わない。どのアカウントに置き、どう管理するかを別途決める。2026-10-25）、Soniox Lambda 128→256MB（コールドスタート時のSSM取得が約0.9秒。他は1〜2GBで約0.2秒。温めで普段は起きない）、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手（v1残骸は8(b)で2026-10-26に削除済み） | [ZakiCorp TTS](zakicorp-tts.md) |
+| 10 | **消されても戻せる仕組み**（2026-10-26。前提: 全部が同じアカウントにあるので、管理者権限の誤用・乗っ取り・AI操作の誤承認で PITR やバージョンごと消せる）: (a) **別アカウントの不変バックアップ**（根治）。AWS Backup で DynamoDB 8テーブルと S3 `toytalker-tts-speakers` / `toytalker-firmware` を日次で別アカウント（`toytalker-stg` 兼用か専用アカウント）の保管庫へコピーし、Vault Lock（= 不変・イミュータブルバックアップ。コンプライアンスモード、保持35日程度）で RnD の管理者にも root にも消せなくする。別リージョン退避は不要（権限が同じなら別リージョンでも消せる。守る相手は障害でなく権限の誤用）。データは合計約6MBで月数十円。(b) **復元訓練**（根治）。PITR から1テーブルを別名で復元して中身を確かめて消す。手順を [セキュリティ見直し](security-review-2026-10-25.md) に書く。(c) **URLの固定**は3のCloudFront固定ドメインで解決（Function URL 5本がESP32・アプリに直書きで、スタック再作成でつながらなくなる）。(d) **鍵の再発行手順**（痛み止め）。SSMの鍵11本はAWSにしかないので、発行元と手順を文書化（値は書かない。名前は `infra/lib/secrets.ts`）。(e) CloudTrail バケットのバージョニング（痛み止め） | (a)のCDK、(b)、(d)、(e) | (a)の保管先アカウントの決定、Vault Lock は不可逆なので保持日数のOK、(b)の実施OK | 未着手。設計のみ | [セキュリティ見直し](security-review-2026-10-25.md) |
 
 並べた理由: 1は2以降の名前の前提。8（セキュリティ）は4の前に済ませる。4〜6は2〜3と独立なので、ユーザーの手待ちの間にClaudeが進められる。7は本番なので最後。**3はDG向け展開の構成が決まってから**（下記）なので、当面は4〜6をRnDで進める。
 

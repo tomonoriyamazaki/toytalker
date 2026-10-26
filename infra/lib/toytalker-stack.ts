@@ -109,6 +109,8 @@ interface FunctionSpec {
   readonly selfWarm: boolean;
   readonly readTables: readonly TableKey[];
   readonly readWriteTables: readonly TableKey[];
+  /** 読み取りに加えて UpdateItem だけ許すテーブル（Put/Delete は許さない） */
+  readonly updateTables?: readonly TableKey[];
 }
 
 // Function URLのCORS。既存設定をそのまま再現している（AllowHeadersがカンマ区切りの1要素なのも現状どおり）
@@ -218,8 +220,9 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY },
     warm: true,
     selfWarm: false,
-    readTables: [],
-    readWriteTables: ["devices"], // firmware_version 等を UpdateItem で記録
+    readTables: ["devices"],
+    readWriteTables: [],
+    updateTables: ["devices"], // firmware_version 等を UpdateItem で記録（Put/Delete は不要）
   },
   {
     key: "settings-app",
@@ -233,11 +236,10 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY },
     warm: false,
     selfWarm: false,
-    readTables: [],
-    readWriteTables: [
-      "devices", "characters", "voices", "llms",
-      "chat-logs", "usage", "api-unit-prices", "exchange-rates",
-    ],
+    // 書くのは devices / characters / voices だけ（index.mjs の Put/Update/Delete の対象）。
+    // 単価・為替・LLM一覧・会話ログ・使用量は読むだけなので、IAMでも書けないようにする（2026-10-25）
+    readTables: ["llms", "chat-logs", "usage", "api-unit-prices", "exchange-rates"],
+    readWriteTables: ["devices", "characters", "voices"],
   },
   {
     key: "read-aloud-app",
@@ -298,6 +300,7 @@ export class ToyTalkerStack extends cdk.Stack {
       encryption: s3.BucketEncryption.S3_MANAGED,
       bucketKeyEnabled: true,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      enforceSSL: true, // 平文HTTPのアクセスを拒否するバケットポリシー（Security Hub S3.5。2026-10-25）
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -311,7 +314,10 @@ export class ToyTalkerStack extends cdk.Stack {
     const names = new Map(FUNCTIONS.map((spec) => [spec.key, resolveNames(spec, config)] as const));
     const nameOf = (key: string) => names.get(key)!;
 
-    const opsTopic = new sns.Topic(this, "OpsMonthlyTopic", { topicName: fixed.opsTopic });
+    const opsTopic = new sns.Topic(this, "OpsMonthlyTopic", {
+      topicName: fixed.opsTopic,
+      enforceSSL: true, // 平文HTTPでのPublishを拒否するトピックポリシー（2026-10-25）
+    });
     opsTopic.applyRemovalPolicy(RETAIN);
     opsTopic.addSubscription(new subs.EmailSubscription(config.opsEmail));
     for (const sub of opsTopic.node.findAll()) if (sub instanceof sns.CfnSubscription) sub.applyRemovalPolicy(RETAIN);
@@ -405,6 +411,7 @@ export class ToyTalkerStack extends cdk.Stack {
       if (!importPhase) {
         for (const t of spec.readTables) tables[t].grantReadData(fn);
         for (const t of spec.readWriteTables) tables[t].grantReadWriteData(fn);
+        for (const t of spec.updateTables ?? []) tables[t].grant(fn, "dynamodb:UpdateItem");
         // 秘密の実行時取得。SecureStringの復号はAWS管理キー（aws/ssm）ならSSM経由で許可される
         fn.addToRolePolicy(new iam.PolicyStatement({
           actions: ["ssm:GetParameters"],
@@ -475,6 +482,33 @@ export class ToyTalkerStack extends cdk.Stack {
       }),
     });
     opsSchedule.applyRemovalPolicy(RETAIN);
+
+    this.acknowledgeNagFindings();
+  }
+
+  /**
+   * cdk-nag（`cdk synth --context nag=true`）で意図して受け入れている指摘。根拠は docs/security-review-2026-10-25.md。
+   * ここに無い指摘が出たら、直すか、理由を書いてここに足す。
+   */
+  private acknowledgeNagFindings(): void {
+    const ack = (id: string, reason: string) => cdk.Validations.of(this).acknowledge({ id, reason });
+    ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole]",
+      "Lambdaの標準ロググループ書き込み（CloudWatch Logs のみ）。resourceは自関数のログに限られる");
+    for (const action of ["s3:GetObject*", "s3:GetBucket*", "s3:List*", "s3:DeleteObject*", "s3:Abort*"]) {
+      ack(`AwsSolutions-IAM5[Action::${action}]`, "grantRead / grantReadWrite が生成する動詞のワイルドカード。対象は1バケットに限定");
+    }
+    ack("AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:s3:::toytalker-firmware/*]",
+      "ファーム配布バケットのオブジェクト全部を読む（manifest と .bin）。バケット1つに限定");
+    ack("AwsSolutions-IAM5[Resource::<SpeakersBucket6044DDC1.Arn>/*]",
+      "クローンボイスの speaker embedding を保存・削除する。バケット1つに限定");
+    ack("AwsSolutions-IAM5[Resource::<OpsMonthlyCC65D2A5.Arn>:*]",
+      "EventBridge Scheduler が月次Lambdaのバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
+    ack("AwsSolutions-S1", "非公開・単一利用者のバケット。アクセスログ用バケットを増やす価値が小さい（CloudTrail でAPI操作は追える）");
+    ack("Serverless-LambdaDLQ", "呼び出しは Function URL（同期）と温め・月次（失敗はログで見て手動再実行）。DLQ を置く非同期処理が無い");
+    ack("Serverless-EventBusDLQ", "温めpingのみ。取りこぼしても5分後に再実行される");
+    ack("Serverless-SNSRedrivePolicy", "メール購読のみ。配信失敗の再処理先は不要");
+    ack("Serverless-CloudWatchLogGroupRetentionPeriod", "引き取り時の設定（無期限）を維持。保持期間はロードマップ8(e)で決める");
+    ack("Serverless-LambdaTracing", "X-Ray は使っていない。必要になったら有効化する（費用と情報量の追加）");
   }
 
   private createTables(tableSuffix: string): Record<TableKey, dynamodb.Table> {
