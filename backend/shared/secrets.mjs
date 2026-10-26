@@ -8,7 +8,8 @@ const REFRESH_MS = 5 * 60 * 1000;
 const CHUNK = 10; // GetParameters の上限
 
 const params = JSON.parse(process.env.SECRET_PARAMS || "{}");
-const ssm = new SSMClient({});
+// 死んだ接続で待たされないよう短めに切る（切れたら SDK が新しい接続で再試行する）
+const ssm = new SSMClient({ requestHandler: { connectionTimeout: 2000, requestTimeout: 3000 } });
 
 let values = {};
 let loadedAt = 0;
@@ -45,10 +46,13 @@ function refresh() {
 // 初期化フェーズで取得を始める（handlerの ensureSecrets が完了を待つ）
 refresh();
 
-/** handlerの先頭で呼ぶ。初回は取得完了を待ち、以降は5分を過ぎていたら裏で取り直す */
+/**
+ * handlerの先頭で呼ぶ。初回も5分経過後も、取得が終わるまで待つ（通常は数十ms）。
+ * 以前は5分経過後を待たずに裏で取り直していたが、Lambda は応答を返すと実行を凍結するので、
+ * warmup ping のたびに取り直しが途中で止まり、次の ping で接続エラーになっていた（1日約165件、2026-10-26に修正）。
+ */
 export async function ensureSecrets() {
-  if (!loadedAt) await refresh();
-  else if (Date.now() - loadedAt > REFRESH_MS) refresh();
+  if (!loadedAt || Date.now() - loadedAt > REFRESH_MS) await refresh();
 }
 
 /**
