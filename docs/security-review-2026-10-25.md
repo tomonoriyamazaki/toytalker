@@ -108,7 +108,7 @@ Security Hubは有効化せず（Configが前提で費用が出る。本番で�
 | Lambda.1 公開ポリシー（Function URL 7本） | 既知。CloudFront + WAF（3）と認証（4）で扱う。Access Analyzerの「公開」指摘もこの7本と `zackey.xyz`、Identity Centerのロール（正常） |
 | 検知: CloudWatchアラームなし、同時実行は既定の1000を共有、予算 $5 / $10 のみ | 費用燃やし（問題3）の天井が無い |
 
-Prowler（`prowler aws -f ap-northeast-1 us-east-1 --compliance aws_foundational_security_best_practices_aws`、読み取りのみ）の結果: 154基準中、合格のみ34、不合格あり39（残りは対象資源なし）。ToyTalker資源の不合格は上の表と同じ（Lambda.1、S3.5、S3.17、CloudTrail.2/5/7、SNS.1、DynamoDB.4=AWS Backupの計画なし。PITRで足りるので保留）。それ以外は **ToyTalker外の残骸**で、9の削除候補に足す: S3 `abc-test-342082316736` と `-modify-s3policy`（公開ブロックなし）、`toytalk.zakicorp.com`、`aws-athena-query-results-*`、ECSタスク定義 `a`、ECRリポジトリ `test`、SNS `test` / `ABC-topic-yamazaki`、Lambda `lambda-mail`（python3.8）/ `test`（python3.8）/ `ABC-modify-s3-policy-lambda`、API Gateway `api-mail`、KMS CMK 2本（ローテーションなし）、CloudFront 1本（`zackey.xyz` 向けと思われる。ログ・WAFなし）。IAM.1（`AdministratorAccess`）はIdentity Centerの権限セットで想定どおり。
+Prowler（`prowler aws -f ap-northeast-1 us-east-1 --compliance aws_foundational_security_best_practices_aws`、読み取りのみ）の結果: 154基準中、合格のみ34、不合格あり39（残りは対象資源なし）。ToyTalker資源の不合格は上の表と同じ（Lambda.1、S3.5、S3.17、CloudTrail.2/5/7、SNS.1、DynamoDB.4=AWS Backupの計画なし。PITRで足りるので保留）。それ以外は **ToyTalker外の残骸**で、9の削除候補に足す: S3 `abc-test-342082316736` と `-modify-s3policy`（公開ブロックなし）、`toytalk.zakicorp.com`、`aws-athena-query-results-*`、ECSタスク定義 `a`、ECRリポジトリ `test`、SNS `test` / `ABC-topic-yamazaki`、Lambda `lambda-mail`（python3.8）/ `test`（python3.8）/ `ABC-modify-s3-policy-lambda`、API Gateway `api-mail`、KMS CMK 2本（v1の `toytalk-kms-dev` / `-prod`。2026-10-27 に削除予約、2026-11-26 に消える。旧デモサイトのバケットは標準暗号化へ戻した）、CloudFront 1本（`zackey.xyz` 向けと思われる。ログ・WAFなし）。IAM.1（`AdministratorAccess`）はIdentity Centerの権限セットで想定どおり。
 
 ### 3. 依存の脆弱性を継続的に見る仕組み
 
