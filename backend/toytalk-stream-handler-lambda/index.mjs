@@ -126,8 +126,9 @@
     }
   }
 
-  function calcCostJpy({ providerApiType, tokensIn, tokensOut, characters, utf8Bytes, mora, pcmBytes, userMessageChars, requests, usdJpyRate }) {
-    const price = cachedPrices?.[providerApiType];
+  function calcCostJpy({ providerApiType, model, tokensIn, tokensOut, characters, utf8Bytes, mora, pcmBytes, userMessageChars, requests, usdJpyRate }) {
+    // モデル別の行（例 anthropic#llm#claude-haiku-5-5）があればそれ、無ければプロバイダー行（anthropic#llm）
+    const price = (model && cachedPrices?.[`${providerApiType}#${model}`]) || cachedPrices?.[providerApiType];
     if (!price) {
       // 単価行が無いと記録されない。月次の運用Lambdaがこのログを拾って知らせる
       console.warn(`[Pricing] missing price for ${providerApiType}`);
@@ -869,13 +870,19 @@
       return { systemMsg, contents };
     }
 
+    // Gemini の思考は切る（会話の遅延と、記録されない思考トークンを避ける）。
+    // 2.5系は thinkingBudget:0、3系は thinkingLevel:"minimal"（3系に thinkingBudget を送ると 400）
+    function geminiThinkingConfig(model) {
+      return /^gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: "minimal" };
+    }
+
     function streamLLMGemini(msgs, model, { tools = null } = {}) {
       const { systemMsg, contents } = buildGeminiContents(msgs);
       const reqBody = { contents };
       if (systemMsg) {
         reqBody.systemInstruction = { parts: [{ text: systemMsg.content }] };
       }
-      reqBody.generationConfig = { temperature: 0.7 };
+      reqBody.generationConfig = { temperature: 0.7, thinkingConfig: geminiThinkingConfig(model) };
       if (tools) {
         reqBody.tools = [{ function_declarations: tools }];
       }
@@ -893,9 +900,13 @@
           const errText = await resp.text();
           throw new Error(`Gemini API error: ${resp.status} ${errText}`);
         }
+        // usageMetadata は各チャンクに「ここまでの累計」が付く。足し込むと入力がチャンク数倍になるので
+        // この要求の最後の値を持ち、終了時に合計へ足す（検索ありのターンは要求が2回になる）
+        let reqIn = 0, reqOut = 0;
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let sbuf = "";
+        try {
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
@@ -910,8 +921,8 @@
               const parsed = JSON.parse(data);
               const parts = parsed.candidates?.[0]?.content?.parts ?? [];
               if (parsed.usageMetadata) {
-                llmTokensIn  += parsed.usageMetadata.promptTokenCount ?? 0;
-                llmTokensOut += parsed.usageMetadata.candidatesTokenCount ?? 0;
+                reqIn  = parsed.usageMetadata.promptTokenCount ?? reqIn;
+                reqOut = parsed.usageMetadata.candidatesTokenCount ?? reqOut;
               }
               for (const part of parts) {
                 if (part.functionCall) {
@@ -923,6 +934,10 @@
             } catch {}
           }
         }
+        } finally {
+          llmTokensIn  += reqIn;
+          llmTokensOut += reqOut;
+        }
       })();
     }
 
@@ -930,13 +945,20 @@
       const systemMsg = msgs.find(m => m.role === "system");
       const chatMsgs = msgs.filter(m => m.role !== "system");
 
+      // Claude 4.6 以降は temperature を送ると 400、代わりに effort で思考量を抑える（会話用は low）。
+      // Haiku 4.5 など旧世代は逆に effort を受け付けないので temperature のまま
+      const legacyAnthropic = /^claude-(3-|haiku-4-5|sonnet-4-5|opus-4-5)/.test(model);
       const reqBody = {
         model,
         max_tokens: 1024,
         stream: true,
-        temperature: 0.7,
         messages: chatMsgs,
       };
+      if (legacyAnthropic) {
+        reqBody.temperature = 0.7;
+      } else {
+        reqBody.output_config = { effort: "low" };
+      }
       if (systemMsg) {
         reqBody.system = systemMsg.content;
       }
@@ -957,6 +979,7 @@
           const errText = await resp.text();
           throw new Error(`Anthropic API error: ${resp.status} ${errText}`);
         }
+        let yielded = false;
         const reader = resp.body.getReader();
         const decoder = new TextDecoder();
         let sbuf = "";
@@ -973,9 +996,14 @@
               const parsed = JSON.parse(data);
               if (parsed.type === "content_block_delta") {
                 const text = parsed.delta?.text ?? "";
-                if (text) yield text;
-              } else if (parsed.type === "message_delta" && parsed.usage) {
-                llmTokensOut = parsed.usage.output_tokens ?? 0;
+                if (text) { yielded = true; yield text; }
+              } else if (parsed.type === "message_delta") {
+                if (parsed.usage) llmTokensOut = parsed.usage.output_tokens ?? 0;
+                // 安全分類器による拒否（4.6以降）。本文が無いまま終わると無音になるので一言返す
+                if (parsed.delta?.stop_reason === "refusal") {
+                  console.warn(`[Anthropic] refusal: ${JSON.stringify(parsed.delta?.stop_details ?? null)}`);
+                  if (!yielded) { yielded = true; yield "ごめんね、そのおはなしはできないんだ。ほかのおはなしをしよう！"; }
+                }
               } else if (parsed.type === "message_start" && parsed.message?.usage) {
                 llmTokensIn = parsed.message.usage.input_tokens ?? 0;
               } else if (parsed.type === "message_stop") {
@@ -1200,7 +1228,7 @@
 
         // LLM
         const llmPriceKey = `${llmProvider}#llm`;
-        const llmCost = calcCostJpy({ providerApiType: llmPriceKey, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate });
+        const llmCost = calcCostJpy({ providerApiType: llmPriceKey, model: llmModelId, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate });
         if (llmCost) {
           await addUsage({ ownerId, deviceId, date, apiType: "llm", provider: llmProvider, model: llmModelId, costJpy: llmCost.costJpy, costUsd: llmCost.costUsd, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate: llmCost.usdJpyRate, unitPriceUsd: llmCost.unitPriceUsd, margin: llmCost.margin });
         }
