@@ -10,6 +10,7 @@
   import { Agent, setGlobalDispatcher } from "undici";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
+  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
   // 会話の間が数秒空くとLLM/TTSへのTLS接続が閉じられ、次のターンで
@@ -42,46 +43,6 @@
       Payload: Buffer.from(JSON.stringify({ body: '{"warmup":true}' })),
     })).catch(() => {});
   }
-
-  // ---- Web検索（Serper） ----
-  async function searchWeb(query, numResults = 3) {
-    const SERPER_API_KEY = secret("SERPER_API_KEY");
-    if (!SERPER_API_KEY) throw new Error("SERPER_API_KEY is not set");
-    console.log(`[SearchWeb] query=${JSON.stringify(query)} bytes=${Buffer.byteLength(query, 'utf8')}`);
-    const resp = await fetch("https://google.serper.dev/search", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-KEY": SERPER_API_KEY },
-      body: JSON.stringify({ q: query, num: numResults, safe: "active", gl: "jp", hl: "ja" }),
-    });
-    if (!resp.ok) throw new Error(`Serper API error: ${resp.status}`);
-    const data = await resp.json();
-    const results = (data.organic ?? []).slice(0, numResults).map(item => ({
-      title: item.title ?? "",
-      snippet: item.snippet ?? "",
-      url: item.link ?? "",
-    }));
-    console.log(`[SearchWeb] results: ${JSON.stringify(results.map(r => r.title))}`);
-    return results;
-  }
-
-  // 外部の有料APIを呼ぶツールの課金情報。ここに無いツール（デバイス設定変更など）は無料扱いで、
-  // かかるLLMトークンはLLM側に含まれる。単価は toytalker-api-unit-prices の `${provider}#tool` 行。
-  const PAID_TOOLS = {
-    web_search: { provider: "serper", model: "google-search" },
-  };
-
-  // 検索結果と一緒に渡す指示。検索直後のターンだけに効かせ、通常ターンの口調には影響させない。
-  const TOOL_RESULT_INSTRUCTION = "この検索結果をもとに答えてください。「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は入れず、答えの中身から話し始めてください。口調や温かさはいつも通りのキャラクターのままで、そのあとも自然に会話を続けてください。";
-
-  const WEB_SEARCH_TOOL = {
-    name: "web_search",
-    description: "子供の質問に答えるためにウェブ検索する。知識にない最新情報や具体的な事実を調べるときに使う。",
-    parameters: {
-      type: "object",
-      properties: { query: { type: "string", description: "検索クエリ" } },
-      required: ["query"],
-    },
-  };
 
   const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
   const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -805,7 +766,9 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     const backchannelHint = backchannelFired ? "\n【重要】相槌は別途再生済みです。冒頭の相槌・挨拶・オウム返しは不要です。本題から返答を始めてください。口調や温かさはいつも通りのままにしてください。" : "";
     // 検索後の「前置きなし」指示はシステムプロンプトに置かず、検索結果を返すメッセージ側（TOOL_RESULT_INSTRUCTION）に添える。
     // システムプロンプトに置くと通常ターンの口調まで素っ気なくなるため。
-    const toolHint = secret("SERPER_API_KEY") ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。" : "";
+    // 検索ツールは3社共通（backend/shared/llm.mjs）。プロンプトの「検索できます」と実際のツール付与は必ず同じ条件にする
+    const enableTools = !!secret("SERPER_API_KEY");
+    const toolHint = enableTools ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。" : "";
     const basePrompt = `あなたは子供向けの友好的な音声アシスタントです。簡潔に答えて、自然に会話を続けてください。単語の間に半角スペースを入れないでください。現在の日時は${now}です。日時を聞かれたら年は省略して簡潔に答えてください。相手が話した言語で返答してください。${backchannelHint}${toolHint}`;
     const systemPrompt = {
       role: "system",
@@ -820,212 +783,15 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     let lastSegHash = "";
     let firstTtsMarked = false;
     let ttsChain = Promise.resolve();
-    let llmTokensIn = 0, llmTokensOut = 0;
+    const llmUsage = { in: 0, out: 0 }; // LLMトークン数（検索ありのターンは2要求分の合計）
     let ttsInputChars = 0;
     const toolCalls = {};  // ツール名→成功回数。PAID_TOOLSに載っているものだけ課金対象
     let ttsFallbackActive = false;   // この返答でずんだもんへ切り替え済みか
     let ttsFallbackChars = 0;        // ずんだもんで生成した文字数（Sakura分として記録）
 
-    // ---- LLM ストリーム生成 ----
-    function streamLLMOpenAI(msgs, model) {
-      return (async function* () {
-        const llm = await getOpenAI().chat.completions.create({
-          model,
-          temperature: 0.7,
-          stream: true,
-          stream_options: { include_usage: true },
-          messages: msgs,
-        });
-        for await (const chunk of llm) {
-          if (chunk.usage) {
-            llmTokensIn  = chunk.usage.prompt_tokens     ?? 0;
-            llmTokensOut = chunk.usage.completion_tokens ?? 0;
-          }
-          const delta = chunk.choices?.[0]?.delta?.content ?? "";
-          if (delta) yield delta;
-        }
-      })();
-    }
-
-    function buildGeminiContents(msgs) {
-      const systemMsg = msgs.find(m => m.role === "system");
-      const chatMsgs = msgs.filter(m => m.role !== "system");
-      const contents = chatMsgs.map(m => {
-        if (m.role === "assistant" && m.functionCall) {
-          return { role: "model", parts: [{ functionCall: m.functionCall }] };
-        }
-        if (m.role === "user" && m.functionResponse) {
-          return { role: "user", parts: [{ functionResponse: m.functionResponse }] };
-        }
-        return {
-          role: m.role === "assistant" ? "model" : m.role,
-          parts: [{ text: m.content }],
-        };
-      });
-      return { systemMsg, contents };
-    }
-
-    // Gemini の思考は切る（会話の遅延と、記録されない思考トークンを避ける）。
-    // 2.5系は thinkingBudget:0、3系は thinkingLevel:"minimal"（3系に thinkingBudget を送ると 400）
-    function geminiThinkingConfig(model) {
-      return /^gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: "minimal" };
-    }
-
-    function streamLLMGemini(msgs, model, { tools = null } = {}) {
-      const { systemMsg, contents } = buildGeminiContents(msgs);
-      const body = { contents };
-      if (systemMsg) {
-        body.systemInstruction = { parts: [{ text: systemMsg.content }] };
-      }
-      body.generationConfig = { temperature: 0.7, thinkingConfig: geminiThinkingConfig(model) };
-      if (tools) {
-        body.tools = [{ function_declarations: tools }];
-      }
-
-      const key = secret("GOOGLE_API_KEY");
-      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${key}`;
-
-      return (async function* () {
-        const resp = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!resp.ok) {
-          const errText = await resp.text();
-          throw new Error(`Gemini API error: ${resp.status} ${errText}`);
-        }
-        // usageMetadata は各チャンクに「ここまでの累計」が付く。足し込むと入力がチャンク数倍になるので
-        // この要求の最後の値を持ち、終了時に合計へ足す（検索ありのターンは要求が2回になる）
-        let reqIn = 0, reqOut = 0;
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-        try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop();
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const data = line.slice(6).trim();
-            if (data === "[DONE]") return;
-            try {
-              const parsed = JSON.parse(data);
-              const parts = parsed.candidates?.[0]?.content?.parts ?? [];
-              if (parsed.usageMetadata) {
-                reqIn  = parsed.usageMetadata.promptTokenCount ?? reqIn;
-                reqOut = parsed.usageMetadata.candidatesTokenCount ?? reqOut;
-              }
-              for (const part of parts) {
-                if (part.functionCall) {
-                  yield { __toolCall: true, name: part.functionCall.name, args: part.functionCall.args };
-                  return;
-                }
-                if (part.text !== undefined && !part.thought) {
-                  if (part.text) yield part.text;
-                }
-              }
-            } catch {}
-          }
-        }
-        } finally {
-          llmTokensIn  += reqIn;
-          llmTokensOut += reqOut;
-        }
-      })();
-    }
-
-    function streamLLMAnthropic(msgs, model) {
-      const systemMsg = msgs.find(m => m.role === "system");
-      const chatMsgs = msgs.filter(m => m.role !== "system");
-
-      // Claude 4.6 以降は temperature を送ると 400、代わりに effort で思考量を抑える（会話用は low）。
-      // Haiku 4.5 など旧世代は逆に effort を受け付けないので temperature のまま
-      const legacyAnthropic = /^claude-(3-|haiku-4-5|sonnet-4-5|opus-4-5)/.test(model);
-      const body = {
-        model,
-        max_tokens: 1024,
-        stream: true,
-        messages: chatMsgs,
-      };
-      if (legacyAnthropic) {
-        body.temperature = 0.7;
-      } else {
-        body.output_config = { effort: "low" };
-      }
-      if (systemMsg) {
-        body.system = systemMsg.content;
-      }
-
-      const key = secret("ANTHROPIC_API_KEY");
-
-      return (async function* () {
-        const resp = await fetch("https://api.anthropic.com/v1/messages", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-api-key": key,
-            "anthropic-version": "2023-06-01",
-          },
-          body: JSON.stringify(body),
-        });
-        if (!resp.ok) {
-          const errText = await resp.text();
-          throw new Error(`Anthropic API error: ${resp.status} ${errText}`);
-        }
-        let yielded = false;
-        const reader = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buf = "";
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buf += decoder.decode(value, { stream: true });
-          const lines = buf.split("\n");
-          buf = lines.pop();
-          for (const line of lines) {
-            if (!line.startsWith("data: ")) continue;
-            const data = line.slice(6).trim();
-            try {
-              const parsed = JSON.parse(data);
-              if (parsed.type === "content_block_delta") {
-                const text = parsed.delta?.text ?? "";
-                if (text) { yielded = true; yield text; }
-              } else if (parsed.type === "message_delta") {
-                if (parsed.usage) llmTokensOut = parsed.usage.output_tokens ?? 0;
-                // 安全分類器による拒否（4.6以降）。本文が無いまま終わると無音になるので一言返す
-                if (parsed.delta?.stop_reason === "refusal") {
-                  console.warn(`[Anthropic] refusal: ${JSON.stringify(parsed.delta?.stop_details ?? null)}`);
-                  if (!yielded) { yielded = true; yield "ごめんね、そのおはなしはできないんだ。ほかのおはなしをしよう！"; }
-                }
-              } else if (parsed.type === "message_start" && parsed.message?.usage) {
-                llmTokensIn = parsed.message.usage.input_tokens ?? 0;
-              } else if (parsed.type === "message_stop") {
-                return;
-              }
-            } catch {}
-          }
-        }
-      })();
-    }
-
-    const enableTools = llmProvider === "google" && secret("SERPER_API_KEY");
+    // ---- LLM ストリーム（共通モジュール。会社ごとの違いは backend/shared/llm.mjs に閉じる）----
     const toolsDef = enableTools ? [WEB_SEARCH_TOOL] : null;
-
-    function createLLMStream(msgs) {
-      if (llmProvider === "openai") {
-        return streamLLMOpenAI(msgs, llmModelId);
-      } else if (llmProvider === "google") {
-        return streamLLMGemini(msgs, llmModelId, { tools: toolsDef });
-      } else if (llmProvider === "anthropic") {
-        return streamLLMAnthropic(msgs, llmModelId);
-      } else {
-        return (async function* () { yield "（LLM ルート未実装です）"; })();
-      }
-    }
+    const createLLMStream = (msgs, opts = {}) => chatStream({ provider: llmProvider, model: llmModelId, messages: msgs, tools: toolsDef, usage: llmUsage, ...opts });
 
     let llmStream = createLLMStream(messagesWithSystem);
 
@@ -1128,7 +894,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       // ---- LLM ストリーム処理（tool callループ対応）----
       let toolCallDetected = false;
       for await (const delta of llmStream) {
-        if (delta && delta.__toolCall) {
+        if (delta.type === "toolCall") {
           toolCallDetected = true;
           console.log(`[ToolCall] ${delta.name}(${JSON.stringify(delta.args)})`);
           // tool call前のつなぎテキストをflush
@@ -1153,20 +919,18 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
             toolResult = { error: `Unknown tool: ${delta.name}` };
           }
 
-          messagesWithSystem.push(
-            { role: "assistant", functionCall: { name: delta.name, args: delta.args } },
-            { role: "user", functionResponse: { name: delta.name, response: { results: toolResult, instruction: TOOL_RESULT_INSTRUCTION } } }
-          );
-          llmStream = createLLMStream(messagesWithSystem);
+          messagesWithSystem.push(...toolRoundMessages(delta, { results: toolResult, instruction: TOOL_RESULT_INSTRUCTION }));
+          // 2回目は検索結果で答えさせる（Gemini 3系は再検索を要求しがちで、無視すると本文が空になる）
+          llmStream = createLLMStream(messagesWithSystem, { toolChoice: "none" });
 
           for await (const delta2 of llmStream) {
-            if (delta2 && delta2.__toolCall) {
+            if (delta2.type === "toolCall") {
               console.log(`[ToolCall] nested tool call ignored: ${delta2.name}`);
               break;
             }
-            textAll += delta2;
-            buf     += delta2;
-            if (DEBUG) sendMeta(res, "llm_token", { token: delta2 });
+            textAll += delta2.text;
+            buf     += delta2.text;
+            if (DEBUG) sendMeta(res, "llm_token", { token: delta2.text });
             let match;
             while ((match = buf.match(/^(.*?[。！？!?])\s*/s))) {
               const segText = match[1].trim();
@@ -1181,9 +945,9 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           }
           break;
         }
-        textAll += delta;
-        buf     += delta;
-        if (DEBUG) sendMeta(res, "llm_token", { token: delta });
+        textAll += delta.text;
+        buf     += delta.text;
+        if (DEBUG) sendMeta(res, "llm_token", { token: delta.text });
         let match;
         while ((match = buf.match(/^(.*?[。！？!?])\s*/s))) {
           const segText = match[1].trim();
@@ -1215,9 +979,9 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
         // LLM
         const llmPriceKey = `${llmProvider}#llm`;
-        const llmCost = calcCostJpy({ providerApiType: llmPriceKey, model: llmModelId, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate });
+        const llmCost = calcCostJpy({ providerApiType: llmPriceKey, model: llmModelId, tokensIn: llmUsage.in, tokensOut: llmUsage.out, usdJpyRate });
         if (llmCost) {
-          await addUsage({ ownerId, deviceId, date, apiType: "llm", provider: llmProvider, model: llmModelId, costJpy: llmCost.costJpy, costUsd: llmCost.costUsd, tokensIn: llmTokensIn, tokensOut: llmTokensOut, usdJpyRate: llmCost.usdJpyRate, unitPriceUsd: llmCost.unitPriceUsd, margin: llmCost.margin });
+          await addUsage({ ownerId, deviceId, date, apiType: "llm", provider: llmProvider, model: llmModelId, costJpy: llmCost.costJpy, costUsd: llmCost.costUsd, tokensIn: llmUsage.in, tokensOut: llmUsage.out, usdJpyRate: llmCost.usdJpyRate, unitPriceUsd: llmCost.unitPriceUsd, margin: llmCost.margin });
         }
 
         // TTS
@@ -1274,7 +1038,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           role: "assistant", content: textAll.trim(),
           content_type: "text", timestamp: assistantTimestamp, session_id: sessionId,
           llm_provider: llmProvider, llm_model: llmModelId,
-          llm_tokens_in: llmTokensIn, llm_tokens_out: llmTokensOut,
+          llm_tokens_in: llmUsage.in, llm_tokens_out: llmUsage.out,
           tts_provider: cfg.ttsVendor, tts_input_units: ttsInputChars, tts_input_unit_type: "characters",
           stt_provider: "soniox", stt_input_units: null, stt_input_unit_type: null,
           tool_usage: toolUsage,

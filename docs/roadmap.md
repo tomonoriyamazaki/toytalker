@@ -51,7 +51,8 @@
 
 ## 済
 
-- LLMに Gemini 3.5 Flash Lite と Claude Haiku 5.5 を追加（2026-10-27）。`toytalker-llms` に2行、`toytalker-api-unit-prices` に `anthropic#llm#claude-haiku-5-5`。本文Lambda2つは Gemini 3系へ `thinkingLevel: minimal`（3系は `thinkingBudget` が400）、Claude 4.6以降へ `temperature` の代わりに `effort: low`、拒否応答の一言、モデル別単価の優先。App側の Gemini 2.5 Flash も思考を切った（ESP32と同じ。それまで毎ターン約400思考トークンと2〜3秒が記録外で乗っていた）。既定は Gemini 2.5 Flash のまま。あわせて Gemini のトークン過大計上を修正（ストリーミング各チャンクの `usageMetadata` は累計値なのに足し込んでいた。入力はチャンク数倍、出力も3〜4倍で記録されていた。利用者課金前なので実害なし）。Gemini 2.5 Flash は Developer API では停止日未定（Vertex は 2026-10-20 停止）。相槌Lambdaは 2.5 Flash 直書きのまま。Anthropic 経路は Web 検索ツール未対応
+- LLMに Gemini 3.5 Flash Lite と Claude Haiku 5.5 を追加（2026-10-27）。`toytalker-llms` に2行、`toytalker-api-unit-prices` に `anthropic#llm#claude-haiku-5-5`。本文Lambda2つは Gemini 3系へ `thinkingLevel: minimal`（3系は `thinkingBudget` が400）、Claude 4.6以降へ `temperature` の代わりに `effort: low`、拒否応答の一言、モデル別単価の優先。App側の Gemini 2.5 Flash も思考を切った（ESP32と同じ。それまで毎ターン約400思考トークンと2〜3秒が記録外で乗っていた）。既定は Gemini 2.5 Flash のまま。あわせて Gemini のトークン過大計上を修正（ストリーミング各チャンクの `usageMetadata` は累計値なのに足し込んでいた。入力はチャンク数倍、出力も3〜4倍で記録されていた。利用者課金前なので実害なし）。Gemini 2.5 Flash は Developer API では停止日未定（Vertex は 2026-10-20 停止）。相槌Lambdaは 2.5 Flash 直書きのまま
+- LLM呼び出しと検索ツールを `backend/shared/llm.mjs` に共通化（2026-10-27）。本文Lambda2つから各約250行を外し、3社（OpenAI / Gemini / Anthropic）を同じ形で呼ぶ。検索ツールは3社すべてに渡す（以前は Gemini だけ。プロンプトの「検索できます」だけ全社に出ていて、Haiku が `<web_search>` を文字で書く不具合があった）。Gemini 3系の `thought_signature` を往復で持ち回り、検索結果を返す2回目の要求は `tool_choice: none` 相当で答えさせる（3系は再検索を要求しがち）。実機で Gemini 3.5 Flash Lite と Haiku 5.5 の検索を確認済み
 - SSM鍵の再読み込みを待つように修正し、初回読み込み失敗時は1回取り直す（2026-10-27）。warmup pingのたびに裏の再読み込みが凍結され、1日約165件の `[secrets] load failed` が出ていた。`backend/shared/secrets.mjs`。会話への影響は無かった
 - セキュリティ強化の即効分（2026-10-25）。PITR、依存更新、CloudTrail組織トレイル、CLIのSSO化、長期鍵3本とIAMユーザー2つの削除。[セキュリティ見直し](security-review-2026-10-25.md)
 

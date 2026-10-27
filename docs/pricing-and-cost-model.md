@@ -97,7 +97,7 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 
 - LLMのfunction callingで呼ぶツールのうち、外部に料金が発生するもの（現状はSerper検索）だけを `tool` 種別で回数課金として記録する。自前のLambda/DynamoDBを呼ぶだけの無料ツールは何も記録しない。検索は「調べ物をよくする子」と「雑談だけの子」で回数が大きく違うため、一律マージンではなく回数で数える。
 - 単価は `toytalker-api-unit-prices` の `${provider}#tool` 行、`input_unit_type = "requests"`。`serper#tool` = $0.001/回（$50 / 5万クレジット、1検索=1クレジット、購入から6か月で失効）。1回検索のターンでツール代は約0.15円（マージン前）。
-- 有料ツールを増やすとき: 本文Lambda2つ（App / ESP32）の `PAID_TOOLS` に `ツール名: { provider, model }` を1行足し、単価行を足す。アプリ側は円グラフの色を付けたい場合だけ `CHART_COLORS` に追加。無料ツールを増やすときは何もしない。
+- 有料ツールを増やすとき: `backend/shared/llm.mjs` の `PAID_TOOLS` に `ツール名: { provider, model }` を1行足し、単価行を足す。アプリ側は円グラフの色を付けたい場合だけ `CHART_COLORS` に追加。無料ツールを増やすときは何もしない。
 - 残骸: 最初は `search` 種別で実装し同日 `tool` へ汎用化した。`2026-09-12#<device>#search` の利用状況行と `serper#search` の単価行が1件ずつ残っている。参照されないので消してよい。
 
 ## 10. 月次運用レポートLambda（為替更新・請求突き合わせ・単価点検）
