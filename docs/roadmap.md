@@ -31,7 +31,7 @@
 |---|---|---|---|---|---|
 | 1 | 命名の決定 | 案を出す | 最終OK | 済（2026-10-12、下記） | [命名規則](naming-conventions.md)、新旧対応は [複数アカウント計画](multi-account-iac-plan.md) の「命名」 |
 | 2 | テーブル名の環境変数化とタグ（RnDへdeploy） → STGアカウント作成 → `cdk bootstrap` → SSM投入 → STGを新名で合成 | 環境変数化・タグ・bootstrap以降 | Organizationsでアカウント作成、SSM投入のOK | 済（2026-10-16。下記） | 上の「いまの状態」、[infra/README](../infra/README.md) |
-| 3 | **(a) RnDにCloudFront固定ドメイン**（`api-rnd.zakicorp.com` 等。Function URL は IAM 認証にして CloudFront だけが呼べるようにし、WAF でレート制限）→ アプリ・ESP32の接続先切替 → 実機確認。**(b)** STGへ初回 `cdk deploy` → マスターデータ投入 → 実機確認 | CDK・アプリ・ファーム・deploy | Cloudflare DNS追加、実機確認 | **(a)は DG を待たず RnD で進める**（2026-10-27決定。理由: 海外リージョンにも作れる形にしたい、中島さんが使えるようにしたい、URL固定は10(c)の復旧性と4の認証の前提）。(b)はDG向け構成が決まってから（下記） | [複数アカウント計画](multi-account-iac-plan.md) |
+| 3 | **RnDにCloudFront固定ドメイン**（`api-rnd.zakicorp.com` 等。Function URL は IAM 認証にして CloudFront だけが呼べるようにし、WAF でレート制限）→ アプリ・ESP32の接続先切替 → 実機確認 | CDK・アプリ・ファーム・deploy | Cloudflare DNS追加、実機確認 | 未着手。**DG を待たず RnD で進める**（2026-10-27決定。理由: 海外の利用者（中島さん）が使えるようにする。CloudFront は世界共通の入口なので、バックエンドは東京のままでよい。海外リージョンへの配置は遅延が問題になったら別途。URL固定は10(c)の復旧性と4の認証の前提）。STGへのdeployはDG案件として外した（[先送り項目](deferred-items.md)） | [複数アカウント計画](multi-account-iac-plan.md) |
 | 4 | 認証（Cognito + Google / Sign in with Apple）→ 前払いポイント制 | CDK・Lambda・アプリ | Google Cloud / Apple Developer側の設定、実機確認 | 設計メモあり、未着手 | [先送り項目](deferred-items.md) の「ユーザー認証」、[原価と課金](pricing-and-cost-model.md) 第11節 |
 | 5 | Cartesia 429時のずんだもんフォールバック、ZakiCorp TTS待ち行列の可視化 | 全部 | 実機確認 | 仕様あり、未着手 | [TTSフォールバック](tts-fallback-and-notifications.md)、[先送り項目](deferred-items.md) の「待ち行列の可視化」 |
 | 6 | ESP32: 検索後の誤停止対策、OTA検証3件（電源断・SHA改ざん・ロールバック）、`stable` 発行、配布機のUSB書き込み、アプリの版表示と `fw_channel` 切替 | コード | 実機・S3操作・USB書き込み | 誤停止は原因仮説のみ・対策未合意 | [OTA引き継ぎ](handoff-esp32-ota-2026-09-16.md) |
@@ -40,13 +40,7 @@
 | 9 | **Lambdaログの作り直し**（2026-10-27決定。次にLambdaを触るときに）: 会話の文章は `chat-logs` テーブルが正本で、Lambdaログには書かない。代わりに切り分けに要る情報を揃える: 会話ID・デバイスID・リクエストID、どこから来たか（App/ESP32、ファーム版、アプリ版）、段階ごとの所要時間（Soniox鍵発行、LLM最初のトークン、TTS各セグメントの最初のチャンク、応答ストリーム書き込み、合計）、外部サービスの応答コード、エラー。音声が途切れたときに「どの段階で何秒止まったか」をログだけで追える形にする（2026-10-26の遅延調査ではLambdaログに時間情報が無く特定できなかった）。ログ保持期間は無期限のまま（2026-10-27決定。会話の文章を書かなくなれば溜めるリスクが無く、費用対策の調査に使える。容量63MBで月数円）。小物: `toytalker-firmware` のTLS強制（CDKへの取り込みと同時に）、ToyTalker外の残骸の棚卸し（Prowlerの一覧は [セキュリティ見直し](security-review-2026-10-25.md) の「ベストプラクティス照合」）、**`zackey.xyz` のDNSをRoute53からCloudflareへ移す**（2026-10-27決定。ゾーン代 月$0.50 → 0、ついでにHTTPS化。SESの残りレコード4件は移さない。ドメインの登録先はRoute53ではないので、NS切替は登録先で行う）、旧デモサイト `toytalk.zakicorp.com`（CloudFront + S3、2025-06）は面白いので残す。ただし中のチャットは削除済みのv1 API Gatewayを呼ぶので動かない（画像と画面だけ表示される）。動かすなら現行のFunction URLに向けて書き直す、`toytalker-firmware` の扱い（ファームは環境に属さず全機共通なので、環境ごとのスタックへ取り込むのは合わない。どのアカウントに置き、どう管理するかを別途決める。2026-10-25）、Soniox Lambda 128→256MB（コールドスタート時のSSM取得が約0.9秒。他は1〜2GBで約0.2秒。温めで普段は起きない）、`.local/tts-service/` へ supervisor.py 反映 | 全部 | 削除のOK | 未着手（v1残骸は8(b)で2026-10-26に削除済み） | [ZakiCorp TTS](zakicorp-tts.md) |
 | 10 | **消されても戻せる仕組み**（2026-10-26。前提: 全部が同じアカウントにあるので、管理者権限の誤用・乗っ取り・AI操作の誤承認で PITR やバージョンごと消せる）: (a) **別アカウントの不変バックアップ**（根治）。AWS Backup で DynamoDB 8テーブルと S3 `toytalker-tts-speakers` / `toytalker-firmware` を日次で保管庫に取り（**2026-10-27決定: 同じRnDアカウントに置く。保持35日**。別アカウントは root 乗っ取りによる閉鎖にだけ効くので、本番アカウント分離のときに再検討）、Vault Lock（= 不変・イミュータブルバックアップ。コンプライアンスモード、保持35日程度）で RnD の管理者にも root にも消せなくする。別リージョン退避は不要（権限が同じなら別リージョンでも消せる。守る相手は障害でなく権限の誤用）。データは合計約6MBで月数十円。(b) **復元訓練**（根治）。PITR から1テーブルを別名で復元して中身を確かめて消す。手順を [セキュリティ見直し](security-review-2026-10-25.md) に書く。(c) **URLの固定**は3のCloudFront固定ドメインで解決（Function URL 5本がESP32・アプリに直書きで、スタック再作成でつながらなくなる）。(d) **鍵の再発行手順**（痛み止め）。SSMの鍵11本はAWSにしかないので、発行元と手順を文書化（値は書かない。名前は `infra/lib/secrets.ts`）。(e) CloudTrail バケットのバージョニング（痛み止め） | (a)のCDK、(b)、(d)、(e) | (a)の保管先アカウントの決定、Vault Lock は不可逆なので保持日数のOK、(b)の実施OK | 未着手。設計のみ | [セキュリティ見直し](security-review-2026-10-25.md) |
 
-並べた理由: 1は2以降の名前の前提。8（セキュリティ）は4の前に済ませる。4〜6は2〜3と独立なので、ユーザーの手待ちの間にClaudeが進められる。7は本番なので最後。**3(a)（RnDのCloudFront固定ドメイン）はDGを待たずに進め、3(b)（STGへのdeploy）はDG向け構成が決まってから**（下記）。順は 8（脅威モデル）→ 10 → 9 → 3(a) → 4。
-
-## STGへのdeployを3へ移した理由（2026-10-25。2026-10-27に 3(a) CloudFront は RnD で先行すると変更）
-
-- STGは「DG向け本番へ出す前の準備環境」で、いま出しても使えない。アプリ・ESP32の接続先はFunction URLのハードコードで、固定ドメイン（3）が無いとSTGへ向けられない。
-- これからRnDで認証（4）を実装するとスタックが大きく変わり、いま「ゼロから作れる」ことを確認しても認証後にやり直しになる。使わない環境をRnDに追従させる手間だけ増える。
-- 着手の条件は、DG向け展開の構成（何を、どの形で出すか）が決まること。それまでは4〜6をRnDで進める。アカウント・bootstrap・SSM・新名合成は済んでいるので、着手時は3の中で `cdk deploy --context stage=stg` → `export-master-data.ts rnd` / `import-master-data.ts stg --from=rnd --yes` から始める。
+並べた理由: 1は2以降の名前の前提。8（セキュリティ）は4の前に済ませる。4〜6は2〜3と独立なので、ユーザーの手待ちの間にClaudeが進められる。7は本番なので最後。**3（RnDのCloudFront固定ドメイン）はDGを待たずに進める。STGへのdeployはDG案件としてロードマップから外した**（[先送り項目](deferred-items.md)）。順は 8（脅威モデル）→ 10 → 9 → 3 → 4。
 
 ## 1の決定（2026-10-12）
 
