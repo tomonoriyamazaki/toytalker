@@ -26,6 +26,13 @@ export interface StageConfig {
   /** ESP32ファームのOTA配布先（manifest.json と .bin）。Soniox鍵発行Lambdaが読んで署名付きURLを返す */
   readonly firmwareBucketName: string;
   /**
+   * 消されても戻せる仕組み（ロードマップ10）。AWS Backup で DynamoDB 全テーブルと S3 2バケットを日次で
+   * 保管庫 `toytalker-backup-<環境>` に取り、Vault Lock（コンプライアンスモード）で管理者にも root にも消せなくする。
+   * `retentionDays` は保管庫の最小保持日数（最大はその+1日）で、ロック確定後は変えられない（変えるなら新しい保管庫）。
+   * 省略した環境は保管庫を作らない。
+   */
+  readonly backup?: { readonly retentionDays: number };
+  /**
    * Organizations の組織ID。管理アカウントの環境（RnD）にだけ置く。これがある環境では
    * 組織全体で1つの資源（CloudTrail 組織トレイル）を持つスタック `toytalker-org` も合成する。
    */
@@ -69,6 +76,7 @@ export const stages: Record<StageName, StageConfig> = {
     tableSuffix: "", // 既存テーブル名をそのまま維持。改名時に "-rnd" へ
     speakersBucketName: "toytalker-tts-speakers", // 既存バケット名をそのまま維持
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
+    backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
       lambdaRoleArn: "arn:aws:iam::342082316736:role/toytalk-lambda-role-dev",

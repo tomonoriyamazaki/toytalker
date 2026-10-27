@@ -4,6 +4,7 @@ import * as lambda from "aws-cdk-lib/aws-lambda";
 import { buildSync } from "esbuild";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as backup from "aws-cdk-lib/aws-backup";
 import * as sns from "aws-cdk-lib/aws-sns";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
@@ -437,6 +438,11 @@ export class ToyTalkerStack extends cdk.Stack {
     const firmwareBucket = s3.Bucket.fromBucketName(this, "FirmwareBucket", config.firmwareBucketName);
     if (!importPhase) firmwareBucket.grantRead(functions.get("stt-token")!);
 
+    // ---- 消されても戻せる仕組み: AWS Backup + Vault Lock（ロードマップ10(a)） ----
+    if (config.backup && !importPhase) {
+      this.createImmutableBackup(config, Object.values(tables), [speakersBucket, firmwareBucket]);
+    }
+
     // ---- 温めルール（5分ごと、5本へ {"warmup":true}） ----
     const warmTargets = FUNCTIONS.filter((s) => s.warm).map((s) => functions.get(s.key)!);
     const warmer = new events.CfnRule(this, "WarmerRule", {
@@ -503,12 +509,79 @@ export class ToyTalkerStack extends cdk.Stack {
       "クローンボイスの speaker embedding を保存・削除する。バケット1つに限定");
     ack("AwsSolutions-IAM5[Resource::<OpsMonthlyCC65D2A5.Arn>:*]",
       "EventBridge Scheduler が月次Lambdaのバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
+    ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup]",
+      "AWS Backup のサービスロール。対象資源のバックアップに必要な動詞を AWS が保守する標準ポリシー（ロードマップ10）");
+    ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores]",
+      "同上（復元）");
+    ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/AWSBackupServiceRolePolicyForS3Backup]",
+      "同上（S3 のバックアップ。開発者ガイドが指定する管理ポリシー）");
+    ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/AWSBackupServiceRolePolicyForS3Restore]",
+      "同上（S3 の復元）");
     ack("AwsSolutions-S1", "非公開・単一利用者のバケット。アクセスログ用バケットを増やす価値が小さい（CloudTrail でAPI操作は追える）");
     ack("Serverless-LambdaDLQ", "呼び出しは Function URL（同期）と温め・月次（失敗はログで見て手動再実行）。DLQ を置く非同期処理が無い");
     ack("Serverless-EventBusDLQ", "温めpingのみ。取りこぼしても5分後に再実行される");
     ack("Serverless-SNSRedrivePolicy", "メール購読のみ。配信失敗の再処理先は不要");
     ack("Serverless-CloudWatchLogGroupRetentionPeriod", "引き取り時の設定（無期限）を維持。保持期間はロードマップ8(e)で決める");
     ack("Serverless-LambdaTracing", "X-Ray は使っていない。必要になったら有効化する（費用と情報量の追加）");
+  }
+
+  /**
+   * DynamoDB 全テーブルと S3 2バケットを日次で保管庫に取り、Vault Lock（コンプライアンスモード）で
+   * 保持日数が過ぎるまで誰にも（管理者・root・AWS）消せなくする。守る相手は障害でなく権限の誤用
+   * （管理者権限の乗っ取り、AI操作の誤承認）なので、別リージョン・別アカウントへは出さない（2026-10-27決定）。
+   *
+   * - 保管庫名 `toytalker-backup-<環境>`。ロック確定後は保管庫も設定も変えられない。復旧点が全部期限切れになれば消せる
+   * - 最小保持 = retentionDays、最大 = その+1日（CDKが最小＜最大を要求する）。最大も縛るのは、無期限の復旧点を誰かが入れて
+   *   保管庫が永久に消せなくなるのを防ぐため
+   * - 確定までの猶予は AWS の下限 3日。その間に初回バックアップと復元を確かめ、問題があればロックを外せる
+   * - S3 は定期（スナップショット）方式。継続方式は EventBridge 通知が要り、CDK管理外の `toytalker-firmware` を触るので使わない
+   * - DynamoDB はアカウント設定「高度な機能」が有効（2026-10-28確認）。無効だとバックアップが DynamoDB 側の管理になり保管庫のロックが効かない
+   * - 暗号化は AWS 管理キー（aws/backup）。CMK は本番で
+   */
+  private createImmutableBackup(config: StageConfig, tables: readonly dynamodb.ITable[], buckets: readonly s3.IBucket[]): void {
+    const retention = cdk.Duration.days(config.backup!.retentionDays);
+    const vault = new backup.BackupVault(this, "BackupVault", {
+      backupVaultName: `toytalker-backup-${config.stage}`,
+      lockConfiguration: { minRetention: retention, maxRetention: retention.plus(cdk.Duration.days(1)), changeableFor: cdk.Duration.days(3) },
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    });
+
+    // バックアップと復元の両方に使うロール。S3 には専用の管理ポリシーが要る（AWS Backup 開発者ガイド「Amazon S3 backups」）
+    const role = new iam.Role(this, "BackupRole", {
+      assumedBy: new iam.ServicePrincipal("backup.amazonaws.com"),
+      description: "ToyTalker AWS Backup: backup and restore DynamoDB tables and S3 buckets",
+      managedPolicies: [
+        "service-role/AWSBackupServiceRolePolicyForBackup",
+        "service-role/AWSBackupServiceRolePolicyForRestores",
+        "AWSBackupServiceRolePolicyForS3Backup",
+        "AWSBackupServiceRolePolicyForS3Restore",
+      ].map((n) => iam.ManagedPolicy.fromAwsManagedPolicyName(n)),
+    });
+
+    const plan = new backup.BackupPlan(this, "BackupPlan", {
+      backupPlanName: `toytalker-backup-${config.stage}`,
+      backupVault: vault,
+      backupPlanRules: [
+        new backup.BackupPlanRule({
+          ruleName: "daily",
+          backupVault: vault,
+          scheduleExpression: events.Schedule.cron({ minute: "0", hour: "18" }), // 03:00 JST
+          startWindow: cdk.Duration.hours(1),
+          completionWindow: cdk.Duration.hours(4),
+          deleteAfter: retention,
+        }),
+      ],
+    });
+    plan.addSelection("Selection", {
+      backupSelectionName: `toytalker-backup-${config.stage}`,
+      role,
+      disableDefaultBackupPolicy: true,
+      resources: [
+        ...tables.map((t) => backup.BackupResource.fromDynamoDbTable(t)),
+        ...buckets.map((b) => backup.BackupResource.fromArn(b.bucketArn)),
+      ],
+    });
+    new cdk.CfnOutput(this, "BackupRoleArn", { value: role.roleArn, description: "復元ジョブ（start-restore-job --iam-role-arn）に渡すロール" });
   }
 
   private createTables(tableSuffix: string): Record<TableKey, dynamodb.Table> {

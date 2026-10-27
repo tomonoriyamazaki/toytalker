@@ -38,6 +38,92 @@
 
 製造時に一台ごとの鍵を NVS に焼き、サーバーはハッシュだけを devices に持つ。毎リクエストでデバイスIDと鍵（または鍵で署名したタイムスタンプ）を送り、Lambda が先頭で照合。持ち主との紐づけはアプリで箱のコード/QRを読んで Cognito ユーザーと結ぶ。漏れたら devices の1行を無効にしてその1台だけ止める。証明書（AWS IoT 方式）はファーム変更が大きいので後回し。前提として #3 の証明書検証が要る（検証なしでは鍵も中間者に渡る）。
 
+## 消されても戻せる仕組み（ロードマップ10、2026-10-28）
+
+脅威モデル #7（管理者権限の乗っ取り）と #8（AI操作の誤承認）の最後の守り。前提は「全部が同じアカウントにあるので、管理者権限があれば PITR も S3 の版も一緒に消せる」こと。守る相手は障害でなく権限の誤用なので、別リージョン・別アカウントには出さない（別アカウントは root 乗っ取りによる閉鎖にだけ効く。本番アカウント分離のときに再検討。2026-10-27決定）。
+
+### (a) 不変バックアップ（根治）
+
+CDK `infra/lib/toytalker-stack.ts` の `createImmutableBackup`。有効化は `config/stages.ts` の `backup: { retentionDays: 35 }`（RnDだけ）。
+
+| 項目 | 値 |
+|---|---|
+| 保管庫 | AWS Backup `toytalker-backup-rnd`（新名。暗号化は AWS 管理キー `aws/backup`、CMK は本番で） |
+| ロック | Vault Lock **コンプライアンスモード**。最小保持35日・最大36日、確定までの猶予3日（AWS の下限）。確定後は管理者・root・AWS のどれも復旧点を消せず、保管庫の設定も変えられない。復旧点が全部期限切れになれば保管庫は消せる。最大も縛るのは、無期限の復旧点を入れられて保管庫が永久に消せなくなるのを防ぐため |
+| 計画 | `toytalker-backup-rnd`、毎日 03:00 JST（開始猶予1時間・完了猶予4時間）、保持35日 |
+| 対象 | DynamoDB 8テーブル、S3 `toytalker-tts-speakers`・`toytalker-firmware`（定期スナップショット方式。継続方式は EventBridge 通知が要り、CDK管理外のファームバケットを触るので使わない。初回は全量、以後は差分） |
+| ロール | `BackupRole`（AWS管理ポリシー4つ: Backup / Restores / S3Backup / S3Restore）。復元ジョブにもこのロールを渡す。ARN はスタック出力 `BackupRoleArn` |
+| 前提 | AWS Backup のアカウント設定で DynamoDB の「高度な機能」が有効（2026-10-28確認、`describe-region-settings` の `ResourceTypeManagementPreference.DynamoDB = true`）。無効だとバックアップが DynamoDB 側の管理になり保管庫のロックが効かない |
+| 費用 | データ合計約6MB（chat-logs 5.7MB、S3 4.6MB）。DynamoDB は毎日全量、S3 は差分で、35日分でも数百MB。月数十円 |
+
+効かないもの: バックアップ計画そのものは消せる（消されると翌日から新しい復旧点が増えなくなる。既存の復旧点は35日残る）。計画の有無は月次の点検か AWS Backup のジョブ通知で気づく。アカウント閉鎖は90日の猶予後に保管庫ごと消える。
+
+**ロック確定前の3日間にやること**: 初回バックアップの成功を `aws backup list-backup-jobs --by-backup-vault-name toytalker-backup-rnd` で確認し、下の復元訓練（保管庫から）を1回通す。失敗していれば `aws backup delete-backup-vault-lock-configuration --backup-vault-name toytalker-backup-rnd` でロックを外して直す。
+
+### (b) 復元訓練（根治）
+
+PITR と保管庫の2経路。**PITR はテーブルが消されたら使えない**（削除時に DynamoDB が自動で作る `<table>$DeletedTableBackup` は35日残るが、管理者権限で消せる）。消されたときの本命は保管庫。
+
+PITR から別名で復元（データを壊さない。復元したテーブルには削除保護・PITR・タグが付かないので訓練後に消す）:
+
+```bash
+aws dynamodb restore-table-to-point-in-time --source-table-name toytalker-llms \
+  --target-table-name toytalker-llms-restore-test --use-latest-restorable-time   # 特定時刻は --restore-date-time
+aws dynamodb wait table-exists --table-name toytalker-llms-restore-test          # 数分〜十数分
+aws dynamodb scan --table-name toytalker-llms --select COUNT --query Count
+aws dynamodb scan --table-name toytalker-llms-restore-test --select COUNT --query Count   # 件数が一致
+aws dynamodb delete-table --table-name toytalker-llms-restore-test               # 片付け
+```
+
+保管庫から復元（DynamoDB）:
+
+```bash
+aws backup list-recovery-points-by-backup-vault --backup-vault-name toytalker-backup-rnd \
+  --by-resource-arn arn:aws:dynamodb:ap-northeast-1:342082316736:table/toytalker-llms \
+  --query "RecoveryPoints[].[CreationDate,RecoveryPointArn,Status]" --output table
+aws backup start-restore-job --recovery-point-arn <RecoveryPointArn> \
+  --iam-role-arn <BackupRoleArn（cdk の出力）> --metadata TargetTableName=toytalker-llms-restore-test
+aws backup describe-restore-job --restore-job-id <RestoreJobId>                  # COMPLETED まで待つ
+```
+
+保管庫から復元（S3）: `--metadata DestinationBucketName=<復元先>,EncryptionType=original`（復元先はバージョニング有効の既存バケット。元のバケットへ戻すときは既存オブジェクトを上書きせず、消えたものだけ戻る。`RestoreLatestVersionsUpTo=all` で全版）。
+
+本番で本当に消されたとき: 元の名前で復元する（`TargetTableName=toytalker-llms`）。CloudFormation は名前で資源を見ているので、同じ名前で戻せばスタックのドリフトも消える。復元後に削除保護と PITR を `aws dynamodb update-table` で付け直す（次の `cdk deploy` でも揃う）。Lambda はテーブル名しか知らないので、コードやdeployは要らない。
+
+訓練の記録: 未実施（PITR 訓練は deploy を待たずにできる。保管庫からの訓練は初回バックアップの後）。
+
+### (c) URL の固定
+
+ロードマップ3の CloudFront 固定ドメインで解決する。Function URL 5本がアプリ・ESP32に直書きで、スタック再作成でつながらなくなる。
+
+### (d) 鍵の再発行手順（痛み止め）
+
+SSM `/toytalker/<key>` の値は AWS にしかない（ZakiCorp の2本だけサーバー側 `.env` にも同値がある）。アカウントを失ったら全部を発行元で作り直す。値はどこにも書かない。名前の正本は `infra/lib/secrets.ts`、各社へのログインは exodjp@gmail.com（Gmail が要石、脅威モデル#7）。
+
+入れ替えの共通手順（無停止）: (1) 発行元で新しい鍵を作る（古い鍵はまだ消さない） → (2) `cd infra && printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts rnd <NAME> --overwrite` → (3) 稼働中の Lambda は5分を過ぎた次の呼び出しで取り直す。会話1回か CloudWatch の `[secrets] loaded` で確認 → (4) 発行元で古い鍵を消す。deploy は要らない。
+
+| SSM名（`secrets.ts` の名前） | 発行元 | 注意 |
+|---|---|---|
+| `openai-api-key` | platform.openai.com → Project `toytalker` → API keys（Service account 鍵 `toytalker-rnd`。2026-10-27 に作り直し済み） | LLM（GPT）と OpenAI TTS |
+| `anthropic-api-key` | console.anthropic.com → API Keys | LLM（Claude） |
+| `google-api-key` | Google Cloud コンソール → APIs & Services → Credentials（AI Studio で作った鍵も同じ場所に出る） | Gemini（既定LLM）と Cloud Text-to-Speech の両方が有効なプロジェクトで作る。止まると既定の会話が止まるので最優先 |
+| `elevenlabs-api-key` | elevenlabs.io → Developers → API Keys | 月次レポートで使用量を取るなら `user_read` 権限を付ける（いまの鍵には無く401） |
+| `fishaudio-api-key` | fish.audio → API Keys | TTS |
+| `sakura-api-key` | さくらインターネット「さくらのAI Engine」のコントロールパネル（`api.ai.sakura.ad.jp`） | ずんだもん。Cartesia 429 時のフォールバック先（ロードマップ5） |
+| `cartesia-api-key` | play.cartesia.ai → API Keys | TTS とクローンボイス登録。前払いクレジット |
+| `zakicorp-api-key` | 自分で発行（乱数）。サーバー側 `tts-models/faster-qwen3-tts/scripts/.env` の `ZAKICORP_API_KEY` と同値 | サーバー側は新旧両方を受け付けないので、短い停止を保守時間に。手順は [起動・復旧](tts-boot-recovery.md) |
+| `zakicorp-edge-key` | 自分で発行。Cloudflare WAF ルール `tts-edge-key-required`（ゾーン `zakicorp.com`）と `.env` と SSM の3か所 | 無停止の順番（ルールを新旧どちらでも通す → SSM と `.env` → ルールを新だけに）は [起動・復旧](tts-boot-recovery.md) の「拠点での遮断」 |
+| `serper-api-key` | serper.dev のダッシュボード（前払いクレジット、6か月で失効） | Web検索。別セッション（worktree `add-llm-models`）で Brave へ切替中。切替後は `brave-api-key` が必須になり Serper は不要 |
+| `brave-api-key` | api-dashboard.search.brave.com → API Keys | 2026-10-28時点は任意（切替の検証用） |
+| `soniox-api-key` | console.soniox.com → API Keys | STT。Lambda がこの親鍵から一時鍵を発行する。止まると会話が始まらない |
+| `openai-admin-key` / `anthropic-admin-key` | OpenAI: Organization settings → Admin keys。Anthropic: Settings → Admin keys | 任意。月次レポートが請求額を取るときだけ。読み取り専用に絞れないので当面置かない方針（[原価と課金](pricing-and-cost-model.md)） |
+
+全部失ったときの順番: Soniox（会話が始まらない）→ Google（既定LLM・TTS）→ Cartesia / ZakiCorp 2本（主なボイス）→ 残りの TTS → 検索 → 管理キー。
+
+### (e) CloudTrail バケットのバージョニング（痛み止め）
+
+`toytalker-cloudtrail-org` に `versioned: true`（`infra/lib/toytalker-org-stack.ts`）。消されても版が残るが、同じ権限なら版も消せる。改ざんの検知は CloudTrail 自身のログファイル検証（有効）で。
+
 ## きっかけ
 
 2026年10月に脆弱性の報道が重なった（PHP2Shell、Node.js Brotli CVE-2026-111497、Microsoft月例更新のCVE初の4桁、AIによる脆弱性発見の加速）。ToyTalkerへの直接の影響は無い（PHPは不使用、LambdaのNode 24は管理ランタイムで更新モードAuto、TTS PCのWindowsは自動更新）。本質は「公開している入口はいずれ機械的に叩かれる」と考えて設計を正すこと。
@@ -82,6 +168,7 @@
 | 今すぐ | GitHubのDependabot alerts / security updates を有効化（`.github/dependabot.yml` は追加済み） | 根治 | 済（2026-10-27） |
 | 決める | Lambdaの同時実行上限（費用燃やしの天井。`reservedConcurrentExecutions`）とInvocations/Durationのアラーム | 痛み止め | 未。上限値を決める（下の「IaC点検」） |
 | 決める | Lambdaログの保持期間（いまは無期限。会話の文字起こしがログに残る） | 根治 | 未 |
+| 10 | 消されても戻せる仕組み: AWS Backup + Vault Lock（コンプライアンス、35日）、復元訓練、鍵の再発行手順、CloudTrail バケットのバージョニング | 根治（(d)(e)は痛み止め） | CDK実装済み・deploy待ち（2026-10-28）。上の「消されても戻せる仕組み」 |
 | 9で | `toytalker-firmware` のTLS強制（CDK管理外。取り込みと同時に） | 根治 | 未 |
 | 本番で | DynamoDB・CloudTrail・SNS・ログのCMK暗号化（[複数アカウント計画](multi-account-iac-plan.md) の決定どおり）、CloudTrailのCloudWatch Logs連携、Config + Security Hub | 根治 | 本番アカウントで |
 

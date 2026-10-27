@@ -63,8 +63,18 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 - 1件入れる: `printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts <stage> OPENAI_API_KEY`
 - Lambdaは実行時にSSMから読み、メモリに保持する（`backend/shared/secrets.mjs`）。環境変数には鍵を置かず、関数ごとの対象名だけを `SECRET_PARAMS` で渡す。どの関数がどの鍵を読めるかは `lib/toytalker-stack.ts` の `secrets`
 - 鍵を入れ替えるときはSSMを変えるだけ。稼働中のLambdaは5分を過ぎた次の呼び出しで取り直す（deploy不要）
+- 鍵を発行元で作り直す手順（値は書かない）は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md) の「鍵の再発行手順」
 - Lambdaに鍵を新しく使わせるとき: `lib/secrets.ts` に名前を足し、その関数の `secrets` に加え、コードでは `secret("名前")` で読む
 - 環境変数方式の環境を移すときだけ2段階でdeployする（コードと設定の更新が別々に行われ、その間に鍵が読めなくなるのを避ける）: `npx cdk deploy --context stage=<stage> --context keepEnvSecrets=true` → ログの `[secrets] loaded n/n from SSM` と動作を確認 → フラグ無しで `npx cdk deploy`。新しく作る環境は最初からフラグ無し
+
+## バックアップと復元（AWS Backup、ロードマップ10）
+
+`config/stages.ts` の `backup: { retentionDays }` がある環境に、保管庫 `toytalker-backup-<環境>`（Vault Lock コンプライアンスモード。確定後は誰にも消せない）と日次計画・ロールを作る（`lib/toytalker-stack.ts` の `createImmutableBackup`）。初回 deploy から3日が猶予で、その間にバックアップの成功と復元を確かめる。復元の手順と鍵の再発行手順は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md) の「消されても戻せる仕組み」。
+
+```bash
+aws backup list-backup-jobs --by-backup-vault-name toytalker-backup-rnd --query "BackupJobs[].[CreationDate,ResourceType,ResourceName,State]" --output table
+aws backup describe-backup-vault --backup-vault-name toytalker-backup-rnd   # Locked / LockDate / NumberOfRecoveryPoints
+```
 
 ## 新しい環境の立ち上げ（STGで2026-10-15に実施）
 

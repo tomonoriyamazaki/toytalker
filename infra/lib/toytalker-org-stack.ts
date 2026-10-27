@@ -26,6 +26,7 @@ export class ToyTalkerOrgStack extends cdk.Stack {
 
     const bucket = new s3.Bucket(this, "CloudTrailBucket", {
       bucketName: "toytalker-cloudtrail-org",
+      versioned: true, // 消されても版が残る（痛み止め。同じ権限なら版も消せる。ロードマップ10(e)、2026-10-28）
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,
