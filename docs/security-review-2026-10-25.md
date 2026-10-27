@@ -38,7 +38,7 @@
 | 固定ドメインと一体（3） | CloudFront + WAFでレート制限・地域制限 | 根治 | 未。ゲスト会話を残す限り認証では防げない |
 | 認証後 | デバイス登録をログイン必須に | 根治 | 未 |
 | 保留 | GuardDuty（月数百円〜）。他人が入る本番で再検討 | — | 保留 |
-| 今すぐ | **v1残骸の削除**（無認証のAPI Gateway `toytalk-chat-apigateway-dev` → Python Lambda 2本。環境変数にOpenAI鍵、ロールはS3/DynamoDB/LambdaのFullAccess。30日間呼び出しゼロ）。削除後、その鍵がSSMの鍵と同じならOpenAI側で作り直す | 根治 | **済（2026-10-26）**。API Gateway、Lambda 2本、ロール `toytalk-lambda-role-dev`、ロググループ3つ（孤立の `toytalk-stream-handler-for-esp32-lambda` 分を含む）を削除。コードは `backend/*.py` に残る。最終ログは2025-08で、1年以上未使用だった。OpenAI鍵の同一性確認は未（ダッシュボードで判断） |
+| 今すぐ | **v1残骸の削除**（無認証のAPI Gateway `toytalk-chat-apigateway-dev` → Python Lambda 2本。環境変数にOpenAI鍵、ロールはS3/DynamoDB/LambdaのFullAccess。30日間呼び出しゼロ）。削除後、その鍵がSSMの鍵と同じならOpenAI側で作り直す | 根治 | **済（2026-10-26）**。API Gateway、Lambda 2本、ロール `toytalk-lambda-role-dev`、ロググループ3つ（孤立の `toytalk-stream-handler-for-esp32-lambda` 分を含む）を削除。コードは `backend/*.py` に残る。最終ログは2025-08で、1年以上未使用だった。OpenAI鍵は1本しかなく v1 と現行で同じだったので、2026-10-27 に作り直した（Project `toytalker`、Service account 鍵 `toytalker-rnd`、SSM 版2）。古い鍵と旧 Project は削除。観察: 作り直し前の7日間に、ToyTalker の Lambda が無稼働の日を含めて21件の小さな Chat Completions（入力10トークン程度）が古い鍵から出ていた。発信元は不明（このPC・Codex・.env には鍵なし）。新しい鍵で続くかを Usage で見る |
 | 今すぐ | CDK修正のdeploy: S3 `toytalker-tts-speakers` とSNSのTLS強制、設定Lambdaの書き込み権限を devices/characters/voices に縮小、Soniox LambdaはdevicesのUpdateItemだけ | 根治 | **済（2026-10-26 deploy）**。差分はIAM 2本の縮小とポリシー2つの追加だけ、Replaceなし、32秒 |
 | 今すぐ | 無料のアカウント設定: セキュリティ連絡先（Account.1）、IAMパスワードポリシー（IAM.7） | 根治 | 未。説明→OKで実施 |
 | 今すぐ | GitHubのDependabot alerts / security updates を有効化（`.github/dependabot.yml` は追加済み） | 根治 | 未。リポジトリ設定はユーザー |
