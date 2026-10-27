@@ -119,6 +119,26 @@ Prowler（`prowler aws -f ap-northeast-1 us-east-1 --compliance aws_foundational
 - 残りはリポジトリ設定（Settings → Code security → Dependabot alerts と security updates をON）。ユーザーの操作。
 - 補足: 2026-10-25時点で Lambda 5本の `npm audit --omit=dev` は0件。`infra/` の `brace-expansion`（high、aws-cdk-lib配下）は `npm audit fix` で解消。Lambdaランタイムは管理ランタイムで自動更新。アプリ（React Native）の依存もDependabotの対象に入れたが、修正の反映は審査・配布の都合で別途。
 
+### 次のセッション: 脅威モデルを作る（2026-10-27に合意）
+
+目的は「本気で侵入しようとされても大丈夫」を、チェックリストでなく「誰が・何を狙って・どこから入り・入られると何が起きるか」の表で定義し、守りの順番を決めること。cdk-nag を全部直しても安全にはならない（侵入に関係する指摘は Function URL 公開の1件だけで、それは認証の設計そのもの）。
+
+作るもの: この文書の先頭に置く表。叩き台:
+
+| 誰が | 狙い | 入口 | 入られると | 今の守り | 足りないもの |
+|---|---|---|---|---|---|
+| ファームやアプリを解析した人 | 自分の費用で LLM/TTS を使う | Function URL 7本（認証なし。URLはESP32・アプリに直書き） | 請求が膨らむ | なし | 認証（ロードマップ4）、CloudFront+WAF のレート制限（3）、同時実行上限（8(e)） |
+| 同上 | 他人の設定を見る・変える | 設定 Lambda の URL + デバイスID | プライバシー侵害 | デバイスIDを知らないと無理、だけ | 認証（本人の物だけ触れる） |
+| 改ざんしたアプリ・ファーム | 上限を無視して使う | 同上 | 費用・他人の設定 | なし | クライアントを信用しない設計: 身元ごとのサーバー側上限（前払いポイント） |
+| PCやSSOを乗っ取った人 | AWS を自由に使う | SSO セッション（AdministratorAccess） | 全部 | MFA、長期鍵なし、CloudTrail | 侵入検知（GuardDuty、月数百円）、読み取り専用の権限セット、不変バックアップ（10） |
+| 悪意ある npm パッケージ | 鍵を盗む | Lambda の依存 | 鍵流出 | npm audit 0件、Dependabot 設定 | Dependabot の ON（ユーザー操作） |
+| 偽ファームを配る人 | 機器を乗っ取る | OTA | 機器が勝手に動く | SHA 検証（未検証） | 検証試験（6） |
+| 騙された Claude（プロンプトインジェクション） | 消す・壊す | 承認ダイアログ | データ消失 | ask、削除保護、PITR | 不変バックアップ（10）、承認ダイアログを読む習慣 |
+
+ファーム側の認証の方針（4の設計に入れる）: 製造時に一台ごとの鍵を NVS に焼き、サーバーはハッシュだけを devices に持つ。毎リクエストでデバイスIDと鍵（または鍵で署名したタイムスタンプ）を送り、Lambda が先頭で照合。持ち主との紐づけはアプリで箱のコード/QRを読んで Cognito ユーザーと結ぶ。漏れたら devices の1行を無効にしてその1台だけ止める。証明書（AWS IoT 方式）はファーム変更が大きいので後回し。
+
+CloudFront の位置づけ: 「壁」であって「鍵」ではない。Function URL を IAM 認証にして CloudFront だけが呼べるようにし、WAF でレート制限と国制限、ドメイン固定で再作成に強くする。誰が呼んでいるかは分からないので、認証と両方要る。
+
 ### 決めること
 
 - **同時実行上限**（痛み止め）: 会話Lambda 2本・相槌2本・読み上げ・Soniox鍵発行に `reservedConcurrentExecutions` を置くと、費用燃やしの天井ができる（例: 会話20、相槌20、他10）。超えた分は429になるので、実利用の同時数（いまは1人）に余裕を見て決める。Invocations / Duration のアラーム（SNSでメール）も同時に。
@@ -126,5 +146,7 @@ Prowler（`prowler aws -f ap-northeast-1 us-east-1 --compliance aws_foundational
 - **アカウント単位の公開ブロック**: `zackey.xyz` をこのアカウントから出すか、公開のまま残すか。
 
 ### 観察（原因未確定）
+
+2026-10-26/27 も同じ事象。`export-credentials` の回避策で毎回通った。リモートからのログインは `aws sso login --use-device-code --no-browser` でコードを出し、手元の端末で承認する（通常方式はこのPCのブラウザに戻るので完了できない。コードは10分で失効）。
 
 CDKの `synth` / `diff` が `CredentialsProviderError: UnauthorizedException: Session token not found or invalid` で止まった（AWS CLI 2.33.2 の `aws sso login` 直後、CLIの `sts get-caller-identity` は通る状態）。JS SDK（3.1132）が `~/.aws/sso/cache` のトークンを使うときだけ失敗する。回避は `eval "$(aws configure export-credentials --format env)"` を打ってから `cdk` を実行する（CLIが持つロール資格情報を環境変数に出す。8時間）。原因は追っていない（推測: CLI 2.33の `session.db` 方式とJSONキャッシュの食い違い）。

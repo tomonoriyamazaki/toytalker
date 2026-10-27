@@ -38,6 +38,8 @@ cdk-nag で受け入れる指摘は `lib/toytalker-stack.ts` の `acknowledgeNag
 - CDKが環境変数を上書きするので、手作業でLambdaの環境変数を変えても次のdeployで戻る。
 - `cdk synth` が `CredentialsProviderError: UnauthorizedException: Session token not found or invalid` で止まり、`aws sts get-caller-identity` は通るとき（2026-10-25、CLI 2.33.2）: `eval "$(aws configure export-credentials --format env)"` でCLIの資格情報を環境変数に出してから実行する。原因未確定（[セキュリティ見直し](../docs/security-review-2026-10-25.md) の「観察」）。
 
+- リモート（別端末）から SSO ログインするとき: `aws sso login --sso-session toytalker --use-device-code --no-browser` でURLとコードを出し、手元の端末で開いて承認する。通常方式はこのPCのブラウザへ戻る仕組みなので完了できない。コードは10分で失効。SSOセッションは8時間で切れる。
+
 ## 子アカウントでルートが要る操作
 
 子アカウントのルート資格情報は無い（ルートアクセスの集中管理）。ルートでしかできない操作（S3バケットポリシー削除など）は管理アカウントから行う:
