@@ -53,6 +53,9 @@ refresh();
  */
 export async function ensureSecrets() {
   if (!loadedAt || Date.now() - loadedAt > REFRESH_MS) await refresh();
+  // 初回が失敗していたら1回だけ取り直す。AWS が容器を先に初期化して凍結したとき、
+  // 初期化中に始めた取得が切れていることがある（inflight は finally で空になっているので新しい要求になる）
+  if (!loadedAt) await refresh();
 }
 
 /**
