@@ -50,10 +50,28 @@ function pickTargetVersion(manifest, device) {
   return manifest?.channels?.[channel] ?? null;
 }
 
+// "0.7.3" のような版を数値の並びで比べる。a<b なら負、同じなら 0、a>b なら正。数字以外の部分は 0 扱い
+function compareVersions(a, b) {
+  const pa = String(a).split(".").map((x) => parseInt(x, 10) || 0);
+  const pb = String(b).split(".").map((x) => parseInt(x, 10) || 0);
+  const n = Math.max(pa.length, pb.length);
+  for (let i = 0; i < n; i++) {
+    const d = (pa[i] ?? 0) - (pb[i] ?? 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
 async function buildFirmwareInfo(query, device, manifest) {
   if (query.ota !== "1" || !query.fw || !manifest) return null;
   const target = pickTargetVersion(manifest, device);
   if (!target || target === query.fw) return null;
+  // チャンネル経由では新しい版にしか進めない。開発中の新しい版を USB で書いた試験機が、配布中の古い版へ
+  // 戻されるのを防ぐ（2026-10-28 に 0.7.3 → 0.7.2 が起きた）。古い版へ戻すときは fw_target で明示する
+  if (!device?.fw_target && compareVersions(target, query.fw) < 0) {
+    console.log(`[OTA] skip downgrade via channel: running=${query.fw} target=${target}`);
+    return null;
+  }
   const entry = manifest.versions?.[target];
   if (!entry?.key || !entry?.sha256 || !entry?.size) {
     console.warn(`[OTA] target=${target} has no manifest entry`);

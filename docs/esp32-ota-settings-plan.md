@@ -60,7 +60,7 @@ PCB資料: [PINMAP](../devices/KiCad/toytalker_mini_v0.2/PINMAP.md)、[部品表
 
 - **確認するLambda**: `toytalk-soniox-stt-lambda` だけ。応答に `firmware: {version, url, sha256, size}` を同梱する。他のLambdaは関与しない。
 - **配布**: 非公開S3バケット `toytalker-firmware`。`esp32s3/<version>/toytalker_mini.bin` と `esp32s3/manifest.json`（`versions` に版ごとの `{key, sha256, size, published_at}`、`channels` に `stable` / `beta` が指す版）。Lambdaが10分の署名付きURLを返す。本体はS3から直接GETし、Lambdaはバイナリを中継しない。本体に認証情報は持たせない。
-- **配布制御**: `toytalker-devices.fw_channel`（既定 `stable`、試験機は `beta`）。個別固定用に `fw_target`（版名。空文字で解除）。昇格はマニフェストの書き換えだけ（`publish-firmware.sh stable --promote`）。
+- **配布制御**: `toytalker-devices.fw_channel`（既定 `stable`、試験機は `beta`）。個別固定用に `fw_target`（版名。空文字で解除）。**チャンネル経由では新しい版にしか進めない**（2026-10-28。版を上げた開発版を USB で書いた試験機が、配布中の古い版へ戻された事故の対策）。古い版へ戻すときは `fw_target` で明示する。昇格はマニフェストの書き換えだけ（`publish-firmware.sh stable --promote`）。
 - **版の識別**: `FirmwareVersion.h` の `TOYTALKER_FW_VERSION` / `TOYTALKER_HW_VERSION`。`[BUILD]` と `[OTA]` の起動ログに出る。キー取得時に `fw` `hw` `ota` `part` を送り、Lambdaが登録済みの行にだけ `firmware_version` `hw_version` `ota_capable` `running_partition` `fw_reported_at` を保存する（未登録の `device_id` で行は作らない）。判定は「目標版と不一致なら更新」で大小比較はしない。
 - **本体が偽ファームを受け取らないための検証**（署名付きURLは誰でもGETできる前提。読まれる実害は無いので許容し、守るのは本体側）:
   1. URLのホストを `toytalker-firmware.s3.ap-northeast-1.amazonaws.com` 固定で照合し、他は拒否。
