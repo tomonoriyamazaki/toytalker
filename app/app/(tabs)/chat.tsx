@@ -16,6 +16,7 @@ import {
   Dimensions,
   Pressable,
   Animated,
+  AppState,
 } from "react-native";
 import * as FileSystem from "expo-file-system";
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from "expo-av";
@@ -42,6 +43,42 @@ const SONIOX_CHANNELS = 1;
 /** Soniox temporary key発行Lambda。POSTしてkey idを受け取りセットする */
 const SONIOX_KEY_URL =
   "https://ug5fcnjsxa22vtnrzlwpfgshd40nngbo.lambda-url.ap-northeast-1.on.aws/";
+/**
+ * 一時キーはLambdaが1時間有効で発行する。期限切れのキーで接続すると会話が始まらないので、
+ * 取得から50分を越えたらWSを開く前に取り直す（10分の余裕は判定から接続までのズレ用）。
+ * テスト時は 2 にする。
+ */
+const SONIOX_KEY_MAX_AGE_MINUTES = 2; // 試用中。本番値は 50（2026-10-28）
+let sonioxKeyCache: { key: string; fetchedAt: number } | null = null;
+let sonioxKeyInflight: Promise<string> | null = null;
+
+const fetchSonioxTempKey = async (): Promise<string> => {
+  const res = await fetch(SONIOX_KEY_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+  });
+  const js = await res.json();
+  if (!res.ok || !js?.api_key) throw new Error("Failed to get Soniox temp key");
+  if (js.stt_model) SONIOX_MODEL = js.stt_model;
+  return js.api_key as string;
+};
+
+/** 有効なキーを返す。古いか無ければ取り直す。同時に呼ばれても取得は1回にまとめる */
+const getSonioxKey = async (): Promise<string> => {
+  const c = sonioxKeyCache;
+  if (c && Date.now() - c.fetchedAt < SONIOX_KEY_MAX_AGE_MINUTES * 60 * 1000) return c.key;
+  if (sonioxKeyInflight) return sonioxKeyInflight;
+  const ageSec = c ? Math.round((Date.now() - c.fetchedAt) / 1000) : -1;
+  console.log(`[SONIOX_KEY] fetching (age=${ageSec}s)`);
+  sonioxKeyInflight = fetchSonioxTempKey()
+    .then((key) => {
+      sonioxKeyCache = { key, fetchedAt: Date.now() };
+      console.log("[SONIOX_KEY] refreshed");
+      return key;
+    })
+    .finally(() => { sonioxKeyInflight = null; });
+  return sonioxKeyInflight;
+};
 
 
 /* === デバッグ === */
@@ -122,18 +159,19 @@ export default function Chat() {
     }, [])
   );
 
-  // Sonioxキー発行
-  const [sonioxKey, setSonioxKey] = useState<string | null>(null);
+  // Sonioxキー発行: 画面表示時と、別アプリから戻った時に古ければ取り直す（会話ボタンの待ちを隠す）。
+  // WSを開く直前にも getSonioxKey で判定するので、ここが走らなくても期限切れのキーは使わない。
   useFocusEffect(
     useCallback(() => {
-      (async () => {
-        if (sttMode === "soniox" && !sonioxKey) {
-          const key = await fetchSonioxTempKey();
-          setSonioxKey(key);
-          if (DEBUG) setLog(L => [...L, "Soniox temp key fetched"]);
-        }
-      })();
-    }, [sttMode, sonioxKey])
+      if (sttMode !== "soniox") return;
+      const warm = (why: string) =>
+        getSonioxKey().catch((e) => console.log(`[SONIOX_KEY] ${why} failed: ${e?.message ?? e}`));
+      warm("focus");
+      const sub = AppState.addEventListener("change", (state) => {
+        if (state === "active") warm("foreground");
+      });
+      return () => sub.remove();
+    }, [sttMode])
   );
 
 
@@ -469,29 +507,28 @@ export default function Chat() {
     });
   };
 
-  const fetchSonioxTempKey = async (): Promise<string> => {
-    const res = await fetch(SONIOX_KEY_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    });
-    const js = await res.json();
-    if (!res.ok || !js?.api_key) throw new Error("Failed to get Soniox temp key");
-    if (js.stt_model) SONIOX_MODEL = js.stt_model;
-    return js.api_key as string;
-  };
-
   // Soniox WS先行接続（再生中に呼ぶ）
   const preconnectSonioxWs = async () => {
     if (preconnectedWsRef.current) return;
     console.log("⏱️ preconnect: creating WebSocket");
+    const keyPromise = getSonioxKey(); // 古ければ取り直す。WS接続と並行
+    keyPromise.catch(() => {}); // WSが開かず await に到達しない場合の未処理rejectを防ぐ
     const ws = new WebSocket(SONIOX_WS_URL);
     ws.binaryType = "arraybuffer";
     preconnectedWsRef.current = ws;
 
     ws.onopen = async () => {
       console.log("⏱️ preconnect: WebSocket OPEN, sending config");
+      let apiKey: string;
+      try {
+        apiKey = await keyPromise;
+      } catch (e: any) {
+        console.log(`⏱️ preconnect: key fetch failed: ${e?.message ?? e}`);
+        try { ws.close(); } catch {}
+        return;
+      }
       const cfg = {
-        api_key: sonioxKey ?? (await fetchSonioxTempKey()),
+        api_key: apiKey,
         model: SONIOX_MODEL,
         audio_format: "pcm_s16le",
         sample_rate: SONIOX_SAMPLE_RATE,
@@ -554,6 +591,8 @@ export default function Chat() {
     }
     preconnectedWsRef.current = null;
 
+    const keyPromise = usePreconnected ? null : getSonioxKey(); // 古ければ取り直す。WS接続と並行
+    keyPromise?.catch(() => {}); // WSが開かず await に到達しない場合の未処理rejectを防ぐ
     const ws = usePreconnected ? preWs! : new WebSocket(SONIOX_WS_URL);
     ws.binaryType = "arraybuffer";
     sonioxWsRef.current = ws;
@@ -622,8 +661,16 @@ export default function Chat() {
         if (!guard()) return;
         console.log(`⏱️ STT [${Date.now() - sttT0}ms] WebSocket OPEN`);
 
+        let apiKey: string;
+        try {
+          apiKey = await keyPromise!;
+        } catch (e: any) {
+          setLog(L => [...L, `Soniox key fetch failed: ${e?.message ?? e}`]);
+          try { ws.close(); } catch {}
+          return;
+        }
         const cfg = {
-          api_key: sonioxKey ?? (await fetchSonioxTempKey()),
+          api_key: apiKey,
           model: SONIOX_MODEL,
           audio_format: "pcm_s16le",
           sample_rate: SONIOX_SAMPLE_RATE,

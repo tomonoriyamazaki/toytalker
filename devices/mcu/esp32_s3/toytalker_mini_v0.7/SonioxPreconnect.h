@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <WebSocketsClient.h>
 #include <atomic>
+#include <functional>
 
 // The worker exclusively owns the client from start() through takeResult().
 // Its callback sends the start message only; application state stays on loop().
@@ -11,7 +12,14 @@ class SonioxPreconnect {
   struct Result {
     bool ready = false, cancelled = false;
     uint32_t elapsedMs = 0, stackFree = 0;
+    // prepare が新しい Soniox キーを取ったとき true。loop() が takeResult 後に自分の状態へ写す。
+    bool keyRefreshed = false;
+    uint32_t keyFetchedMs = 0, prepareMs = 0;
+    String key;
   };
+  // 接続の前にワーカーで走る準備処理。新しいキーを取ったら startMessage と key を書いて true を返す。
+  // loop() の状態（sonioxKey 等）には触らず、結果は Result 経由で loop() に渡す。
+  using Prepare = std::function<bool(String& startMessageOut, String& keyOut)>;
   bool init(WebSocketsClient& client) {
     client_ = &client;
     if (xTaskCreatePinnedToCore(taskEntry, "soniox_connect", 8192, this, 1, &task_, 0) == pdPASS) return true;
@@ -22,10 +30,11 @@ class SonioxPreconnect {
   bool ownsClient() const { return state_.load(std::memory_order_acquire) != State::Idle; }
 
   // Caller has already configured beginSSL() and heartbeat, and owns client.
-  bool start(const String& startMessage) {
+  bool start(const String& startMessage, Prepare prepare = nullptr) {
     if (!available() || ownsClient()) return false;
     startMessage_ = startMessage;
     if (startMessage_.length() != startMessage.length() || startMessage_.isEmpty()) return false;
+    prepare_ = prepare;
     result_ = Result{};
     startSent_ = false;
     cancel_.store(false);
@@ -64,6 +73,18 @@ class SonioxPreconnect {
     for (;;) {
       ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
       if (state_.load(std::memory_order_acquire) != State::Running) continue;
+      if (prepare_ && !cancel_.load()) {
+        // 鍵の取り直し（HTTPS 1〜2秒）。再生中の loop() を止めないためにここで行う。
+        const uint32_t p0 = millis();
+        String msg, key;
+        if (prepare_(msg, key) && !msg.isEmpty() && !key.isEmpty()) {
+          startMessage_ = msg;
+          result_.key = key;
+          result_.keyRefreshed = true;
+          result_.keyFetchedMs = millis();
+        }
+        result_.prepareMs = millis() - p0;
+      }
       const uint32_t started = millis();
       // This bounds retries, not an individual synchronous TLS call. Retain
       // ownership until that call returns even if cancellation was requested.
@@ -87,6 +108,7 @@ class SonioxPreconnect {
   std::atomic<State> state_{State::Idle};
   std::atomic<bool> cancel_{false};
   String startMessage_;
+  Prepare prepare_;
   Result result_;
   bool startSent_ = false;
 };

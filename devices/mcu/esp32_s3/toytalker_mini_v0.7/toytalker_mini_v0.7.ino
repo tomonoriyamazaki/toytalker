@@ -84,7 +84,13 @@ const char* SONIOX_LAMBDA_URL = "https://ug5fcnjsxa22vtnrzlwpfgshd40nngbo.lambda
 const char* SONIOX_WS_URL = "stt-rt.soniox.com";
 const int SONIOX_WS_PORT = 443;
 String sonioxKey;
-String sonioxModel = "stt-rt-v4";
+// 一時キーは Lambda が1時間有効で発行する。期限切れのキーで WS を開くと会話が始まらないので、
+// 取得から50分を越えたら WS を開く前に取り直す（10分の余裕は判定から接続までのズレ用）。
+// 再生中は先行接続ワーカー（Core 0）で、先行接続が無いときは録音開始前に loop() で取り直す。
+// テスト時は 2 にする。
+const uint32_t SONIOX_KEY_MAX_AGE_MINUTES = 2;  // 試用中。本番値は 50（2026-10-28）
+uint32_t sonioxKeyFetchedMs = 0;  // loop() だけが書く。ワーカーは読むだけ
+String sonioxModel = "stt-rt-v4";  // 起動時に1回だけ設定。以後は読み取り専用（ワーカーからも読む）
 
 // ==== I2S PIN ==== (v0.2基板: マイク/アンプでBCLK・WSも分離)
 #define PIN_MIC_BCLK 48
@@ -223,13 +229,83 @@ static bool ttsFirstPcmLogged = false;  // loopのみ
 static uint32_t ttsRingWaitMs = 0;      // producerのみ
 static uint32_t sonioxServiceMaxMs = 0;
 
-String sonioxStartMessage() {
-  return "{\"api_key\":\"" + sonioxKey + "\","
+bool sonioxKeyIsOld() {
+  return millis() - sonioxKeyFetchedMs >= SONIOX_KEY_MAX_AGE_MINUTES * 60UL * 1000UL;  // 符号なしの差なので millis() の桁あふれでも正しい
+}
+
+// Lambda に GET して本文を返す。WiFi 切替直後などの一時的な失敗に備えて attempts 回まで試す。
+int httpGetWithRetry(const String& url, String& body, int attempts) {
+  HTTPClient http;
+  int code = -1;
+  for (int attempt = 1; attempt <= attempts; attempt++) {
+    http.setTimeout(5000);
+    http.begin(url);
+    code = http.GET();
+    if (code == 200) {
+      body = http.getString();
+      http.end();
+      return code;
+    }
+    Serial.printf("⚠️ Lambda GET failed (HTTP %d), attempt %d/%d\n", code, attempt, attempts);
+    http.end();
+    if (attempt < attempts) delay(1000);
+  }
+  return code;
+}
+
+// キーだけを取る軽い呼び出し（device_id 等を付けないので Lambda はデバイス報告も OTA 判定もしない）。
+// loop() からもワーカーからも呼ばれる。グローバルには触らず keyOut に返す。
+bool fetchSonioxKeyOnly(String& keyOut) {
+  const uint32_t t0 = millis();
+  String body;
+  if (httpGetWithRetry(String(SONIOX_LAMBDA_URL), body, 2) != 200) {
+    Serial.println("[SONIOX_KEY] refresh failed: Lambda unreachable");
+    return false;
+  }
+  DynamicJsonDocument doc(1024);
+  if (deserializeJson(doc, body) || !doc.containsKey("api_key")) {
+    Serial.println("[SONIOX_KEY] refresh failed: bad response");
+    return false;
+  }
+  keyOut = doc["api_key"].as<String>();
+  Serial.printf("[SONIOX_KEY] refreshed ms=%lu\n", (unsigned long)(millis() - t0));
+  return !keyOut.isEmpty();
+}
+
+String sonioxStartMessageFor(const String& key);
+
+// 先行接続ワーカー（Core 0）で接続前に走る。古ければ取り直し、新しいキーで開始メッセージを作る。
+// sonioxKey と sonioxKeyFetchedMs は loop() のものなので書かない（finishSonioxPreconnect が写す）。
+bool prepareSonioxKeyOnWorker(String& startMessageOut, String& keyOut) {
+  if (!sonioxKeyIsOld()) return false;
+  Serial.printf("[SONIOX_KEY] old (age_s=%lu); refreshing on worker\n",
+                (unsigned long)((millis() - sonioxKeyFetchedMs) / 1000));
+  if (!fetchSonioxKeyOnly(keyOut)) return false;
+  startMessageOut = sonioxStartMessageFor(keyOut);
+  return true;
+}
+
+// loop() で WS を直接開く直前に呼ぶ。古ければ取り直す（1〜2秒。先行接続が無い回だけ）。
+void refreshSonioxKeyIfOld(const char* why) {
+  if (!sonioxKeyIsOld()) return;
+  Serial.printf("[SONIOX_KEY] old (age_s=%lu); refreshing on loop (%s)\n",
+                (unsigned long)((millis() - sonioxKeyFetchedMs) / 1000), why);
+  String key;
+  if (fetchSonioxKeyOnly(key)) {
+    sonioxKey = key;
+    sonioxKeyFetchedMs = millis();
+  }
+}
+
+String sonioxStartMessageFor(const String& key) {
+  return "{\"api_key\":\"" + key + "\","
          "\"model\":\"" + sonioxModel + "\","
          "\"audio_format\":\"pcm_s16le\",\"sample_rate\":16000,\"num_channels\":1,"
          "\"enable_partial_results\":true,\"enable_endpoint_detection\":true,"
          "\"language_hints\":[\"ja\",\"en\"]}";
 }
+
+String sonioxStartMessage() { return sonioxStartMessageFor(sonioxKey); }
 
 bool sonioxIsConnected() {
   return !sonioxPreconnect.ownsClient() && ws.isConnected();
@@ -238,8 +314,14 @@ bool sonioxIsConnected() {
 void finishSonioxPreconnect() {
   SonioxPreconnect::Result result;
   if (!sonioxPreconnect.takeResult(result, webSocketEvent)) return;
-  Serial.printf("[WS_PRECONNECT] elapsed_ms=%lu ready=%d cancelled=%d stack_free=%lu\n",
-                (unsigned long)result.elapsedMs, result.ready, result.cancelled, (unsigned long)result.stackFree);
+  Serial.printf("[WS_PRECONNECT] elapsed_ms=%lu ready=%d cancelled=%d stack_free=%lu prepare_ms=%lu key_refreshed=%d\n",
+                (unsigned long)result.elapsedMs, result.ready, result.cancelled, (unsigned long)result.stackFree,
+                (unsigned long)result.prepareMs, result.keyRefreshed);
+  if (result.keyRefreshed) {
+    // ワーカーが取った新しいキーを loop() の状態へ写す（接続に失敗していてもキー自体は有効）
+    sonioxKey = result.key;
+    sonioxKeyFetchedMs = result.keyFetchedMs;
+  }
   sonioxPreconnectPending = false;
   if (result.ready) sonioxConnectionReady(); // start message was already sent by the worker
 }
@@ -253,7 +335,7 @@ void prepareSonioxDuringPlayback() {
   ws.onEvent(webSocketEvent);
   ws.enableHeartbeat(15000, 3000, 2);
   sonioxPreconnectPending = true;
-  const bool background = sonioxPreconnect.start(sonioxStartMessage());
+  const bool background = sonioxPreconnect.start(sonioxStartMessage(), prepareSonioxKeyOnWorker);
   Serial.printf("[WS_PRECONNECT] started background=%d core=0\n", background);
 }
 
@@ -264,7 +346,7 @@ void serviceSoniox(const char* stage) {
   if (sonioxPreconnect.ownsClient()) return;
   if (sonioxPlaybackPhase && !ws.isConnected() && sonioxPreconnect.available()) {
     if (bargeInRequested) return; // STT restart will decide how to reconnect
-    if (sonioxPreconnect.start(sonioxStartMessage())) {
+    if (sonioxPreconnect.start(sonioxStartMessage(), prepareSonioxKeyOnWorker)) {
       sonioxPreconnectPending = true;
       return;
     }
@@ -2110,6 +2192,10 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
     case WStype_TEXT: {
       String msg = (char*)payload;
+      if (msg.indexOf("\"error_code\"") >= 0) {
+        // 期限切れのキーなどで Soniox が拒否したとき。この後 Soniox が切断し、録音は止まる。
+        Serial.printf("[STT] soniox error: %s\n", msg.c_str());
+      }
       if (msg.indexOf("\"tokens\"") >= 0) {
         String nonFinalCurrent = "";
         bool foundEndToken = false;
@@ -2236,6 +2322,7 @@ void startSTTRecording() {
     } else {
       Serial.printf("⏱️ STT [%lums] WS still not connected, starting fresh\n", millis() - t0);
       sonioxPreconnectPending = false;
+      refreshSonioxKeyIfOld("preconnect_failed");
       ws.beginSSL(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket");
       ws.onEvent(webSocketEvent);
       ws.enableHeartbeat(15000, 3000, 2);
@@ -2243,6 +2330,7 @@ void startSTTRecording() {
   } else {
     // 起動直後など先行接続が存在しない場合は待たずに即接続（従来はここで5秒無駄待ちしていた）
     Serial.printf("⏱️ STT [%lums] No preconnect pending, connecting fresh\n", millis() - t0);
+    refreshSonioxKeyIfOld("no_preconnect");
     ws.beginSSL(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket");
     ws.onEvent(webSocketEvent);
     ws.enableHeartbeat(15000, 3000, 2);
@@ -2346,25 +2434,12 @@ void startNormalOperation() {
   currentMode = MODE_NORMAL;
 
   // Sonioxキー取得（WiFi切替直後などの一時的な失敗に備えて3回リトライ）
-  HTTPClient http;
   // fw/hw/ota/part はLambdaが記録し、更新の要否判定にも使う（docs/esp32-ota-settings-plan.md）
   String initUrl = String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress
                  + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + TOYTALKER_HW_VERSION
                  + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel();
-  int code = -1;
   String resp;
-  for (int attempt = 1; attempt <= 3; attempt++) {
-    http.begin(initUrl);
-    code = http.GET();
-    if (code == 200) {
-      resp = http.getString();
-      http.end();
-      break;
-    }
-    Serial.printf("⚠️ Soniox key fetch failed (HTTP %d), attempt %d/3\n", code, attempt);
-    http.end();
-    delay(1000);
-  }
+  const int code = httpGetWithRetry(initUrl, resp, 3);
   if (code != 200) {
     Serial.println("❌ Soniox key fetch gave up");
     setLEDMode(LED_OFF);
@@ -2378,6 +2453,7 @@ void startNormalOperation() {
     return;
   }
   sonioxKey = doc["api_key"].as<String>();
+  sonioxKeyFetchedMs = millis();
   Serial.println("✅ Soniox temp key obtained");
 
   // Wi-Fi接続とLambda到達まで来た版は健全とみなし、OTA後の初回起動なら有効印を付ける
