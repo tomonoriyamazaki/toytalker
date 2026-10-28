@@ -181,7 +181,7 @@ export default function Settings() {
     return `${y}年${parseInt(m)}月`;
   };
 
-  const API_LABELS: Record<string, string> = { llm: "LLM（言語モデル）", tts: "TTS（音声合成）", stt: "STT（音声認識）", tool: "ツール（外部API）" };
+  const API_LABELS: Record<string, string> = { llm: "LLM（言語モデル）", tts: "TTS（音声合成）", stt: "STT（音声認識）", tool: "Tool（外部API）" };
   const API_TYPES = ["stt", "llm", "tts", "tool"];
 
   const CHART_COLORS: Record<string, string> = {
@@ -801,7 +801,7 @@ export default function Settings() {
                     for (const t of c.tool?.items ?? []) {
                       if (!t.cost) continue;
                       const provider = t.provider ?? "tool";
-                      const key = `ツール(${provider})`;
+                      const key = `Tool(${provider})`;
                       if (!sliceMap[key]) sliceMap[key] = { label: key, value: 0, color: CHART_COLORS[provider] ?? CHART_COLORS.tool };
                       sliceMap[key].value += t.cost;
                     }
@@ -851,7 +851,7 @@ export default function Settings() {
                         )}
                         {(c.tool?.items ?? []).map((t: any, j: number) => (
                           <View key={j} style={s.detailCostRow}>
-                            <Text style={s.detailCostLabel}>ツール</Text>
+                            <Text style={s.detailCostLabel}>Tool</Text>
                             <Text style={s.detailCostSub}>{t.provider} / {t.tool} {t.requests}回</Text>
                             <Text style={s.detailCostValue}>{formatCost(t.cost)} 円</Text>
                           </View>
