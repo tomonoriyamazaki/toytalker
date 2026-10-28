@@ -3,6 +3,9 @@ import * as s3 from "aws-cdk-lib/aws-s3";
 import * as cloudtrail from "aws-cdk-lib/aws-cloudtrail";
 import { Construct } from "constructs";
 
+/** 組織トレイルの保管先。ToyTalkerStack の AWS Backup がこの名前で参照して金庫に入れる（ロードマップ10(e)） */
+export const CLOUDTRAIL_BUCKET_NAME = "toytalker-cloudtrail-org";
+
 export interface ToyTalkerOrgStackProps extends cdk.StackProps {
   /** Organizations の組織ID（`o-…`）。組織トレイルのバケットポリシーに使う */
   readonly organizationId: string;
@@ -25,8 +28,8 @@ export class ToyTalkerOrgStack extends cdk.Stack {
     cdk.Tags.of(this).add("environment", "org");
 
     const bucket = new s3.Bucket(this, "CloudTrailBucket", {
-      bucketName: "toytalker-cloudtrail-org",
-      versioned: true, // 消されても版が残る（痛み止め。同じ権限なら版も消せる。ロードマップ10(e)、2026-10-28）
+      bucketName: CLOUDTRAIL_BUCKET_NAME,
+      versioned: true, // 雑な削除（削除マーカー）には効くが版の削除には効かない。本命は ToyTalkerStack の AWS Backup（ロードマップ10(e)、2026-10-28）
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       encryption: s3.BucketEncryption.S3_MANAGED,
       enforceSSL: true,

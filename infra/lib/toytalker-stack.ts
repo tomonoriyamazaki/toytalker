@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StageConfig } from "../config/stages.js";
 import { SECRET_PARAMS, type SecretName, type Secrets } from "./secrets.js";
+import { CLOUDTRAIL_BUCKET_NAME } from "./toytalker-org-stack.js";
 
 /** 全Lambda共通のランタイム。EOLのときはここ1か所を変える */
 export const LAMBDA_RUNTIME = lambda.Runtime.NODEJS_24_X;
@@ -440,7 +441,11 @@ export class ToyTalkerStack extends cdk.Stack {
 
     // ---- 消されても戻せる仕組み: AWS Backup + Vault Lock（ロードマップ10(a)） ----
     if (config.backup && !importPhase) {
-      this.createImmutableBackup(config, Object.values(tables), [speakersBucket, firmwareBucket]);
+      // CloudTrail の保管先（toytalker-org スタック、管理アカウントだけ）も金庫に入れる。操作記録を消されても戻せるようにする
+      const cloudTrailBucket = config.organizationId
+        ? [s3.Bucket.fromBucketName(this, "CloudTrailBucketRef", CLOUDTRAIL_BUCKET_NAME)]
+        : [];
+      this.createImmutableBackup(config, Object.values(tables), [speakersBucket, firmwareBucket, ...cloudTrailBucket]);
     }
 
     // ---- 温めルール（5分ごと、5本へ {"warmup":true}） ----
@@ -526,7 +531,7 @@ export class ToyTalkerStack extends cdk.Stack {
   }
 
   /**
-   * DynamoDB 全テーブルと S3 2バケットを日次で保管庫に取り、Vault Lock（コンプライアンスモード）で
+   * DynamoDB 全テーブルと S3 バケット（speakers・firmware、管理アカウントでは CloudTrail も）を日次で保管庫に取り、Vault Lock（コンプライアンスモード）で
    * 保持日数が過ぎるまで誰にも（管理者・root・AWS）消せなくする。守る相手は障害でなく権限の誤用
    * （管理者権限の乗っ取り、AI操作の誤承認）なので、別リージョン・別アカウントへは出さない（2026-10-27決定）。
    *

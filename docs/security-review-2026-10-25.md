@@ -51,7 +51,7 @@ CDK `infra/lib/toytalker-stack.ts` の `createImmutableBackup`。有効化は `c
 | 保管庫 | AWS Backup `toytalker-backup-rnd`（新名。暗号化は AWS 管理キー `aws/backup`、CMK は本番で） |
 | ロック | Vault Lock **コンプライアンスモード**。最小保持35日・最大36日、確定までの猶予3日（AWS の下限）。確定後は管理者・root・AWS のどれも復旧点を消せず、保管庫の設定も変えられない。復旧点が全部期限切れになれば保管庫は消せる。最大も縛るのは、無期限の復旧点を入れられて保管庫が永久に消せなくなるのを防ぐため |
 | 計画 | `toytalker-backup-rnd`、毎日 03:00 JST（開始猶予1時間・完了猶予4時間）、保持35日 |
-| 対象 | DynamoDB 8テーブル、S3 `toytalker-tts-speakers`・`toytalker-firmware`（定期スナップショット方式。継続方式は EventBridge 通知が要り、CDK管理外のファームバケットを触るので使わない。初回は全量、以後は差分） |
+| 対象 | DynamoDB 8テーブル、S3 `toytalker-tts-speakers`・`toytalker-firmware`・`toytalker-cloudtrail-org`（定期スナップショット方式。継続方式は EventBridge 通知が要り、CDK管理外のファームバケットを触るので使わない。初回は全量、以後は差分） |
 | ロール | `BackupRole`（AWS管理ポリシー4つ: Backup / Restores / S3Backup / S3Restore）。復元ジョブにもこのロールを渡す。ARN はスタック出力 `BackupRoleArn` |
 | 前提 | AWS Backup のアカウント設定で DynamoDB の「高度な機能」が有効（2026-10-28確認、`describe-region-settings` の `ResourceTypeManagementPreference.DynamoDB = true`）。無効だとバックアップが DynamoDB 側の管理になり保管庫のロックが効かない |
 | 費用 | データ合計約6MB（chat-logs 5.7MB、S3 4.6MB）。DynamoDB は毎日全量、S3 は差分で、35日分でも数百MB。月数十円 |
@@ -120,9 +120,11 @@ SSM `/toytalker/<key>` の値は AWS にしかない（ZakiCorp の2本だけサ
 
 全部失ったときの順番: Soniox（会話が始まらない）→ Google（既定LLM・TTS）→ Cartesia / ZakiCorp 2本（主なボイス）→ 残りの TTS → 検索 → 管理キー。
 
-### (e) CloudTrail バケットのバージョニング（痛み止め）
+### (e) CloudTrail の保管先を守る
 
-`toytalker-cloudtrail-org` に `versioned: true`（`infra/lib/toytalker-org-stack.ts`）。消されても版が残るが、同じ権限なら版も消せる。改ざんの検知は CloudTrail 自身のログファイル検証（有効）で。
+CloudTrail は毎回別のキーで新しいファイルを書くので、バージョニングに上書き保護の意味は無い（2026-10-28、ユーザー指摘）。残るのは「消しても削除マーカーが付くだけで版が残る」の一点で、版の削除までやられれば終わり。そこで本命は **`toytalker-cloudtrail-org` を金庫（上の (a)）の対象に足す**ことにした（根治。年に数百MB）。`versioned: true` も雑な削除への保険として残す。
+
+バケットが消されても、CloudTrail の**イベント履歴**（トレイルと無関係にアカウント・リージョンごとに管理イベントを90日保持。利用者は消せない。`aws cloudtrail lookup-events`）で直近90日の操作は追える。データイベントは含まず、組織横断では見られない。改ざんの検知は CloudTrail 自身のログファイル検証（有効）で。
 
 ## きっかけ
 
@@ -168,7 +170,7 @@ SSM `/toytalker/<key>` の値は AWS にしかない（ZakiCorp の2本だけサ
 | 今すぐ | GitHubのDependabot alerts / security updates を有効化（`.github/dependabot.yml` は追加済み） | 根治 | 済（2026-10-27） |
 | 決める | Lambdaの同時実行上限（費用燃やしの天井。`reservedConcurrentExecutions`）とInvocations/Durationのアラーム | 痛み止め | 未。上限値を決める（下の「IaC点検」） |
 | 決める | Lambdaログの保持期間（いまは無期限。会話の文字起こしがログに残る） | 根治 | 未 |
-| 10 | 消されても戻せる仕組み: AWS Backup + Vault Lock（コンプライアンス、35日）、復元訓練、鍵の再発行手順、CloudTrail バケットのバージョニング | 根治（(d)(e)は痛み止め） | CDK実装済み・deploy待ち（2026-10-28）。上の「消されても戻せる仕組み」 |
+| 10 | 消されても戻せる仕組み: AWS Backup + Vault Lock（コンプライアンス、35日。DynamoDB 8テーブル、S3 3バケット（CloudTrail 含む））、復元訓練、鍵の再発行手順 | 根治（(d)は痛み止め） | CDK実装済み・deploy待ち（2026-10-28）。上の「消されても戻せる仕組み」 |
 | 9で | `toytalker-firmware` のTLS強制（CDK管理外。取り込みと同時に） | 根治 | 未 |
 | 本番で | DynamoDB・CloudTrail・SNS・ログのCMK暗号化（[複数アカウント計画](multi-account-iac-plan.md) の決定どおり）、CloudTrailのCloudWatch Logs連携、Config + Security Hub | 根治 | 本番アカウントで |
 
