@@ -586,7 +586,7 @@ export class ToyTalkerStack extends cdk.Stack {
         ...buckets.map((b) => backup.BackupResource.fromArn(b.bucketArn)),
       ],
     });
-    new cdk.CfnOutput(this, "BackupRoleArn", { value: role.roleArn, description: "復元ジョブ（start-restore-job --iam-role-arn）に渡すロール" });
+    new cdk.CfnOutput(this, "BackupRoleArn", { value: role.roleArn, description: "IAM role for restore jobs (pass to start-restore-job --iam-role-arn)" });
   }
 
   private createTables(tableSuffix: string): Record<TableKey, dynamodb.Table> {
