@@ -92,7 +92,7 @@ aws backup describe-restore-job --restore-job-id <RestoreJobId>                 
 
 訓練の記録:
 - 2026-10-28 PITR: `toytalker-llms` → `toytalker-llms-restore-test`（最新時点）。CREATING から ACTIVE まで約5分、件数5=5、`llm_id` の一覧が一致。削除保護は付かない（`DeletionProtectionEnabled: False`）ことを確認し、削除。
-- 保管庫から: deploy 当日にオンデマンドで `toytalker-llms` を取り、復元して確認する（下の「ロック確定前」の作業。結果はここに追記）。
+- 2026-10-28 保管庫から: `start-backup-job` で `toytalker-llms` をオンデマンドで取り（約3分、447バイト、復旧点は `arn:aws:backup:...`）、`start-restore-job` で `toytalker-llms-restore-test` へ復元（約10分）。件数5=5、`llm_id` 一致。削除。復旧点の削除は Vault Lock で拒否されることになっているが、Claude Code 側の権限で試せなかったので、確認するなら手で `aws backup delete-recovery-point` を打つ（AccessDenied になるのが正常）。
 
 ### (c) URL の固定
 
