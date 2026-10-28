@@ -162,6 +162,13 @@ export default function Settings() {
     loadUsage(next);
   };
 
+  // 為替の行: rate_date はECB公表の基準日（月次Lambdaが毎月1日に前月末の値を保存）。古い行は fetched_at だけ
+  const formatRateLabel = (r: { month?: string; rate?: number | string; rate_date?: string; fetched_at?: string }) => {
+    const monthText = r.month ? `${Number(r.month.slice(5, 7))}月の` : "";
+    const asOf = r.rate_date ?? r.fetched_at?.slice(0, 10);
+    const asOfText = asOf ? `（${Number(asOf.slice(5, 7))}月${Number(asOf.slice(8, 10))}日時点）` : "";
+    return `${monthText}為替レート: 1 USD = ${r.rate}円${asOfText}`;
+  };
   const formatCost = (v: number) => {
     if (v >= 1) return `${Math.round(v * 10) / 10}`;
     if (v >= 0.01) return v.toFixed(2);
@@ -1011,7 +1018,7 @@ export default function Settings() {
                 {/* 為替レート */}
                 {rate && (
                   <Text style={s.usageRateText}>
-                    適用レート: 1 USD = {rate.rate} 円（{rate.fetched_at?.slice(0, 10)}）
+                    {formatRateLabel(rate)}
                   </Text>
                 )}
 
