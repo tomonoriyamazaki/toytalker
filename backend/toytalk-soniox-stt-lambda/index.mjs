@@ -18,6 +18,14 @@ const DEVICES_TABLE = tableName("devices");
 const FIRMWARE_BUCKET = process.env.FIRMWARE_BUCKET || "toytalker-firmware";
 const FIRMWARE_MANIFEST_KEY = "esp32s3/manifest.json";
 const FIRMWARE_URL_TTL_SEC = 600;
+// Soniox一時キーの寿命。既定は1時間（起動時の1回しか取らない古いファーム・アプリのため変えない）。
+// 期限前に取り直す新しいファーム・アプリは ?ttl=180 のように短い寿命を頼む（60〜3600秒。不正・範囲外は既定）。
+const DEFAULT_KEY_TTL_SEC = 3600;
+function keyTtlSeconds(query) {
+  const n = Number(query.ttl);
+  if (!Number.isInteger(n) || n < 60 || n > DEFAULT_KEY_TTL_SEC) return DEFAULT_KEY_TTL_SEC;
+  return n;
+}
 const MANIFEST_CACHE_MS = 60_000;
 const FIRMWARE_CHANNELS = new Set(["stable", "beta"]);
 let manifestCache = { at: 0, data: null };
@@ -99,17 +107,18 @@ export const handler = async (event, context) => {
       };
     }
 
+    const query = event.queryStringParameters ?? {};
+
     // Soniox temporary key API
     const url = "https://api.soniox.com/v1/auth/temporary-api-key";
 
     const body = {
       usage_type: "transcribe_websocket",
-      expires_in_seconds: 3600,
+      expires_in_seconds: keyTtlSeconds(query),
       client_reference_id: "toytalk-lambda",
     };
 
     // Soniox API呼び出しとデバイス設定取得を並列実行
-    const query = event.queryStringParameters ?? {};
     const deviceId = query.device_id ?? null;
     const wantsFirmware = query.ota === "1" && !!query.fw;
     trace.set({

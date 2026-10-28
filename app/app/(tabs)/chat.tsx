@@ -44,16 +44,17 @@ const SONIOX_CHANNELS = 1;
 const SONIOX_KEY_URL =
   "https://ug5fcnjsxa22vtnrzlwpfgshd40nngbo.lambda-url.ap-northeast-1.on.aws/";
 /**
- * 一時キーはLambdaが1時間有効で発行する。期限切れのキーで接続すると会話が始まらないので、
- * 取得から50分を越えたらWSを開く前に取り直す（10分の余裕は判定から接続までのズレ用）。
- * テスト時は 2 にする。
+ * 一時キーはLambdaに頼む寿命（SONIOX_KEY_TTL_SEC）で発行される。期限切れのキーで接続すると会話が
+ * 始まらないので、取得から SONIOX_KEY_MAX_AGE_MINUTES を越えたらWSを開く前に取り直す。
+ * 寿命との差（1分）は判定から接続までのズレ用。
  */
-const SONIOX_KEY_MAX_AGE_MINUTES = 2; // 試用中。本番値は 50（2026-10-28）
+const SONIOX_KEY_TTL_SEC = 180; // Lambdaに頼む寿命。指定しない古いアプリは1時間
+const SONIOX_KEY_MAX_AGE_MINUTES = 2; // 2026-10-28から試用。問題なければこれが本番値
 let sonioxKeyCache: { key: string; fetchedAt: number } | null = null;
 let sonioxKeyInflight: Promise<string> | null = null;
 
 const fetchSonioxTempKey = async (): Promise<string> => {
-  const res = await fetch(SONIOX_KEY_URL, {
+  const res = await fetch(`${SONIOX_KEY_URL}?ttl=${SONIOX_KEY_TTL_SEC}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });

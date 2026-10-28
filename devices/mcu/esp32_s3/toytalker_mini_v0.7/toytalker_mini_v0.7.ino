@@ -84,11 +84,12 @@ const char* SONIOX_LAMBDA_URL = "https://ug5fcnjsxa22vtnrzlwpfgshd40nngbo.lambda
 const char* SONIOX_WS_URL = "stt-rt.soniox.com";
 const int SONIOX_WS_PORT = 443;
 String sonioxKey;
-// 一時キーは Lambda が1時間有効で発行する。期限切れのキーで WS を開くと会話が始まらないので、
-// 取得から50分を越えたら WS を開く前に取り直す（10分の余裕は判定から接続までのズレ用）。
-// 再生中は先行接続ワーカー（Core 0）で、先行接続が無いときは録音開始前に loop() で取り直す。
-// テスト時は 2 にする。
-const uint32_t SONIOX_KEY_MAX_AGE_MINUTES = 2;  // 試用中。本番値は 50（2026-10-28）
+// 一時キーは Lambda に頼む寿命（SONIOX_KEY_TTL_SEC）で発行される。期限切れのキーで WS を開くと会話が
+// 始まらないので、取得から SONIOX_KEY_MAX_AGE_MINUTES を越えたら WS を開く前に取り直す。
+// 寿命との差（1分）は判定から接続までのズレ用。再生中は先行接続ワーカー（Core 0）で、
+// 先行接続が無いときは録音開始前に loop() で取り直す。
+const int SONIOX_KEY_TTL_SEC = 180;              // Lambda に頼む寿命。指定しない古いファームは1時間
+const uint32_t SONIOX_KEY_MAX_AGE_MINUTES = 2;   // 2026-10-28から試用。問題なければこれが本番値
 uint32_t sonioxKeyFetchedMs = 0;  // loop() だけが書く。ワーカーは読むだけ
 String sonioxModel = "stt-rt-v4";  // 起動時に1回だけ設定。以後は読み取り専用（ワーカーからも読む）
 
@@ -258,7 +259,7 @@ int httpGetWithRetry(const String& url, String& body, int attempts) {
 bool fetchSonioxKeyOnly(String& keyOut) {
   const uint32_t t0 = millis();
   String body;
-  if (httpGetWithRetry(String(SONIOX_LAMBDA_URL), body, 2) != 200) {
+  if (httpGetWithRetry(String(SONIOX_LAMBDA_URL) + "?ttl=" + SONIOX_KEY_TTL_SEC, body, 2) != 200) {
     Serial.println("[SONIOX_KEY] refresh failed: Lambda unreachable");
     return false;
   }
@@ -2437,7 +2438,8 @@ void startNormalOperation() {
   // fw/hw/ota/part はLambdaが記録し、更新の要否判定にも使う（docs/esp32-ota-settings-plan.md）
   String initUrl = String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress
                  + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + TOYTALKER_HW_VERSION
-                 + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel();
+                 + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel()
+                 + "&ttl=" + SONIOX_KEY_TTL_SEC;
   String resp;
   const int code = httpGetWithRetry(initUrl, resp, 3);
   if (code != 200) {
