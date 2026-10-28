@@ -54,6 +54,7 @@
 
 ## 済
 
+- OTA: チャンネル経由ではダウングレードしない（2026-10-28）。版を上げた開発版を USB で書いた試験機が、配布中の古い版へ戻された事故の対策。`fw_target` の固定は従来どおり古い版にも進める。0.7.3 を beta に発行済み。[OTA実装](esp32-ota-settings-plan.md)
 - Soniox一時キーの期限前の取り直し（2026-10-28）。アプリ・ESP32とも、取得から一定分数を越えていれば WS を開く前に取り直す（ESP32 は再生中の先行接続ワーカーで）。以前は起動時の1回だけで、時間が経つと期限切れのキーで会話が始まらなかった。Lambda は `?ttl=` で頼まれた寿命（60〜3600秒）で発行するようにし、指定なしは1時間のまま。試用は寿命3分・閾値2分（11）。[ESP32ファーム](esp32-firmware.md)
 - LLMに Gemini 3.5 Flash Lite と Claude Haiku 5.5 を追加（2026-10-27）。`toytalker-llms` に2行、`toytalker-api-unit-prices` に `anthropic#llm#claude-haiku-5-5`。本文Lambda2つは Gemini 3系へ `thinkingLevel: minimal`（3系は `thinkingBudget` が400）、Claude 4.6以降へ `temperature` の代わりに `effort: low`、拒否応答の一言、モデル別単価の優先。App側の Gemini 2.5 Flash も思考を切った（ESP32と同じ。それまで毎ターン約400思考トークンと2〜3秒が記録外で乗っていた）。既定は Gemini 2.5 Flash のまま。あわせて Gemini のトークン過大計上を修正（ストリーミング各チャンクの `usageMetadata` は累計値なのに足し込んでいた。入力はチャンク数倍、出力も3〜4倍で記録されていた。利用者課金前なので実害なし）。Gemini 2.5 Flash は Developer API では停止日未定（Vertex は 2026-10-20 停止）。相槌Lambdaは 2.5 Flash 直書きのまま
 - LLM呼び出しと検索ツールを `backend/shared/llm.mjs` に共通化（2026-10-27）。本文Lambda2つから各約250行を外し、3社（OpenAI / Gemini / Anthropic）を同じ形で呼ぶ。検索ツールは3社すべてに渡す（以前は Gemini だけ。プロンプトの「検索できます」だけ全社に出ていて、Haiku が `<web_search>` を文字で書く不具合があった）。Gemini 3系の `thought_signature` を往復で持ち回り、検索結果を返す2回目の要求は `tool_choice: none` 相当で答えさせる（3系は再検索を要求しがち）。実機で Gemini 3.5 Flash Lite と Haiku 5.5 の検索を確認済み

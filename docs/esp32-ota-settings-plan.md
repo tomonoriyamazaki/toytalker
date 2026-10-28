@@ -107,7 +107,7 @@ PCB資料: [PINMAP](../devices/KiCad/toytalker_mini_v0.2/PINMAP.md)、[部品表
 
 - S3バケット `toytalker-firmware`（ap-northeast-1、パブリックアクセス全遮断、SSE-S3、バージョニング有効、タグ project=toytalker / purpose=esp32-firmware-ota）。
 - Soniox Lambda と デバイス設定 Lambda はCDKスタック `ToyTalker-rnd` 経由で反映（タイムアウト5秒、devices書き込み権限、`toytalker-firmware` 読み取り権限、環境変数 `FIRMWARE_BUCKET`）。**この2本は2026-09-15にCDK管理へ移っており、`deploy.sh` で触るとドリフトになる。** 反映は `cd infra && npx cdk deploy --context stage=rnd`（[複数アカウント計画](multi-account-iac-plan.md)）。
-- 発行済み: 0.7.1（beta→試験機へUSB書き込み）、0.7.2（beta、OTAで試験機へ）。`stable` は未設定なので、beta以外の機には更新提案が出ない。配布機へ広げるときは `publish-firmware.sh stable --promote`。
+- 発行済み: 0.7.1（beta→試験機へUSB書き込み）、0.7.2（beta、OTAで試験機へ）、0.7.3（beta、2026-10-28、OTAで試験機へ。同日、版を上げた開発版を USB で書いた試験機が起動時の更新確認で 0.7.2 へ戻されたので、Lambda を「チャンネル経由ではダウングレードしない」に変更した。ダウングレード経路自体は10秒で正常に動いた）。`stable` は未設定なので、beta以外の機には更新提案が出ない。配布機へ広げるときは `publish-firmware.sh stable --promote`。
 
 ### 見込みと制約
 
