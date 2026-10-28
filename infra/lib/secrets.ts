@@ -14,15 +14,14 @@ export const REQUIRED_SECRETS = {
   CARTESIA_API_KEY: "/toytalker/cartesia-api-key",
   ZAKICORP_API_KEY: "/toytalker/zakicorp-api-key",
   ZAKICORP_EDGE_KEY: "/toytalker/zakicorp-edge-key",
-  SERPER_API_KEY: "/toytalker/serper-api-key",
+  BRAVE_API_KEY: "/toytalker/brave-api-key",
   SONIOX_API_KEY: "/toytalker/soniox-api-key",
 } as const;
 
-/** 無くてもデプロイできるもの（月次レポートが各社の請求を取りに行くときだけ使う。BRAVEは検索のSerper→Brave切替の検証用、切替時にREQUIREDへ移す） */
+/** 無くてもデプロイできるもの（月次レポートが各社の請求を取りに行くときだけ使う） */
 export const OPTIONAL_SECRETS = {
   OPENAI_ADMIN_KEY: "/toytalker/openai-admin-key",
   ANTHROPIC_ADMIN_KEY: "/toytalker/anthropic-admin-key",
-  BRAVE_API_KEY: "/toytalker/brave-api-key",
 } as const;
 
 export type RequiredSecretName = keyof typeof REQUIRED_SECRETS;

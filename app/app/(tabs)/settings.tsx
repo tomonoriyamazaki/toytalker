@@ -182,7 +182,7 @@ export default function Settings() {
     // プロバイダ別の色
     openai: "#10A37F", google: "#4285F4", gemini: "#886FBF",
     anthropic: "#D97706", elevenlabs: "#F472B6", fishaudio: "#6366F1",
-    sakura: "#EC4899", soniox: "#34C759", cartesia: "#0EA5E9", serper: "#8E8E93",
+    sakura: "#EC4899", soniox: "#34C759", cartesia: "#0EA5E9", serper: "#8E8E93", brave: "#FB542B",
   };
 
   type PieSlice = { label: string; value: number; color: string };

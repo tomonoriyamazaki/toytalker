@@ -36,7 +36,7 @@ const RECORDING_LOG_GROUPS = process.env.RECORDING_LOG_GROUPS
 // 請求額をAPIで取れない社は、確認先のURLだけ案内する
 const MANUAL_CHECK_URLS = {
   cartesia: "https://play.cartesia.ai/usage",
-  serper:   "https://serper.dev/dashboard",
+  brave:    "https://api-dashboard.search.brave.com/app/dashboard",
   google:   "https://console.cloud.google.com/billing",
   gemini:   "https://console.cloud.google.com/billing",
   soniox:   "https://console.soniox.com/",

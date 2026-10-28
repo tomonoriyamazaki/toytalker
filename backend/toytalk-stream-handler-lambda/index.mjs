@@ -136,7 +136,7 @@
       costUsd += audioTokens * Number(price.unit_price_input);
       costUsd += textTokens * Number(price.unit_price_output);
     } else if (inputUnit === "requests") {
-      // Web検索(Serper)など回数課金
+      // Web検索(Brave)など回数課金
       costUsd += (requests ?? 0) * Number(price.unit_price_input);
     }
 
@@ -777,7 +777,7 @@
     // 検索後の「前置きなし」指示はシステムプロンプトに置かず、検索結果を返すメッセージ側（TOOL_RESULT_INSTRUCTION）に添える。
     // システムプロンプトに置くと通常ターンの口調まで素っ気なくなるため。
     // 検索ツールは3社共通（backend/shared/llm.mjs）。プロンプトの「検索できます」と実際のツール付与は必ず同じ条件にする
-    const enableTools = !!secret("SERPER_API_KEY");
+    const enableTools = !!secret("BRAVE_API_KEY");
     const toolHint = enableTools ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。" : "";
     const basePrompt = `あなたは子供向けの友好的な音声アシスタントです。簡潔に答えて、自然に会話を続けてください。単語の間に半角スペースを入れないでください。現在の日時は${now}です。日時を聞かれたら年は省略して簡潔に答えてください。相手が話した言語で返答してください。${backchannelHint}${toolHint}`;
     const systemContent = personalityPrompt ? `${personalityPrompt}\n\n${basePrompt}` : basePrompt;

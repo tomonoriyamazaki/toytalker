@@ -26,28 +26,29 @@ export const WEB_SEARCH_TOOL = {
 // 外部の有料APIを呼ぶツールの課金情報。ここに無いツール（デバイス設定変更など）は無料扱いで、
 // かかるLLMトークンはLLM側に含まれる。単価は toytalker-api-unit-prices の `${provider}#tool` 行。
 export const PAID_TOOLS = {
-  web_search: { provider: "serper", model: "google-search" },
+  web_search: { provider: "brave", model: "web-search" },
 };
 
 // 検索結果と一緒に渡す指示。検索直後のターンだけに効かせ、通常ターンの口調には影響させない。
 export const TOOL_RESULT_INSTRUCTION = "この検索結果をもとに答えてください。「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は入れず、答えの中身から話し始めてください。口調や温かさはいつも通りのキャラクターのままで、そのあとも自然に会話を続けてください。";
 
-/** Serper（Google検索）。結果は [{ title, snippet, url }] */
+/** Brave Search API（自社インデックス、SOC 2、クエリ不共有）。結果は [{ title, snippet, url }]。
+ *  2026-10-27に Serper（Google結果の仲介）から切替。子供向け日本語20問で上位3件を比べ同等以上、応答は約半分、
+ *  月1,000回まで無料で以後 $5/1,000回。送るのはLLMが作った検索語だけで、識別子や発話そのものは送らない */
 export async function searchWeb(query, numResults = 3) {
-  const key = secret("SERPER_API_KEY");
-  if (!key) throw new Error("SERPER_API_KEY is not set");
+  const key = secret("BRAVE_API_KEY");
+  if (!key) throw new Error("BRAVE_API_KEY is not set");
   console.log(`[SearchWeb] query=${JSON.stringify(query)}`);
-  const resp = await fetch("https://google.serper.dev/search", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-API-KEY": key },
-    body: JSON.stringify({ q: query, num: numResults, safe: "active", gl: "jp", hl: "ja" }),
+  const params = new URLSearchParams({ q: query, count: String(numResults), country: "JP", search_lang: "ja", safesearch: "strict" });
+  const resp = await fetch(`https://api.search.brave.com/res/v1/web/search?${params}`, {
+    headers: { Accept: "application/json", "X-Subscription-Token": key },
   });
-  if (!resp.ok) throw new Error(`Serper API error: ${resp.status}`);
+  if (!resp.ok) throw new Error(`Brave API error: ${resp.status}`);
   const data = await resp.json();
-  const results = (data.organic ?? []).slice(0, numResults).map((item) => ({
+  const results = (data.web?.results ?? []).slice(0, numResults).map((item) => ({
     title: item.title ?? "",
-    snippet: item.snippet ?? "",
-    url: item.link ?? "",
+    snippet: item.description ?? "",
+    url: item.url ?? "",
   }));
   console.log(`[SearchWeb] results: ${JSON.stringify(results.map((r) => r.title))}`);
   return results;
