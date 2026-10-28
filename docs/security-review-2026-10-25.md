@@ -90,7 +90,9 @@ aws backup describe-restore-job --restore-job-id <RestoreJobId>                 
 
 本番で本当に消されたとき: 元の名前で復元する（`TargetTableName=toytalker-llms`）。CloudFormation は名前で資源を見ているので、同じ名前で戻せばスタックのドリフトも消える。復元後に削除保護と PITR を `aws dynamodb update-table` で付け直す（次の `cdk deploy` でも揃う）。Lambda はテーブル名しか知らないので、コードやdeployは要らない。
 
-訓練の記録: 未実施（PITR 訓練は deploy を待たずにできる。保管庫からの訓練は初回バックアップの後）。
+訓練の記録:
+- 2026-10-28 PITR: `toytalker-llms` → `toytalker-llms-restore-test`（最新時点）。CREATING から ACTIVE まで約5分、件数5=5、`llm_id` の一覧が一致。削除保護は付かない（`DeletionProtectionEnabled: False`）ことを確認し、削除。
+- 保管庫から: deploy 当日にオンデマンドで `toytalker-llms` を取り、復元して確認する（下の「ロック確定前」の作業。結果はここに追記）。
 
 ### (c) URL の固定
 
@@ -169,7 +171,7 @@ CloudTrail は毎回別のキーで新しいファイルを書くので、バー
 | 今すぐ | GitHubのDependabot alerts / security updates を有効化（`.github/dependabot.yml` は追加済み） | 根治 | 済（2026-10-27） |
 | 決める | Lambdaの同時実行上限（費用燃やしの天井。`reservedConcurrentExecutions`）とInvocations/Durationのアラーム | 痛み止め | 未。上限値を決める（下の「IaC点検」） |
 | 決める | Lambdaログの保持期間（いまは無期限。会話の文字起こしがログに残る） | 根治 | 未 |
-| 10 | 消されても戻せる仕組み: AWS Backup + Vault Lock（コンプライアンス、35日。DynamoDB 8テーブル、S3 3バケット（CloudTrail 含む））、復元訓練、鍵の再発行手順 | 根治（(d)は痛み止め） | CDK実装済み・deploy待ち（2026-10-28）。上の「消されても戻せる仕組み」 |
+| 10 | 消されても戻せる仕組み: AWS Backup + Vault Lock（コンプライアンス、35日。DynamoDB 8テーブル、S3 3バケット（CloudTrail 含む））、復元訓練、鍵の再発行手順 | 根治（(d)は痛み止め） | **deploy 済（2026-10-28 19:39 JST。ロック確定は 2026-10-31 19:39 JST）**。PITR 訓練済。上の「消されても戻せる仕組み」 |
 | 9で | `toytalker-firmware` のTLS強制（CDK管理外。取り込みと同時に） | 根治 | 未 |
 | 本番で | DynamoDB・CloudTrail・SNS・ログのCMK暗号化（[複数アカウント計画](multi-account-iac-plan.md) の決定どおり）、CloudTrailのCloudWatch Logs連携、Config + Security Hub | 根治 | 本番アカウントで |
 

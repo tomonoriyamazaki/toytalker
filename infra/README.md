@@ -32,7 +32,7 @@ cdk-nag で受け入れる指摘は `lib/toytalker-stack.ts` の `acknowledgeNag
 
 - **`cdk synth`/`diff`/`deploy` にはAWS資格情報が要る**（SSMの登録の有無を確かめるため。値は読まない）。起動時にアカウントIDが `stages.ts` と一致しないと止まる。**`cdk bootstrap` も `infra/` で実行するとアプリを読み込んで同じ検査で止まる**（新しいアカウントにはまだ鍵が無い）。bootstrapは cdk.json の無いディレクトリから実行する（下の「新しい環境の立ち上げ」。2026-10-15、STGで判明）。
 - **`NodejsFunction` は使っていない。** `npx esbuild` をリポジトリ直下で起動してインストール確認待ちで止まるため、esbuildのAPIを直接呼ぶ `bundleLambda` を使っている。
-- 各Lambdaディレクトリの `node_modules` が無いとバンドルできない。clone直後は `bash scripts/install-lambda-deps.sh`。
+- 各Lambdaディレクトリの `node_modules` が無いとバンドルできない。clone直後は `bash scripts/install-lambda-deps.sh`。**deploy前にも毎回実行する。** `node_modules` は git 管理外なので、別の作業ツリーで `package-lock.json` を更新して deploy したあと、main の古い `node_modules` から deploy すると依存が lock より前の版に戻る（2026-10-28、ESP32用Lambda 2本の undici が 8.12.3→8.7.0 に戻った。`cdk diff` には S3Key の変化としてしか出ない）。
 - 名前を固定した資源（Lambda・テーブル・S3）の名前や部品IDを変えると作り直しになる。`cdk diff` の requires replacement を必ず見る。Lambdaの作り直しはFunction URLのホスト名が変わり、アプリとESP32が壊れる。
 - 新しいCloudFormation資源を既存スタックに `cdk import` するときは、import操作にそれ以外の変更を含められない（`--context importPhase=true` の仕組みは下の「importで引き取る手順」）。
 - CDKが環境変数を上書きするので、手作業でLambdaの環境変数を変えても次のdeployで戻る。
