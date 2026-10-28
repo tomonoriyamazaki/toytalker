@@ -98,7 +98,7 @@ aws backup describe-restore-job --restore-job-id <RestoreJobId>                 
 
 ### (d) 鍵の再発行手順（痛み止め）
 
-SSM `/toytalker/<key>` の値は AWS にしかない（ZakiCorp の2本だけサーバー側 `.env` にも同値がある）。アカウントを失ったら全部を発行元で作り直す。値はどこにも書かない。名前の正本は `infra/lib/secrets.ts`、各社へのログインは exodjp@gmail.com（Gmail が要石、脅威モデル#7）。
+SSM `/toytalker/<key>` の値（必須11本・任意2本）は AWS にしかない（ZakiCorp の2本だけサーバー側 `.env` にも同値がある）。アカウントを失ったら全部を発行元で作り直す。値はどこにも書かない。名前の正本は `infra/lib/secrets.ts`、各社へのログインは exodjp@gmail.com（Gmail が要石、脅威モデル#7）。
 
 入れ替えの共通手順（無停止）: (1) 発行元で新しい鍵を作る（古い鍵はまだ消さない） → (2) `cd infra && printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts rnd <NAME> --overwrite` → (3) 稼働中の Lambda は5分を過ぎた次の呼び出しで取り直す。会話1回か CloudWatch の `[secrets] loaded` で確認 → (4) 発行元で古い鍵を消す。deploy は要らない。
 
@@ -113,8 +113,7 @@ SSM `/toytalker/<key>` の値は AWS にしかない（ZakiCorp の2本だけサ
 | `cartesia-api-key` | play.cartesia.ai → API Keys | TTS とクローンボイス登録。前払いクレジット |
 | `zakicorp-api-key` | 自分で発行（乱数）。サーバー側 `tts-models/faster-qwen3-tts/scripts/.env` の `ZAKICORP_API_KEY` と同値 | サーバー側は新旧両方を受け付けないので、短い停止を保守時間に。手順は [起動・復旧](tts-boot-recovery.md) |
 | `zakicorp-edge-key` | 自分で発行。Cloudflare WAF ルール `tts-edge-key-required`（ゾーン `zakicorp.com`）と `.env` と SSM の3か所 | 無停止の順番（ルールを新旧どちらでも通す → SSM と `.env` → ルールを新だけに）は [起動・復旧](tts-boot-recovery.md) の「拠点での遮断」 |
-| `serper-api-key` | serper.dev のダッシュボード（前払いクレジット、6か月で失効） | Web検索。別セッション（worktree `add-llm-models`）で Brave へ切替中。切替後は `brave-api-key` が必須になり Serper は不要 |
-| `brave-api-key` | api-dashboard.search.brave.com → API Keys | 2026-10-28時点は任意（切替の検証用） |
+| `brave-api-key` | api-dashboard.search.brave.com → API Keys | Web検索（2026-10-28 に Serper から切替。Serper の鍵は SSM から削除済み、アカウント解約待ち） |
 | `soniox-api-key` | console.soniox.com → API Keys | STT。Lambda がこの親鍵から一時鍵を発行する。止まると会話が始まらない |
 | `openai-admin-key` / `anthropic-admin-key` | OpenAI: Organization settings → Admin keys。Anthropic: Settings → Admin keys | 任意。月次レポートが請求額を取るときだけ。読み取り専用に絞れないので当面置かない方針（[原価と課金](pricing-and-cost-model.md)） |
 
