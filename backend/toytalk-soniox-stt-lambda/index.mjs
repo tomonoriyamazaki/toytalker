@@ -143,6 +143,9 @@ export const handler = async (event, context) => {
       source: deviceId ? "esp" : "app", device_id: deviceId,
       fw: query.fw ? String(query.fw).slice(0, 32) : null, hw: query.hw ? String(query.hw).slice(0, 16) : null,
       ota_check: wantsFirmware, ua: event.headers?.["user-agent"] ?? null,
+      // 頼まれた寿命（秒）。null は ttl を付けない古いファーム・アプリ（1時間）。3分キーへの移行状況をログで数えるため
+      ttl_sec: body.expires_in_seconds, ttl_requested: query.ttl != null,
+      app_version: query.app_version ? String(query.app_version).slice(0, 16) : null,
     });
 
     const sonioxStart = Date.now();

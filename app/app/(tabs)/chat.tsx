@@ -54,7 +54,8 @@ let sonioxKeyCache: { key: string; fetchedAt: number } | null = null;
 let sonioxKeyInflight: Promise<string> | null = null;
 
 const fetchSonioxTempKey = async (): Promise<string> => {
-  const res = await fetch(`${SONIOX_KEY_URL}?ttl=${SONIOX_KEY_TTL_SEC}`, {
+  // app_version は Lambda の切り分けログ用（本文・相槌と同じ）
+  const res = await fetch(`${SONIOX_KEY_URL}?ttl=${SONIOX_KEY_TTL_SEC}&app_version=${encodeURIComponent(APP_VERSION)}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
   });
