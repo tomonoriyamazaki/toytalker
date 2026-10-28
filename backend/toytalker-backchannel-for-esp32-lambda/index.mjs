@@ -10,6 +10,7 @@ import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { Agent, setGlobalDispatcher } from "undici";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 
 // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
 // 会話の間が空くとLLM/TTSへのTLS接続が閉じられ、次の相槌でハンドシェイクからやり直しになる
@@ -330,12 +331,7 @@ function trimSilence(pcm, { threshold = 512, padMs = 80, sampleRate = 24000 } = 
   const pad = Math.round(sampleRate * padMs / 1000);
   const headCut = Math.max(0, start - pad);
   const tailCut = Math.min(total - 1, end + pad);
-  const trimmed = pcm.slice(headCut * 2, (tailCut + 1) * 2);
-  const cutMs = Math.round(((total - (tailCut - headCut + 1)) / sampleRate) * 1000);
-  if (cutMs > 0) {
-    console.log(`[TrimSilence] cut ${cutMs}ms (head ${Math.round(headCut / sampleRate * 1000)}ms, tail ${Math.round((total - 1 - tailCut) / sampleRate * 1000)}ms)`);
-  }
-  return trimmed;
+  return pcm.slice(headCut * 2, (tailCut + 1) * 2);
 }
 
 // ---- TTS ルーティング ----
@@ -354,12 +350,18 @@ async function generateTTSPcm(text, vendor, voice) {
 }
 
 // ---- Handler (BUFFEREDモード - isBase64Encodedでバイナリ返却) ----
-export const handler = async (event) => {
+export const handler = async (event, context) => {
   const start = Date.now();
+  // 切り分け用のログ。1リクエスト1行のJSONで、聞こえた断片も相槌の文章も書かない（backend/shared/trace.mjs）
+  let trace = null;
+  let ttsVendor = "sakura";
+  let ttsVoice = "zundamon";
   try {
     await ensureSecrets();
     const body = event.body ? JSON.parse(event.body) : {};
     if (body.warmup) return { statusCode: 200, body: "warm" };  // EventBridgeウォームアップping
+    trace = startTrace("backchannel", { event, context, t0: start });
+    trace.mark("secrets");
     prewarmSpareInstance();  // 処理中に予備インスタンスを温める（同時2人目対策）
     prewarmConnections();    // LLM/TTS接続を先行確立（keep-alive切れ時の保険、非同期）
     const partialText = body.partial_text ?? "";
@@ -367,14 +369,13 @@ export const handler = async (event) => {
     const characterId = body.character_id ?? null;
     const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
     const pastBackchannels = Array.isArray(body.past_backchannels) ? body.past_backchannels.slice(-10) : [];
+    trace.set({ source: "esp", device_id: deviceId, character_id: characterId, partial_chars: partialText.length, history_turns: history.length, ...describeClient(event, body) });
 
     if (!partialText) {
       return { statusCode: 400, body: JSON.stringify({ error: "partial_text is required" }) };
     }
 
     // キャラクター設定を解決（device_id優先、なければcharacter_id）
-    let ttsVendor = "sakura";
-    let ttsVoice = "zundamon";
     let personalityPrompt = null;
 
     let charConfig = null;
@@ -391,25 +392,29 @@ export const handler = async (event) => {
       ttsVoice = charConfig.vendorId ?? ttsVoice;
       personalityPrompt = charConfig.personalityPrompt;
     }
+    trace.set({ tts: ttsVendor, voice: ttsVoice, has_personality: !!personalityPrompt });
+    trace.mark("config");
 
     // LLM生成
     const backchannelText = await generateBackchannel(partialText, personalityPrompt, history, pastBackchannels);
-    console.log(`[Backchannel] "${partialText}" → "${backchannelText}" (${Date.now() - start}ms) history=${history.length}turns`);
+    trace.mark("llm_done");
+    trace.set({ reply_chars: backchannelText.length });
 
     // TTS生成 (raw PCM)
-    const ttsStart = Date.now();
     let rawPcm;
     try {
       rawPcm = await generateTTSPcm(backchannelText, ttsVendor, ttsVoice);
     } catch (e) {
       // 主プロバイダーが失敗（同時接続上限など）したら即ずんだもん。相槌は短いので再試行しない
       if (ttsVendor === "sakura") throw e;
-      console.warn(`[TTS] ${ttsVendor} unavailable -> fallback sakura: ${e?.message || e}`);
+      trace.ext(ttsVendor, { status: errorStatus(e), error: true });
+      trace.error("tts_primary", e); // この後ずんだもんへ切り替える
+      trace.set({ tts_fallback: "sakura" });
       rawPcm = await ttsPcmSakura(backchannelText, { model: "zundamon" });
     }
     const pcmBuffer = trimSilence(rawPcm);
-    console.log(`[TTS] ${ttsVendor}/${ttsVoice} pcm=${pcmBuffer.length}bytes (${Date.now() - ttsStart}ms)`);
-    console.log(`[Total] ${Date.now() - start}ms`);
+    trace.mark("tts_done");
+    trace.set({ pcm_bytes: pcmBuffer.length, trim_ms: Math.round((rawPcm.length - pcmBuffer.length) / 48) });
 
     return {
       statusCode: 200,
@@ -423,10 +428,12 @@ export const handler = async (event) => {
       isBase64Encoded: true,
     };
   } catch (err) {
-    console.error("[Backchannel] error:", err);
+    if (trace) trace.error("handler", err); else console.error("[backchannel] failed before trace:", err?.name, err?.message);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: err.message }),
     };
+  } finally {
+    trace?.finish();
   }
 };

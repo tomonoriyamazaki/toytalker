@@ -10,6 +10,7 @@
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
+  import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 
   // ---- 予備インスタンスの事前ウォームアップ ----
   // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -67,7 +68,6 @@
       }
       cachedPrices = prices;
       cacheLoadedAt = Date.now();
-      console.log(`[Pricing] cached ${Object.keys(prices).length} prices, margin=${cachedMargin}`);
     } catch (e) {
       console.error("[Pricing] cache load error:", e);
     }
@@ -498,11 +498,7 @@
   // 一度切り替えたらその返答の残りはずんだもんのまま。仕様: docs/tts-fallback-and-notifications.md
   const TTS_RETRY_WAITS_MS = [300, 600];
   const TTS_FALLBACK_NOTICE = "いまはこんでいるから、べつのこえでおはなしするね。";
-  function ttsErrorStatus(e) {
-    if (typeof e?.status === "number") return e.status;
-    const m = /\b([45]\d{2})\b/.exec(String(e?.message || ""));
-    return m ? Number(m[1]) : null;
-  }
+  const ttsErrorStatus = errorStatus;
   function isRetryableTtsError(e) {
     const s = ttsErrorStatus(e);
     return s === 429 || s === 408 || (s !== null && s >= 500);
@@ -681,12 +677,16 @@
     }
   }
 
-  export const handler = awslambda.streamifyResponse(async (event, res) => {
+  export const handler = awslambda.streamifyResponse(async (event, res, context) => {
+    const requestAt = Date.now();
     res.setContentType("text/event-stream");
     await ensureSecrets();
 
     const body      = event.body ? JSON.parse(event.body) : {};
     if (body.warmup) { res.end(); return; }  // EventBridgeウォームアップping（コールドスタート対策）
+    // 切り分け用のログ。1リクエスト1行のJSONで、会話の文章は書かない（backend/shared/trace.mjs）
+    const trace = startTrace("turn", { event, context, t0: requestAt });
+    trace.mark("secrets");
     prewarmSpareInstance();  // 処理中に予備インスタンスを温める（同時2人目対策）
     const messages  = body.messages ?? [{ role:"user", content:"自己紹介して" }];
     const rawModel  = typeof body.model === "string" ? body.model : undefined;
@@ -700,15 +700,20 @@
     const sessionId  = typeof body.session_id === "string" ? body.session_id : "unknown";
     const ownerId    = typeof body.owner_id   === "string" ? body.owner_id   : "user_123";
     const deviceId   = typeof body.device_id  === "string" ? body.device_id  : "app";
-    const requestAt  = Date.now();
     const userTimestamp = new Date(requestAt).toISOString();
+    const backchannelFired = !!body.backchannel_fired;
+    const characterId = typeof body.character_id === "string" ? body.character_id : null;
+    trace.set({
+      source: "app", session_id: sessionId, device_id: deviceId, owner_id: ownerId, character_id: characterId,
+      backchannel_fired: backchannelFired, history_messages: messages.length,
+      user_chars: messages[messages.length - 1]?.content?.length ?? 0,
+      ...describeClient(event, body),
+    });
 
     // 単価キャッシュ・デフォルトLLMを先にロード（await不要、バックグラウンドで）
     loadPricingCache();
     loadDefaultLlm();
 
-    const backchannelFired = !!body.backchannel_fired;
-    const characterId = typeof body.character_id === "string" ? body.character_id : null;
     if (characterId) {
       const charConfig = await resolveCharacterFromDynamo(characterId);
       if (charConfig) {
@@ -717,7 +722,9 @@
         personalityPrompt = charConfig.personalityPrompt;
         llmProvider = charConfig.llmProvider;
         llmModelId  = charConfig.llmModelId;
-        console.log(`[Character] id=${characterId}, tts=${charConfig.provider}, voice=${charConfig.vendorId}, llm=${llmProvider}/${llmModelId}`);
+        trace.set({ has_personality: !!personalityPrompt });
+      } else {
+        trace.set({ character_found: false }); // キャラクターかボイスが無い。body の値で続ける
       }
     }
 
@@ -727,9 +734,10 @@
       llmProvider = d.provider;
       llmModelId  = d.modelId;
     }
-    console.log(`[LLM] provider=${llmProvider}, model=${llmModelId}`);
 
     const cfg = TTS_TABLE[ttsKey] ?? TTS_TABLE[TTS_DEFAULT];
+    trace.set({ llm: `${llmProvider}/${llmModelId}`, tts: cfg.ttsVendor, voice });
+    trace.mark("config");
 
     // ---- ユーザーメッセージ保存 ----
     const lastUserMsg = messages[messages.length - 1];
@@ -799,7 +807,7 @@
 
     // ---- LLM ストリーム（共通モジュール。会社ごとの違いは backend/shared/llm.mjs に閉じる）----
     const toolsDef = enableTools ? [WEB_SEARCH_TOOL] : null;
-    const createLLMStream = (msgs, opts = {}) => chatStream({ provider: llmProvider, model: llmModelId, messages: msgs, tools: toolsDef, usage: llmUsage, ...opts });
+    const createLLMStream = (msgs, opts = {}) => chatStream({ provider: llmProvider, model: llmModelId, messages: msgs, tools: toolsDef, usage: llmUsage, trace, ...opts });
 
     let llmStream = createLLMStream(messagesWithSystem);
 
@@ -821,9 +829,15 @@
         firstTtsMarked = true;
       }
 
+      // ログ用（1文ごと）: text_at=LLMから文が揃った時刻、tts_ms=合成にかかった時間、sent_at=音声を書き終えた時刻。
+      // 時刻はリクエスト開始からのms
+      const seg = { id: segSeq, chars: t.length, text_at: trace.elapsed(), vendor: cfg.ttsVendor, attempts: 0 };
+      const ttsStart = Date.now();
+
       // 音声チャンク（textは載せない）
       // 主プロバイダーで合成。429/5xx は短く再試行し、だめならこの返答の残りはずんだもんで続ける
       async function synthesizePrimary(t) {
+        seg.attempts++;
         let b64, fmt;
         if (cfg.ttsVendor === "openai") {
           b64 = await ttsToBase64OpenAI(t, voice, cfg.ttsModel);
@@ -871,7 +885,7 @@
         }
         return { b64, fmt };
       }
-      const synthesizeFallback = async (t) => ({ b64: await ttsToBase64Sakura(t, { model: "zundamon" }), fmt: "wav" });
+      const synthesizeFallback = async (t) => { seg.attempts++; return { b64: await ttsToBase64Sakura(t, { model: "zundamon" }), fmt: "wav" }; };
       try {
         let out;
         let usedFallback = false;
@@ -883,15 +897,17 @@
             out = await synthesizePrimary(t);
           } catch (e) {
             let lastErr = e;
+            trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e), ms: Date.now() - ttsStart, error: true });
             if (cfg.ttsVendor !== "sakura" && isRetryableTtsError(e)) {
               for (const wait of TTS_RETRY_WAITS_MS) {
                 await sleepMs(wait);
-                try { out = await synthesizePrimary(t); lastErr = null; break; } catch (e2) { lastErr = e2; }
+                try { out = await synthesizePrimary(t); lastErr = null; break; }
+                catch (e2) { lastErr = e2; trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e2), error: true, retry: true }); }
               }
             }
             if (lastErr) {
               if (cfg.ttsVendor === "sakura") throw lastErr;
-              console.warn(`[TTS] ${cfg.ttsVendor} unavailable (${ttsErrorStatus(lastErr) ?? "?"}) -> fallback sakura: ${lastErr?.message || lastErr}`);
+              trace.error("tts_primary", lastErr); // この後ずんだもんへ切り替える
               ttsFallbackActive = true;
               usedFallback = true;
               // 切り替わった最初の文の頭に一言添える（音声だけ。画面のテキストは変えない）
@@ -900,21 +916,29 @@
             }
           }
         }
-        if (usedFallback) ttsFallbackChars += t.length; else ttsInputChars += t.length;
+        seg.tts_ms = Date.now() - ttsStart;
+        seg.bytes = Math.round(out.b64.length * 3 / 4);
+        if (usedFallback) { seg.fallback = "sakura"; ttsFallbackChars += t.length; } else ttsInputChars += t.length;
         send(res, "tts", { id: segSeq, format: out.fmt, b64: out.b64, ...(usedFallback ? { fallback: "sakura" } : {}) });
+        seg.sent_at = trace.elapsed();
       } catch (e) {
+        seg.error = ttsErrorStatus(e) ?? e?.name ?? "error";
+        trace.error("tts", e);
         send(res, "error", { message: `TTS failed: ${e?.message || e}` });
       }
+      trace.segment(seg);
     }
 
     // ---- LLM ストリーム処理（共通インターフェース）----
     try {
       // ---- LLM ストリーム処理（tool callループ対応）----
       let toolCallDetected = false;
+      trace.mark("llm_start");
       for await (const delta of llmStream) {
         if (delta.type === "toolCall") {
           toolCallDetected = true;
-          console.log(`[ToolCall] ${delta.name}(${JSON.stringify(delta.args)})`);
+          trace.mark("tool_call");
+          trace.set({ tool: delta.name }); // 検索語は発話から作られるので書かない
           // tool call前のつなぎテキストをflush
           const preBuf = buf.trim();
           if (preBuf) {
@@ -926,11 +950,10 @@
           let toolResult;
           if (delta.name === "web_search") {
             try {
-              toolResult = await searchWeb(delta.args.query);
+              toolResult = await searchWeb(delta.args.query, 3, trace);
               toolCalls.web_search = (toolCalls.web_search ?? 0) + 1;
-              console.log(`[ToolCall] search returned ${toolResult.length} results`);
             } catch (e) {
-              console.error(`[ToolCall] search error:`, e);
+              trace.error("web_search", e);
               toolResult = [{ title: "検索エラー", snippet: "検索に失敗しました", url: "" }];
             }
           } else {
@@ -940,12 +963,14 @@
           messagesWithSystem.push(...toolRoundMessages(delta, { results: toolResult, instruction: TOOL_RESULT_INSTRUCTION }));
           // 2回目は検索結果で答えさせる（Gemini 3系は再検索を要求しがちで、無視すると本文が空になる）
           llmStream = createLLMStream(messagesWithSystem, { toolChoice: "none" });
+          trace.mark("llm2_start");
 
           for await (const delta2 of llmStream) {
             if (delta2.type === "toolCall") {
-              console.log(`[ToolCall] nested tool call ignored: ${delta2.name}`);
+              trace.set({ nested_tool_ignored: delta2.name });
               break;
             }
+            trace.mark("llm2_first_token");
             textAll += delta2.text;
             buf     += delta2.text;
             if (DEBUG) send(res, "llm_token", { token: delta2.text });
@@ -963,6 +988,7 @@
           }
           break;
         }
+        trace.mark("llm_first_token");
         textAll += delta.text;
         buf     += delta.text;
         if (DEBUG) send(res, "llm_token", { token: delta.text });
@@ -978,6 +1004,7 @@
           await emitSegment(segText);
         }
       }
+      trace.mark("llm_done");
       // 残り
       const tail = buf.trim();
       if (tail.length > 0) {
@@ -985,6 +1012,7 @@
         await emitSegment(tail, { final: true });
       }
       send(res, "done", {});
+      trace.mark("done_sent");
 
       // ---- コスト計算 + usage書き込み + ログ保存 ----
       if (sessionId !== "unknown" && textAll.trim()) {
@@ -1076,11 +1104,19 @@
           cost_tool: toolCostTotal,
           cost_total: (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0) + toolCostTotal,
         });
+        trace.mark("usage_saved");
       }
     } catch (err) {
+      trace.error("handler", err);
       const msg = (err && err.message) ? err.message : String(err);
       send(res, "error", { message: msg });
     } finally {
       res.end();
+      trace.finish({
+        segments_count: segSeq, reply_chars: textAll.trim().length,
+        llm_tokens_in: llmUsage.in, llm_tokens_out: llmUsage.out,
+        tts_chars: ttsInputChars, tts_fallback_chars: ttsFallbackChars || undefined,
+        tool_calls: Object.keys(toolCalls).length > 0 ? toolCalls : undefined,
+      });
     }
   });

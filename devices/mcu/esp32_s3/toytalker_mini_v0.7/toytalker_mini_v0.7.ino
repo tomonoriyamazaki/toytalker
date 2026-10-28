@@ -1540,7 +1540,7 @@ void fetchBackchannel(void* param) {
   Serial.printf("[BC] Free heap before: %d\n", ESP.getFreeHeap());
 
   String url = String("https://") + BACKCHANNEL_HOST + BACKCHANNEL_PATH;
-  String payload = "{\"partial_text\":\"" + partial + "\"";
+  String payload = "{\"partial_text\":\"" + partial + "\",\"fw\":\"" TOYTALKER_FW_VERSION "\"";
   if (charId.length() > 0) {
     payload += ",\"device_id\":\"" + charId + "\"";
   }
@@ -1839,11 +1839,13 @@ void sendToLambdaAndPlay(const String& text) {
                 backchannelForReply, backchannelPlanned, (bool)backchannelFired,
                 (unsigned)(backchannelPlanned ? backchannelPcmSize : 0));
 
+  // fw: Lambdaの切り分けログ用（どの版の本体からの要求か）。文章は chat-logs に残り、ログには時刻と識別子だけが出る
   String payload =
     "{\"model\":\"" + String(TTS_PROVIDER) + "\",\"voice\":\"" + String(TTS_CHARACTER) + "\","
     "\"device_id\":\"" + deviceMacAddress + "\","
     "\"session_id\":\"" + sessionId + "\","
     "\"owner_id\":\"" + deviceMacAddress + "\","
+    "\"fw\":\"" TOYTALKER_FW_VERSION "\","
     "\"backchannel_fired\":" + (backchannelForReply ? "true" : "false") + ","
     "\"messages\":" + messagesJson + "}";
 

@@ -14,7 +14,7 @@ PC再起動後、人がログオンする前にクローン音声を復旧させ
 
 監視は15秒間隔。既存のAPI/ngrokプロセスを引き継ぎ、二重起動を避ける。APIは実行ファイル・引数・作業ディレクトリを照合する。プロセス終了後は30秒待って再起動する。自分が起動したプロセスについて、ヘルスチェックが10分間連続で失敗した場合にも再起動する。引き継いだ既存プロセスはヘルス失敗だけでは停止しない。
 
-`/health`は現行APIの起動処理（モデルロード・ウォームアップ）後に応答する。公開URLの`/health`も確認してから、6つのLambda（`supervisor.py` の `FUNCTIONS`）のURLを照合する。固定URL（`public_url` 設定時）は照合と警告だけで書き込まない（正本はCDK）。ngrok経路ではURL変更時のみ更新し、他の環境変数を保持し、RevisionIdによって同時変更の上書きを防ぐ。通信不通なら次の監視周期で再試行する。音声生成自体の継続的な成功まではヘルスチェックだけでは保証しない。
+`/health`は現行APIの起動処理（モデルロード・ウォームアップ）後に応答する。公開URLの`/health`も確認する。固定URL（`public_url` 設定時）はLambdaに触らない（正本はCDK。照合は2026-10-28に外した）。ngrok経路では6つのLambda（`supervisor.py` の `FUNCTIONS`）の `ZAKICORP_TTS_URL` をURL変更時のみ更新し、他の環境変数を保持し、RevisionIdによって同時変更の上書きを防ぐ。通信不通なら次の監視周期で再試行する。音声生成自体の継続的な成功まではヘルスチェックだけでは保証しない。
 
 認証情報は従来の `.env`、AWSプロファイル、ngrok設定を参照し、Gitへコピーしない。APIキーが空の場合は起動を拒否する。ログは `.local/tts-service/logs/` に保存する。APIログには会話関連情報が含まれる可能性があるため共有前に確認する。現段階ではログの自動世代管理は未実装。
 
@@ -42,7 +42,7 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 
 ## 公開経路: Cloudflare Tunnel（2026-09-13切替）
 
-本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 6本の `ZAKICORP_TTS_URL` はこの値で、正本は `infra/config/stages.ts` の `zakicorpTtsUrl`（CDKがdeployのたびに配る）。監視タスクは `config.json` の `public_url` と照合するだけで、書き換えない（違えばログに警告）。URLを変えるときは `stages.ts` と `config.json` の両方を直す。`public_url` が設定されている間、監視タスクはngrokを起動しない（2026-09-13 18:02に撤去。起動していれば停止する）。`public_url` を空にするとngrokを再び起動して予備経路に戻る。
+本番TTSの公開URLは **`https://tts.zakicorp.com`**（固定）。Lambda 6本の `ZAKICORP_TTS_URL` はこの値で、正本は `infra/config/stages.ts` の `zakicorpTtsUrl`（CDKがdeployのたびに配る）。監視タスクは `public_url` の `/health` を見るだけで、Lambdaには触らない（照合は2026-10-28に外した）。URLを変えるときは `stages.ts` と `config.json` の両方を直す。`public_url` が設定されている間、監視タスクはngrokを起動しない（2026-09-13 18:02に撤去。起動していれば停止する）。`public_url` を空にするとngrokを再び起動して予備経路に戻る。
 
 | 項目 | 値・場所 |
 |---|---|
@@ -53,7 +53,7 @@ Get-Content .\.local\tts-service\logs\supervisor.log -Tail 20
 | 認証情報（Git対象外、秘密） | `C:\Users\exodj\.cloudflared\cert.pem`（`cloudflared tunnel login` で取得）、`C:\Users\exodj\.cloudflared\8bc0e7f0-….json`（トンネル資格情報）。同じ3ファイルの複製が `C:\Windows\System32\config\systemprofile\.cloudflared\` にもある |
 | 常駐 | Windowsサービス `cloudflared`（自動起動、LocalSystem）。`service install` は `--config` を保存しないため、`tools/tts-service/cloudflared-service-fix.ps1`（管理者）でImagePathに `--config` と `--logfile` を明示している |
 | ログ | `.local/tts-service/logs/cloudflared-service.log`（サービス）、`cloudflared.log`（手動実行時） |
-| 監視 | `supervisor.py` は `public_url` があればその `/health` を確認し、Lambdaの値は照合のみ行う（書き込みはngrok経路のときだけ）。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る |
+| 監視 | `supervisor.py` は `public_url` があればその `/health` を確認するだけでLambdaに触らない（書き込みはngrok経路のときだけ）。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る |
 
 ### 正常確認
 

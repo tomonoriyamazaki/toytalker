@@ -170,9 +170,9 @@ CloudTrail は毎回別のキーで新しいファイルを書くので、バー
 | 今すぐ | 無料のアカウント設定: セキュリティ連絡先（Account.1）、IAMパスワードポリシー（IAM.7） | 根治 | 済（2026-10-27） |
 | 今すぐ | GitHubのDependabot alerts / security updates を有効化（`.github/dependabot.yml` は追加済み） | 根治 | 済（2026-10-27） |
 | 決める | Lambdaの同時実行上限（費用燃やしの天井。`reservedConcurrentExecutions`）とInvocations/Durationのアラーム | 痛み止め | 未。上限値を決める（下の「IaC点検」） |
-| 決める | Lambdaログの保持期間（いまは無期限。会話の文字起こしがログに残る） | 根治 | 未 |
+| 9 | Lambdaログから会話の文章を外す（保持期間は無期限のまま。2026-10-27決定）。代わりに切り分け用の1行JSON（`backend/shared/trace.mjs`） | 根治 | **済（2026-10-28 deploy）**。見方は [infra/README](../infra/README.md) の「Lambdaログの見方」。過去のログに残っている文章はそのまま（消すなら手で） |
 | 10 | 消されても戻せる仕組み: AWS Backup + Vault Lock（コンプライアンス、35日。DynamoDB 8テーブル、S3 3バケット（CloudTrail 含む））、復元訓練、鍵の再発行手順 | 根治（(d)は痛み止め） | **deploy 済（2026-10-28 19:39 JST。ロック確定は 2026-10-31 19:39 JST）**。PITR 訓練済。上の「消されても戻せる仕組み」 |
-| 9で | `toytalker-firmware` のTLS強制（CDK管理外。取り込みと同時に） | 根治 | 未 |
+| 9で | `toytalker-firmware` のTLS強制（CDK管理外。取り込みと同時に） | 根治 | **済（2026-10-28 deploy）**。バケットポリシー `FirmwareBucketPolicy` だけCDK管理。バケット本体の置き場所は未決（ロードマップ9） |
 | 本番で | DynamoDB・CloudTrail・SNS・ログのCMK暗号化（[複数アカウント計画](multi-account-iac-plan.md) の決定どおり）、CloudTrailのCloudWatch Logs連携、Config + Security Hub | 根治 | 本番アカウントで |
 
 「再登録で `owner_id` を上書き」は、端末のリセットや機種変更での正当な再ペアリングも同じ経路なので、本人確認の無い今は塞げない。認証で本人が分かってから直す。
@@ -228,7 +228,7 @@ Security Hubは有効化せず（Configが前提で費用が出る。本番で�
 | Lambda: ランタイム nodejs24.x、更新モードAuto | 合格 |
 | **v1残骸**: API Gateway `toytalk-chat-apigateway-dev`（ステージ `dev`）の `POST /chat` と `POST /raspi` が **認証なし** で Python Lambda `toytalk-openai-api-dev` / `toytalk-api-raspi` を呼ぶ。両方の環境変数に `OPENAI_API_SECRET_KEY`、ロール `toytalk-lambda-role-dev` は S3 / DynamoDB / Lambda の FullAccess + KMS PowerUser。30日間の呼び出しはゼロ | **不合格。今の構成で最大の穴**（鍵と全テーブルを握る無認証の入口が、使っていないのに開いている）。9で予定していた削除を前倒しし、**2026-10-26に削除済み** |
 | S3.1 アカウント単位の公開ブロック | 未設定。ただし同じアカウントに公開バケット `zackey.xyz`（ToyTalker外）があり、入れるとそれが止まる。ToyTalkerの3バケットはバケット単位で塞いである |
-| S3.5 平文HTTP拒否 | `toytalker-cloudtrail-org` のみ合格。`toytalker-tts-speakers` はCDKで直した（deploy待ち）。`toytalker-firmware` はCDK外（9で） |
+| S3.5 平文HTTP拒否 | 3バケットとも合格（`toytalker-tts-speakers` は2026-10-26、`toytalker-firmware` は2026-10-28にバケットポリシーをCDKで追加） |
 | Account.1 セキュリティ連絡先 | 未登録 |
 | IAM.7 パスワードポリシー | 未設定（ユーザーはパスキー運用の1人だけ） |
 | Config.1 / GuardDuty.1 / Security Hub | 無効（費用。本番で） |
@@ -236,7 +236,24 @@ Security Hubは有効化せず（Configが前提で費用が出る。本番で�
 | Lambda.1 公開ポリシー（Function URL 7本） | 既知。CloudFront + WAF（3）と認証（4）で扱う。Access Analyzerの「公開」指摘もこの7本と `zackey.xyz`、Identity Centerのロール（正常） |
 | 検知: CloudWatchアラームなし、同時実行は既定の1000を共有、予算 $5 / $10 のみ | 費用燃やし（問題3）の天井が無い |
 
-Prowler（`prowler aws -f ap-northeast-1 us-east-1 --compliance aws_foundational_security_best_practices_aws`、読み取りのみ）の結果: 154基準中、合格のみ34、不合格あり39（残りは対象資源なし）。ToyTalker資源の不合格は上の表と同じ（Lambda.1、S3.5、S3.17、CloudTrail.2/5/7、SNS.1、DynamoDB.4=AWS Backupの計画なし。PITRで足りるので保留）。それ以外は **ToyTalker外の残骸**で、9の削除候補に足す: S3 `abc-test-342082316736` と `-modify-s3policy`（公開ブロックなし）、`toytalk.zakicorp.com`、`aws-athena-query-results-*`、ECSタスク定義 `a`、ECRリポジトリ `test`、SNS `test` / `ABC-topic-yamazaki`、Lambda `lambda-mail`（python3.8）/ `test`（python3.8）/ `ABC-modify-s3-policy-lambda`、API Gateway `api-mail`、KMS CMK 2本（v1の `toytalk-kms-dev` / `-prod`。2026-10-27 に削除予約、2026-11-26 に消える。旧デモサイトのバケットは標準暗号化へ戻した）、CloudFront 1本（`zackey.xyz` 向けと思われる。ログ・WAFなし）。IAM.1（`AdministratorAccess`）はIdentity Centerの権限セットで想定どおり。
+Prowler（`prowler aws -f ap-northeast-1 us-east-1 --compliance aws_foundational_security_best_practices_aws`、読み取りのみ）の結果: 154基準中、合格のみ34、不合格あり39（残りは対象資源なし）。ToyTalker資源の不合格は上の表と同じ（Lambda.1、S3.5、S3.17、CloudTrail.2/5/7、SNS.1、DynamoDB.4=AWS Backupの計画なし。PITRで足りるので保留）。それ以外は **ToyTalker外の残骸**で、9の削除候補に足す。IAM.1（`AdministratorAccess`）はIdentity Centerの権限セットで想定どおり。
+
+2026-10-28 に棚卸し（読み取りのみ）。残骸の現状と扱い:
+
+| 資源 | 現状 | 扱い |
+|---|---|---|
+| S3 `abc-test-342082316736` / `-modify-s3policy` / `aws-athena-query-results-*` | **既に無い**（バケット一覧は cdk assets・`toytalk.zakicorp.com`・CloudTrail・firmware・speakers・`zackey.xyz` の6つ） | 済 |
+| S3 + CloudFront `toytalk.zakicorp.com`（E1FK0EJGFGUQRE、2025-05） | 旧デモサイト。中のチャットは削除済みのv1 API Gatewayを呼ぶので動かない | 残す（ロードマップ9の決定） |
+| S3 `zackey.xyz` | 個人サイト（Cloudflare → S3静的サイト） | 残す |
+| Lambda `lambda-mail`（python3.8、2019）+ API Gateway `api-mail`（8kwhsmbzo4、ステージ `prd`、2020）+ ロググループ 2つ | 2019年の個人用メール送信API | **削除済（2026-10-28）** |
+| Lambda `test`（python3.8、2020。EventBridge `s3AccessAnalyzer` が Access Analyzer のイベントで呼んでいた）、`ABC-modify-s3-policy-lambda`（python3.9、2022）+ ロール `ABC_modify_s3_policy_lambda_role`（AdministratorAccess 付き）+ ロググループ | 試作の残り | **削除済（2026-10-28）**。ルール `s3AccessAnalyzer` も削除 |
+| SNS `test` / `ABC-topic-yamazaki` | 購読は自分のメール1件ずつ。発行元は上のLambda | **削除済（2026-10-28）** |
+| ECR `test`（空）、ECS クラスター `test`（サービス `teset` / `service`、タスク0）、タスク定義 `a:1` | 試作の残り | **削除済（2026-10-28）**。タスク定義は登録解除（INACTIVE） |
+| IAM ロール 10本（`ABC_system_*` 3本、`ABC_modify_s3_policy_lambda_role`、`AmazonBedrockExecutionRoleForKnowledgeBase_apl36`、`bedrocklog`、`AWSCloud9SSMAccessRole`、`aws-quicksight-*` 2本、`testw-role-qa9ziork`）と、それらだけに付いていたカスタマー管理ポリシー 37本（`ABC-system-*`、`nomura_ops_common_policy`、Bedrock / QuickSight / Cloud9 用）、インスタンスプロファイル 3つ | 2021〜2025年の別案件・学習の残り。鍵なし | **削除済（2026-10-28）**。残るカスタマー管理ポリシーは0本、ロールは ToyTalker の CDK 製と `OrganizationAccountAccessRole` だけ |
+| ロググループ `bedrocklogs`、`/aws/apigateway/welcome`、`API-Gateway-Execution-Logs_8kwhsmbzo4/test` + 上のLambda 3本分 | 空か数十KB | **削除済（2026-10-28）**。`toytalk*` 以外のロググループは0 |
+| KMS CMK `toytalk-kms-dev` / `-prod` | 2026-10-27 に削除予約、2026-11-26 に消える | 待つ |
+
+ToyTalker外で残しているのは S3 `toytalk.zakicorp.com`（+ CloudFront）と `zackey.xyz`、`cdk-hnb659fds-*`（CDK bootstrap）、KMS 2本（削除予約中）だけ。
 
 ### 3. 依存の脆弱性を継続的に見る仕組み
 

@@ -28,6 +28,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
+import { APP_VERSION } from "../../lib/appVersion";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
 import ReadAloud from "../../components/ReadAloud";
@@ -698,6 +699,7 @@ export default function Chat() {
                   body: JSON.stringify({
                     partial_text: bcPartial,
                     character_id: charId,
+                    app_version: APP_VERSION,
                     history: historyRef.current.slice(-6).map(t => ({ role: t.role, content: t.text })),
                     past_backchannels: pastBackchannelsRef.current.slice(-10),
                   }),
@@ -1190,6 +1192,7 @@ export default function Chat() {
         session_id: sessionIdRef.current,
         owner_id: ownerId,
         device_id: "app",
+        app_version: APP_VERSION, // Lambdaの切り分けログ用（どの版のアプリからの要求か）
         request_at: new Date().toISOString(),
         backchannel_fired: backchannelFiredRef.current,
       };

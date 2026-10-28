@@ -12,6 +12,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -426,7 +427,8 @@ async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len }) {
 }
 
 // ===== ハンドラ =====
-export const handler = awslambda.streamifyResponse(async (event, responseStream) => {
+export const handler = awslambda.streamifyResponse(async (event, responseStream, context) => {
+  const start = Date.now();
   await ensureSecrets();
   let body;
   try {
@@ -434,12 +436,18 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
   } catch {
     body = {};
   }
+  // 切り分け用のログ。1リクエスト1行のJSONで、読み上げる文章は書かない（backend/shared/trace.mjs）
+  const trace = startTrace("read-aloud", { event, context, t0: start });
+  trace.mark("secrets");
 
   const text    = typeof body.text === "string" ? body.text.trim() : "";
   const voiceId = typeof body.voice_id === "string" ? body.voice_id : null;
   const ownerId = typeof body.owner_id === "string" ? body.owner_id : "user_123";
+  trace.set({ source: "app", owner_id: ownerId, voice_id: voiceId, text_chars: [...text].length, ...describeClient(event, body) });
 
   const fail = (statusCode, message) => {
+    trace.set({ status: statusCode, reason: message.split(":")[0] });
+    trace.finish();
     const s = awslambda.HttpResponseStream.from(responseStream, {
       statusCode,
       headers: { "Content-Type": "application/json" },
@@ -459,6 +467,8 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
   ttsKey = normalizeModelKey(v.provider) ?? TTS_DEFAULT;
   voice  = v.vendorId ?? VOICE_DEFAULT;
   const cfg = TTS_TABLE[ttsKey] ?? TTS_TABLE[TTS_DEFAULT];
+  trace.set({ tts: cfg.ttsVendor, voice });
+  trace.mark("config");
 
   // 改行を文区切り（長めのポーズ）に変換してから合成
   const ttsText = applyLineBreakPauses(text);
@@ -493,15 +503,20 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
   try {
     await synthesizePrimary();
   } catch (e) {
+    trace.ext(cfg.ttsVendor, { status: errorStatus(e), error: true });
+    trace.error("tts_primary", e);
     if (cfg.ttsVendor === "sakura") return fail(502, `TTS failed: ${e?.message || e}`);
-    console.warn(`[TTS] ${cfg.ttsVendor} unavailable -> fallback sakura: ${e?.message || e}`);
     try {
       b64 = await ttsToBase64Sakura(ttsText, { model: "zundamon" });
       usedVendor = "sakura";
+      trace.set({ tts_fallback: "sakura" });
     } catch (e2) {
+      trace.error("tts_fallback", e2);
       return fail(502, `TTS failed: ${e2?.message || e2}`);
     }
   }
+  trace.mark("tts_done");
+  trace.set({ status: 200, audio_bytes: Math.round(b64.length * 3 / 4) });
 
   // コスト記録（レスポンスとは独立、失敗しても無視。フォールバック時は実際に使った声で記録）
   trackTtsCost({ ownerId, ttsVendor: usedVendor, ttsModel: usedVendor === "sakura" ? "zundamon" : cfg.ttsModel, text: ttsText, b64Len: b64.length });
@@ -520,4 +535,5 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
   });
   out.write(audioBuf);
   out.end();
+  trace.finish();
 });

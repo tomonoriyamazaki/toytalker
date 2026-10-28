@@ -35,22 +35,26 @@ export const TOOL_RESULT_INSTRUCTION = "この検索結果をもとに答えて�
 /** Brave Search API（自社インデックス、SOC 2、クエリ不共有）。結果は [{ title, snippet, url }]。
  *  2026-10-27に Serper（Google結果の仲介）から切替。子供向け日本語20問で上位3件を比べ同等以上、応答は約半分、
  *  月1,000回まで無料で以後 $5/1,000回。送るのはLLMが作った検索語だけで、識別子や発話そのものは送らない */
-export async function searchWeb(query, numResults = 3) {
+export async function searchWeb(query, numResults = 3, trace = null) {
   const key = secret("BRAVE_API_KEY");
   if (!key) throw new Error("BRAVE_API_KEY is not set");
-  console.log(`[SearchWeb] query=${JSON.stringify(query)}`);
+  // 検索語と結果の題名はログに書かない（検索語は発話から作られる。docs/roadmap.md の9）。応答コードと所要時間だけ残す
   const params = new URLSearchParams({ q: query, count: String(numResults), country: "JP", search_lang: "ja", safesearch: "strict" });
+  const t = Date.now();
   const resp = await fetch(`https://api.search.brave.com/res/v1/web/search?${params}`, {
     headers: { Accept: "application/json", "X-Subscription-Token": key },
   });
-  if (!resp.ok) throw new Error(`Brave API error: ${resp.status}`);
+  if (!resp.ok) {
+    trace?.ext("brave", { status: resp.status, ms: Date.now() - t });
+    throw new Error(`Brave API error: ${resp.status}`);
+  }
   const data = await resp.json();
   const results = (data.web?.results ?? []).slice(0, numResults).map((item) => ({
     title: item.title ?? "",
     snippet: item.description ?? "",
     url: item.url ?? "",
   }));
-  console.log(`[SearchWeb] results: ${JSON.stringify(results.map((r) => r.title))}`);
+  trace?.ext("brave", { status: resp.status, ms: Date.now() - t, results: results.length });
   return results;
 }
 
@@ -65,13 +69,14 @@ export async function searchWeb(query, numResults = 3) {
  * @param {"auto"|"none"} [p.toolChoice]  "none" はツール定義は渡すが呼ばせない（検索結果を返した2回目の要求で使う。
  *   会話に tool の往復が入っていると Anthropic は tools 無しを拒むので、外すのではなく禁止する）
  * @param {{in:number,out:number}} p.usage  トークン数の足し込み先
+ * @param {object} [p.trace]  backend/shared/trace.mjs の startTrace()。要求ごとの応答コードと所要時間を ext に記録する
  */
-export function chatStream({ provider, model, messages, tools = null, toolChoice = "auto", usage }) {
+export function chatStream({ provider, model, messages, tools = null, toolChoice = "auto", usage, trace = null }) {
   const u = usage ?? { in: 0, out: 0 };
   const noTools = tools && toolChoice === "none";
-  if (provider === "openai")    return streamOpenAI(messages, model, tools, noTools, u);
-  if (provider === "google")    return streamGemini(messages, model, tools, noTools, u);
-  if (provider === "anthropic") return streamAnthropic(messages, model, tools, noTools, u);
+  if (provider === "openai")    return streamOpenAI(messages, model, tools, noTools, u, trace);
+  if (provider === "google")    return streamGemini(messages, model, tools, noTools, u, trace);
+  if (provider === "anthropic") return streamAnthropic(messages, model, tools, noTools, u, trace);
   return (async function* () { yield { type: "text", text: "（LLM ルート未実装です）" }; })();
 }
 
@@ -106,12 +111,15 @@ async function* readSse(resp) {
   }
 }
 
-async function postJson(url, headers, body, label) {
+/** POST して応答ヘッダまで待つ。trace には応答コードと、ヘッダが返るまでの時間（ms）を記録する */
+async function postJson(url, headers, body, label, trace) {
+  const t = Date.now();
   const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
+  trace?.ext(label.toLowerCase(), { status: resp.status, ms: Date.now() - t });
   if (!resp.ok) {
     const errText = await resp.text();
     throw new Error(`${label} API error: ${resp.status} ${errText}`);
@@ -135,7 +143,7 @@ function toOpenAIMessages(messages) {
   });
 }
 
-function streamOpenAI(messages, model, tools, noTools, usage) {
+function streamOpenAI(messages, model, tools, noTools, usage, trace) {
   const body = {
     model,
     temperature: 0.7,
@@ -148,7 +156,7 @@ function streamOpenAI(messages, model, tools, noTools, usage) {
     if (noTools) body.tool_choice = "none";
   }
   return (async function* () {
-    const resp = await postJson("https://api.openai.com/v1/chat/completions", { Authorization: `Bearer ${secret("OPENAI_API_KEY")}` }, body, "OpenAI");
+    const resp = await postJson("https://api.openai.com/v1/chat/completions", { Authorization: `Bearer ${secret("OPENAI_API_KEY")}` }, body, "OpenAI", trace);
     // tool_calls は引数JSONが断片で届くので、終わりまで貯めてから1回だけ返す
     const pending = {};
     let reqIn = 0, reqOut = 0;
@@ -209,7 +217,7 @@ function geminiThinkingConfig(model) {
   return /^gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: "minimal" };
 }
 
-function streamGemini(messages, model, tools, noTools, usage) {
+function streamGemini(messages, model, tools, noTools, usage, trace) {
   const { systemMsg, contents } = toGeminiRequest(messages);
   const body = { contents, generationConfig: { temperature: 0.7, thinkingConfig: geminiThinkingConfig(model) } };
   if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg.content }] };
@@ -218,7 +226,7 @@ function streamGemini(messages, model, tools, noTools, usage) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${secret("GOOGLE_API_KEY")}`;
 
   return (async function* () {
-    const resp = await postJson(url, {}, body, "Gemini");
+    const resp = await postJson(url, {}, body, "Gemini", trace);
     // usageMetadata は各チャンクに「ここまでの累計」が付く。足し込むと入力がチャンク数倍になるので
     // この要求の最後の値を持ち、終了時に合計へ足す
     let reqIn = 0, reqOut = 0;
@@ -261,7 +269,7 @@ function toAnthropicRequest(messages) {
   return { systemMsg, chat };
 }
 
-function streamAnthropic(messages, model, tools, noTools, usage) {
+function streamAnthropic(messages, model, tools, noTools, usage, trace) {
   const { systemMsg, chat } = toAnthropicRequest(messages);
   const body = { model, max_tokens: 1024, stream: true, messages: chat };
   // Claude 4.6 以降は temperature を送ると 400、代わりに effort で思考量を抑える（会話用は low）。
@@ -273,7 +281,7 @@ function streamAnthropic(messages, model, tools, noTools, usage) {
   if (noTools) body.tool_choice = { type: "none" };
 
   return (async function* () {
-    const resp = await postJson("https://api.anthropic.com/v1/messages", { "x-api-key": secret("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01" }, body, "Anthropic");
+    const resp = await postJson("https://api.anthropic.com/v1/messages", { "x-api-key": secret("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01" }, body, "Anthropic", trace);
     let yielded = false;
     let toolUse = null; // { id, name, json } 引数JSONは断片で届く
     for await (const parsed of readSse(resp)) {

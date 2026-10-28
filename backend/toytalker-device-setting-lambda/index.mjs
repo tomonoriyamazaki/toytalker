@@ -632,7 +632,7 @@ export const handler = async (event) => {
             created_at: new Date().toISOString(),
           },
         }));
-        console.log(`[CustomVoice] Cartesia registered: ${voiceId}, owner=${owner_id}, label=${label}, cartesia_id=${cv.id}, clip=${audioBuf.length}bytes`);
+        console.log(`[CustomVoice] Cartesia registered: ${voiceId}, owner=${owner_id}, cartesia_id=${cv.id}, clip=${audioBuf.length}bytes`);
         return response(200, { voice_id: voiceId, label, provider: "Cartesia", vendor_id: cv.id });
       }
 
@@ -678,7 +678,7 @@ export const handler = async (event) => {
         },
       }));
 
-      console.log(`[CustomVoice] Registered: ${voiceId}, owner=${owner_id}, label=${label}, pt=${ptBuffer.length}bytes, extraction=${result.extraction_time_ms}ms`);
+      console.log(`[CustomVoice] Registered: ${voiceId}, owner=${owner_id}, pt=${ptBuffer.length}bytes, extraction=${result.extraction_time_ms}ms`);
       return response(200, { voice_id: voiceId, label, extraction_time_ms: result.extraction_time_ms });
     }
 

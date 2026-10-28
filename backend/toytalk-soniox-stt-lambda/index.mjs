@@ -4,6 +4,7 @@ import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { startTrace } from "../shared/trace.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -55,7 +56,6 @@ async function buildFirmwareInfo(query, device, manifest) {
     new GetObjectCommand({ Bucket: FIRMWARE_BUCKET, Key: entry.key }),
     { expiresIn: FIRMWARE_URL_TTL_SEC },
   );
-  console.log(`[OTA] offer device=${query.device_id} fw=${query.fw} -> ${target}`);
   return { version: target, url, sha256: entry.sha256, size: entry.size };
 }
 
@@ -79,14 +79,20 @@ function recordDeviceReport(deviceId, query) {
   });
 }
 
-export const handler = async (event) => {
+export const handler = async (event, context) => {
+  const start = Date.now();
+  // 切り分け用のログ。1リクエスト1行のJSON（backend/shared/trace.mjs）。鍵発行の所要時間と応答コード、OTAの提示を残す
+  let trace = null;
   try {
     await ensureSecrets();
     // EventBridgeウォームアップping（コールドスタート対策）
     if (event.body === '{"warmup":true}') return { statusCode: 200, body: "warm" };
+    trace = startTrace("stt-token", { event, context, t0: start });
+    trace.mark("secrets");
 
     const SONIOX_API_KEY = secret("SONIOX_API_KEY");
     if (!SONIOX_API_KEY) {
+      trace.set({ status: 500, reason: "missing_key" });
       return {
         statusCode: 500,
         body: JSON.stringify({ error: "Missing SONIOX_API_KEY" }),
@@ -106,7 +112,13 @@ export const handler = async (event) => {
     const query = event.queryStringParameters ?? {};
     const deviceId = query.device_id ?? null;
     const wantsFirmware = query.ota === "1" && !!query.fw;
+    trace.set({
+      source: deviceId ? "esp" : "app", device_id: deviceId,
+      fw: query.fw ? String(query.fw).slice(0, 32) : null, hw: query.hw ? String(query.hw).slice(0, 16) : null,
+      ota_check: wantsFirmware, ua: event.headers?.["user-agent"] ?? null,
+    });
 
+    const sonioxStart = Date.now();
     const [sonioxRes, deviceSettings, manifest] = await Promise.all([
       fetch(url, {
         method: "POST",
@@ -115,17 +127,19 @@ export const handler = async (event) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify(body),
-      }),
+      }).then((r) => { trace.ext("soniox", { status: r.status, ms: Date.now() - sonioxStart }); return r; }),
       deviceId ? ddb.send(new GetCommand({
         TableName: DEVICES_TABLE,
         Key: { device_id: deviceId },
-      })).catch(() => null) : Promise.resolve(null),
+      })).catch((e) => { trace.error("devices_get", e); return null; }) : Promise.resolve(null),
       wantsFirmware ? loadManifest() : Promise.resolve(null),
       recordDeviceReport(deviceId, query),
     ]);
+    trace.mark("parallel_done");
 
     if (!sonioxRes.ok) {
       const text = await sonioxRes.text();
+      trace.set({ status: sonioxRes.status });
       return {
         statusCode: sonioxRes.status,
         body: JSON.stringify({
@@ -142,24 +156,35 @@ export const handler = async (event) => {
     result.stt_model = process.env.SONIOX_MODEL || "stt-rt-v4";
     if (deviceSettings?.Item) {
       result.backchannel_enabled = deviceSettings.Item.backchannel_enabled !== false;
+      trace.set({ device_registered: true, backchannel_enabled: result.backchannel_enabled });
+    } else if (deviceId) {
+      trace.set({ device_registered: false });
     }
     if (wantsFirmware) {
       const firmware = await buildFirmwareInfo(query, deviceSettings?.Item, manifest).catch((err) => {
-        console.warn(`[OTA] offer failed: ${err.message}`);
+        trace.error("ota_offer", err);
         return null;
       });
-      if (firmware) result.firmware = firmware;
+      if (firmware) {
+        result.firmware = firmware;
+        trace.set({ ota_offer: firmware.version });
+      }
     }
 
+    trace.set({ status: 200 });
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(result),
     };
   } catch (err) {
+    if (trace) { trace.error("handler", err); trace.set({ status: 500 }); }
+    else console.error("[stt-token] failed before trace:", err?.name, err?.message);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: err.message }),
     };
+  } finally {
+    trace?.finish();
   }
 };

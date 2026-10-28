@@ -129,19 +129,6 @@ def synchronize_urls(config, url):
         LOG.info("Updated TTS URL for %s", name)
 
 
-def check_urls(config, url):
-    """Read-only. With a fixed public_url the Lambda value is owned by CDK (infra/config/stages.ts)."""
-    stale = []
-    for name in FUNCTIONS:
-        state = aws(config, "lambda", "get-function-configuration", "--function-name", name)
-        if state.get("Environment", {}).get("Variables", {}).get("ZAKICORP_TTS_URL") != url:
-            stale.append(name)
-    if stale:
-        LOG.warning("ZAKICORP_TTS_URL differs from %s on: %s. Not updating; fix zakicorpTtsUrl in "
-                    "infra/config/stages.ts and run cdk deploy", url, ", ".join(stale))
-    return not stale
-
-
 def probe(config):
     import torch
     if not torch.cuda.is_available():
@@ -156,11 +143,14 @@ def probe(config):
         url = next(t["public_url"] for t in tunnels if t["public_url"].startswith("https://"))
     if get_json(url + "/health").get("status") != "ok":
         raise RuntimeError("Public TTS not ready")
-    aws(config, "lambda", "get-function-configuration", "--function-name", FUNCTIONS[0],
-        "--query", "FunctionName")
+    if not config.get("public_url"):
+        # AWS is only touched on the ngrok path (see run()). The CLI uses SSO since 2026-10-25, so an
+        # unattended task cannot rely on it anyway.
+        aws(config, "lambda", "get-function-configuration", "--function-name", FUNCTIONS[0],
+            "--query", "FunctionName")
     if not Path(config["ngrok_config"]).is_file():
         raise RuntimeError("ngrok config missing")
-    LOG.info("PROBE PASSED: session=%s CUDA allocation, .env, local/public health, AWS read, ngrok config",
+    LOG.info("PROBE PASSED: session=%s CUDA allocation, .env, local/public health, ngrok config",
              psutil.Process().username())
 
 
@@ -171,8 +161,10 @@ def run(config):
     public_url = (config.get("public_url") or "").rstrip("/") or None
     LOG.info("API entry point: %s; public URL: %s", api_script, public_url or "ngrok (dynamic)")
     # "public_url" (a Cloudflare Tunnel hostname served by its own Windows service) is a fixed address:
-    # do not run ngrok, and do not write it to the Lambdas. CDK owns ZAKICORP_TTS_URL and rewrites it on
-    # every deploy, so writing here would make the two fight; the supervisor only checks and warns.
+    # do not run ngrok, and do not touch the Lambdas at all. CDK owns ZAKICORP_TTS_URL (infra/config/stages.ts)
+    # and rewrites it on every deploy. The read-only comparison that used to run here was dropped on
+    # 2026-10-28: the AWS CLI moved to SSO (8-hour sessions), so an unattended task cannot read Lambda
+    # configuration reliably, and a fixed hostname has nothing to compare anyway.
     # Clearing public_url brings ngrok back (see docs/tts-boot-recovery.md). The ngrok URL changes on
     # every start, so that emergency path still writes it to the Lambdas (until the next cdk deploy).
     tunnel = None
@@ -209,10 +201,8 @@ def run(config):
                 if get_json(url + "/health").get("status") != "ok":
                     raise RuntimeError("Public TTS not ready")
                 if public_url:
-                    matched = check_urls(config, url)
                     if url != synced_url:
-                        LOG.info("Service ready; public health verified; Lambda URLs %s (managed by CDK)",
-                                 "match" if matched else "DIFFER")
+                        LOG.info("Service ready; public health verified (Lambda URL is managed by CDK)")
                 else:
                     synchronize_urls(config, url)
                     if url != synced_url:

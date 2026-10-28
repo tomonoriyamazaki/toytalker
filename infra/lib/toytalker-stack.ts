@@ -214,7 +214,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     key: "stt-token",
     legacy: { id: "SonioxStt", name: "toytalk-soniox-stt-lambda" },
     dir: "toytalk-soniox-stt-lambda",
-    memorySize: 128,
+    memorySize: 256, // 128ではコールドスタート時のSSM取得が約0.9秒（他は1〜2GBで約0.2秒）。256へ（ロードマップ9、2026-10-28）
     timeoutSeconds: 5, // OTA判定でS3のmanifestを読むため3→5（2026-09-16）
     format: "esm",
     env: ["SONIOX_MODEL", "FIRMWARE_BUCKET"],
@@ -437,7 +437,22 @@ export class ToyTalkerStack extends cdk.Stack {
     // ---- ESP32ファームのOTA配布バケット（手作業で作成、CDKは参照のみ） ----
     // Soniox鍵発行Lambdaが manifest.json を読み、.bin の署名付きURL（10分）を返す。署名はロールの資格情報なので読み取り権限が要る
     const firmwareBucket = s3.Bucket.fromBucketName(this, "FirmwareBucket", config.firmwareBucketName);
-    if (!importPhase) firmwareBucket.grantRead(functions.get("stt-token")!);
+    if (!importPhase) {
+      firmwareBucket.grantRead(functions.get("stt-token")!);
+      // 平文HTTPのアクセスを拒否（Security Hub S3.5。他のバケットの enforceSSL と同じ文）。バケット本体はCDK管理外のまま、
+      // バケットポリシーだけをこのスタックが持つ（ロードマップ9、2026-10-28）。環境のバケットが無いと deploy で止まるので、
+      // 新しい環境へ出す前にバケットを作る（置き場所の決定はロードマップ9）
+      new s3.BucketPolicy(this, "FirmwareBucketPolicy", { bucket: firmwareBucket }).document.addStatements(
+        new iam.PolicyStatement({
+          sid: "DenyInsecureTransport",
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ["s3:*"],
+          resources: [firmwareBucket.bucketArn, firmwareBucket.arnForObjects("*")],
+          conditions: { Bool: { "aws:SecureTransport": "false" } },
+        }),
+      );
+    }
 
     // ---- 消されても戻せる仕組み: AWS Backup + Vault Lock（ロードマップ10(a)） ----
     if (config.backup && !importPhase) {

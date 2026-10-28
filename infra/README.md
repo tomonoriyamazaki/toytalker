@@ -67,6 +67,32 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 - Lambdaに鍵を新しく使わせるとき: `lib/secrets.ts` に名前を足し、その関数の `secrets` に加え、コードでは `secret("名前")` で読む
 - 環境変数方式の環境を移すときだけ2段階でdeployする（コードと設定の更新が別々に行われ、その間に鍵が読めなくなるのを避ける）: `npx cdk deploy --context stage=<stage> --context keepEnvSecrets=true` → ログの `[secrets] loaded n/n from SSM` と動作を確認 → フラグ無しで `npx cdk deploy`。新しく作る環境は最初からフラグ無し
 
+## Lambdaログの見方（2026-10-28、ロードマップ9）
+
+会話経路のLambda（本文2本・相槌2本・Soniox鍵発行・読み上げ）は、1リクエストにつき1行のJSONを出す（`backend/shared/trace.mjs`）。**会話の文章（発話・返答・検索語・相槌）はログに無い。** 正本は `chat-logs` テーブル。新しいログを足すときも文章を入れない。月次Lambdaは `[Pricing] missing price for <key>` の文字列を拾うので、この警告の形だけは変えない。
+
+| 項目 | 意味 |
+|---|---|
+| `kind` | `turn`（本文）/ `backchannel`（相槌）/ `stt-token`（Soniox鍵発行とOTA判定）/ `read-aloud`（読み上げ） |
+| `request_id` `session_id` `device_id` `owner_id` | 識別子。`request_id` はLambdaの requestId（`REPORT` 行と同じ値） |
+| `source` `fw` `app_version` `ua` | 出どころ。`source` は `esp` / `app`。`fw` はESP32が本文に添えるファーム版（v0.7.3以降）、`app_version` はアプリ版（`app/lib/appVersion.ts`。次の配布以降）。古い版からの要求は null。**送信元IPは書かない**（個人に結びつく。2026-10-28決定）。地域が要るときは CloudFront（ロードマップ3）の `CloudFront-Viewer-Country` から国コードだけを足す |
+| `llm` `tts` `voice` `character_id` `has_personality` | 使った設定 |
+| `marks` | 段階の経過時刻（リクエスト開始からのms）。本文は `secrets`（SSM鍵）→ `config`（DynamoDB）→ `llm_start` → `llm_first_token` →（検索時 `tool_call` → `llm2_start` → `llm2_first_token`）→ `llm_done` → `done_sent` → `usage_saved` |
+| `ext` | 外部サービス呼び出し。`service`（gemini / openai / anthropic / brave / soniox / cartesia …）、`status`、`ms`（応答ヘッダが返るまで）、`at`（開始時刻）。TTSは失敗したときだけ載る |
+| `segments` | 本文のTTS 1文ごと。`text_at`（LLMから文が揃った時刻）、`tts_ms`、`first_chunk_ms`（ZakiCorpのストリーミングだけ）、`bytes`、`trim_ms`（無音を削った量）、`sent_at`（音声を書き終えた時刻）、`attempts`、`fallback`、`error` |
+| `errors` | `where`、`status`、`message`（160字まで。外部サービスのエラー本文に入力文が混ざることがあるため短く切る） |
+| `total_ms` `container_age_s` | 合計と、容器が起きてからの秒数（小さければコールドスタート直後） |
+
+Logs Insights の例。遅かったターンを探す:
+
+```
+fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_first_token, marks.llm_done, segments_count
+| filter kind = "turn" and total_ms > 8000
+| sort @timestamp desc
+```
+
+音声が途切れた箇所の切り分け: `segments` の `sent_at` の間隔が空いた文を見つけ、その文の `sent_at - text_at` が大きければTTS側、前の文との `text_at` の差が大きければLLM側（`marks.tool_call` があれば検索待ち）、`ext` に 429 / 5xx があれば外部サービス側。相槌は `marks.llm_done` と `marks.tts_done` の差で見る。
+
 ## バックアップと復元（AWS Backup、ロードマップ10）
 
 `config/stages.ts` の `backup: { retentionDays }` がある環境に、保管庫 `toytalker-backup-<環境>`（Vault Lock コンプライアンスモード。確定後は誰にも消せない）と日次計画・ロールを作る（`lib/toytalker-stack.ts` の `createImmutableBackup`）。初回 deploy から3日が猶予で、その間にバックアップの成功と復元を確かめる。復元の手順と鍵の再発行手順は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md) の「消されても戻せる仕組み」。

@@ -9,25 +9,25 @@
 - ユーザー確認済み（2026-09-13）: アプリでの会話、Cloudflare経由と合言葉遮断後の会話、クローンボイス登録、PC再起動後の自動復帰。未確認: 長文分割境界の聞こえ方。
 - 単独要求の元実装は `StaticCache` が1つで同時要求が互いのKV文脈を上書きする構造があった（言葉の繰り返し・抜けの原因）。バッチ版で解消。
 - 単価 `zakicorp#tts` は暫定（$0.000025/文字、Cartesiaの半額、2026-09-13登録）。正式な単価は未決定。
-- 未反映: `supervisor.py` の `ZAKICORP_TTS_URL` 同期停止はコード修正済みで、このPCの `.local/tts-service/` への再登録が未実施（[ロードマップ](roadmap.md) の9）。
+- `supervisor.py` から Lambda の `ZAKICORP_TTS_URL` 照合を外した（2026-10-28決定。公開URLが固定になった今は比べる意味が無く、CLI の SSO 化（2026-10-25）で非対話タスクからは期限切れのたびに `exit 255` で失敗していた。ngrok 予備経路の書き込みは残す）。`.local/tts-service/` へ反映済み（2026-10-28 21:34、`switch-api.ps1 -ApiScript api_server_batch.py` を昇格実行。API停止約35秒、公開 `/health` 復帰確認）。
 - 待ち行列の可視化は検討のみ（[先送り項目](deferred-items.md)）。Cartesia 429時のずんだもんフォールバックは別件（[TTSフォールバック](tts-fallback-and-notifications.md)）。
 
 ## 公開経路（2026-09-13にCloudflare Tunnelへ切替）
 
 - 公開URLは固定の **`https://tts.zakicorp.com`**。Cloudflare Tunnel `toytalker-tts`（ID `8bc0e7f0-…`、locally-managed）を Windowsサービス `cloudflared`（自動起動）が張る。東京拠点、無料プラン、転送量課金なし。
 - `zakicorp.com` のDNSはRoute 53からCloudflare（無料）へ移行済み。`toytalk.zakicorp.com`（S3+CloudFrontのサイト）とACM検証用CNAMEもCloudflare側に置いた（どちらもDNS only）。登録先はお名前.com、期限は自動更新。Route 53の `zakicorp.com` ホストゾーンは削除済み（`zackey.xyz` は残る）。
-- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認する。Lambda 6本の `ZAKICORP_TTS_URL` の正本は `infra/config/stages.ts` の `zakicorpTtsUrl`（CDKがdeployのたびに配る）で、監視タスクは照合して違えば警告するだけで書き換えない。URLを変えるときは両方を直す。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
+- 監視タスクは `config.json` の `public_url` にこのURLを持ち、`/health` を確認する。Lambda 6本の `ZAKICORP_TTS_URL` の正本は `infra/config/stages.ts` の `zakicorpTtsUrl`（CDKがdeployのたびに配る）で、監視タスクは Lambda に触らない（照合は2026-10-28に外した）。URLを変えるときは両方を直す。Cloudflareは `Python-urllib` のUser-Agentを403で弾くため、監視は `toytalker-supervisor/1.0` を名乗る。
 - 拠点での遮断: WAFカスタムルール `tts-edge-key-required` が `X-Zakicorp-Edge-Key` ヘッダー（Lambda側はSSM `/toytalker/zakicorp-edge-key`、サーバー側 `.env` にも同値）の無い要求を403で落とす。期限なし。公開側 `/health` は `status` のみ、話者登録名は英数字と `-_` に限定。詳細と鍵の入れ替え手順は [起動・復旧](tts-boot-recovery.md) の「公開経路」節。
 - ngrokは2026-09-13 18:02に撤去（`public_url` 設定中は監視タスクが起動しない。`switch-api.ps1 -PublicUrl ''` で復活）。`cloudflared service install` は `--config` を保存しないので `tools/tts-service/cloudflared-service-fix.ps1` でImagePathに明示する。
 
 ## 起動・監視
 
-- タスクスケジューラ `TTS-AutoStart` がOS起動30秒後に非対話実行（S4U、通常権限、ログオン不要）。APIサーバー（と `public_url` 未設定時はngrok）を監視し、終了後に再起動。`public_url` が設定されていればLambda環境変数 `ZAKICORP_TTS_URL` を照合するだけで、無ければngrokのURLを6本へ書き込む（次の `cdk deploy` で戻る）。
+- タスクスケジューラ `TTS-AutoStart` がOS起動30秒後に非対話実行（S4U、通常権限、ログオン不要）。APIサーバー（と `public_url` 未設定時はngrok）を監視し、終了後に再起動。`public_url` が設定されていればLambdaには触らず、無ければngrokのURLを6本へ書き込む（次の `cdk deploy` で戻る）。
 - 実装・登録: `tools/tts-service/supervisor.py` / `install.ps1`。実際の配置は `.local/tts-service/`（Git対象外）、ログは `.local/tts-service/logs/`。再適用は保守時間にタスクを停止してから登録する。
 - 元のTTSリポジトリの `setup-tasks.ps1` を実行するとログオン起動に戻る。手順は [起動・復旧](tts-boot-recovery.md)。
 - Windows更新は自動更新を受け入れ、アクティブ時間07:00〜翌01:00。[設定記録](windows-update-restart-control.md)。
 
-`ZAKICORP_TTS_URL` の照合対象（`public_url` 未設定時はngrok URL変更のたびに書き込み）:
+`ZAKICORP_TTS_URL` を持つLambda（`public_url` 未設定のngrok経路では、URL変更のたびに監視タスクが書き込む）:
 
 1. `toytalk-stream-handler-lambda`（app TTS）
 2. `toytalk-api-stream-for-esp32-lambda`（ESP32 TTS）

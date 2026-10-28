@@ -30,6 +30,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **App / ESP32は対称構成**: 各々にメインLambda+相槌Lambdaがあり、出力形式だけ異なる（App=base64, ESP32=PCM）。
 - **TTSプロバイダー**は DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / Cartesia / FishAudio / Sakura(ずんだもん) / ZakiCorp(自前クローンボイス, β版。ローカルPCのQwen3-TTSを `https://tts.zakicorp.com` で公開)。
 - **インフラ**: RnDアカウントのToyTalker資源はCDK（`infra/`）のスタック `ToyTalker-rnd` の管理下。APIキー類の正本はSSM `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い）。テーブル名はCDKが配る `TABLE_SUFFIX` から `backend/shared/tables.mjs` で組む。
+- **Lambdaログ**: 会話経路の各Lambdaが1リクエスト1行のJSONを出す（`backend/shared/trace.mjs`）。**会話の文章（発話・返答・検索語・相槌）はログに書かない**（正本は `chat-logs`）。新しいログを足すときも文章を入れない。項目と見方は [infra/README](infra/README.md) の「Lambdaログの見方」。
 - デバイス世代: v1 Raspberry Pi（廃止）、v2 スマホアプリ経由（現行）、v3 ESP32-S3スタンドアロン（現行、アプリ不要で直接AWS通信）。
 - **Lambda 8本**（ディレクトリは `backend/<Lambda名>`）: App用メイン `toytalk-stream-handler-lambda`、ESP32用メイン `toytalk-api-stream-for-esp32-lambda`、相槌 `toytalker-backchannel-for-app-lambda` / `-for-esp32-lambda`、Soniox一時キー発行（ESP32のOTA更新確認も同梱）`toytalk-soniox-stt-lambda`、デバイス登録・ボイス設定・コスト管理・クローンボイス登録 `toytalker-device-setting-lambda`、App用読み上げ `toytalker-tts-only-lambda`、月次運用レポート `toytalker-ops-monthly-lambda`。DynamoDB 8テーブルは `backend/shared/tables.mjs`。
 

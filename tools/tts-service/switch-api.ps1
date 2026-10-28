@@ -3,7 +3,7 @@
 #   powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\tts-service\switch-api.ps1 -ApiScript api_server_batch.py
 # Roll back with -ApiScript api_server.py. The public ngrok URL is kept (ngrok is adopted, not restarted).
 # -PublicUrl sets config.json "public_url" (fixed hostname such as https://tts.zakicorp.com served by the
-# cloudflared Windows service); the supervisor then only checks the Lambdas against it (CDK owns the value).
+# cloudflared Windows service); the supervisor then never touches the Lambdas (CDK owns ZAKICORP_TTS_URL).
 # Pass -PublicUrl '' to clear it and go back to the dynamic ngrok URL.
 param([Parameter(Mandatory = $true)][ValidateSet('api_server.py', 'api_server_batch.py')][string]$ApiScript,
       [string]$PublicUrl = $null)

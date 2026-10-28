@@ -7,6 +7,7 @@ import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 
 // ---- 予備インスタンスの事前ウォームアップ ----
 // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -326,17 +327,22 @@ async function generateTTS(text, vendor, voice) {
 }
 
 // ---- Handler ----
-export const handler = async (event) => {
+export const handler = async (event, context) => {
   const start = Date.now();
+  // 切り分け用のログ。1リクエスト1行のJSONで、聞こえた断片も相槌の文章も書かない（backend/shared/trace.mjs）
+  let trace = null;
   try {
     await ensureSecrets();
     const body = event.body ? JSON.parse(event.body) : {};
     if (body.warmup) return { statusCode: 200, body: "warm" };  // EventBridgeウォームアップping
+    trace = startTrace("backchannel", { event, context, t0: start });
+    trace.mark("secrets");
     prewarmSpareInstance();  // 処理中に予備インスタンスを温める（同時2人目対策）
     const partialText = body.partial_text ?? "";
     const characterId = body.character_id ?? null;
     const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
     const pastBackchannels = Array.isArray(body.past_backchannels) ? body.past_backchannels.slice(-10) : [];
+    trace.set({ source: "app", character_id: characterId, partial_chars: partialText.length, history_turns: history.length, ...describeClient(event, body) });
 
     if (!partialText) {
       return { statusCode: 400, body: JSON.stringify({ error: "partial_text is required" }) };
@@ -357,28 +363,27 @@ export const handler = async (event) => {
         personalityPrompt = charConfig.personalityPrompt;
       }
     }
+    trace.set({ tts: ttsVendor, voice: ttsVoice, has_personality: !!personalityPrompt });
+    trace.mark("config");
 
-    // LLM + TTS を並列実行
-    const [backchannelText, _] = await Promise.all([
-      generateBackchannel(partialText, personalityPrompt, history, pastBackchannels),
-      // TTS は backchannelText が必要なので後で実行
-    ]);
+    // LLM生成（TTS は backchannelText が要るので後）
+    const backchannelText = await generateBackchannel(partialText, personalityPrompt, history, pastBackchannels);
+    trace.mark("llm_done");
+    trace.set({ reply_chars: backchannelText.length });
 
-    console.log(`[Backchannel] "${partialText}" → "${backchannelText}" (${Date.now() - start}ms) history=${history.length}turns`);
-
-    const ttsStart = Date.now();
     let audioBase64;
     try {
       audioBase64 = await generateTTS(backchannelText, ttsVendor, ttsVoice);
     } catch (e) {
       // 主プロバイダーが失敗（同時接続上限など）したら即ずんだもん。相槌は短いので再試行しない
       if (ttsVendor === "sakura") throw e;
-      console.warn(`[TTS] ${ttsVendor} unavailable -> fallback sakura: ${e?.message || e}`);
+      trace.ext(ttsVendor, { status: errorStatus(e), error: true });
+      trace.error("tts_primary", e); // この後ずんだもんへ切り替える
+      trace.set({ tts_fallback: "sakura" });
       audioBase64 = await ttsToBase64Sakura(backchannelText, { model: "zundamon" });
     }
-    console.log(`[TTS] ${ttsVendor}/${ttsVoice} (${Date.now() - ttsStart}ms)`);
-
-    console.log(`[Total] ${Date.now() - start}ms`);
+    trace.mark("tts_done");
+    trace.set({ audio_bytes: Math.round(audioBase64.length * 3 / 4) });
 
     return {
       statusCode: 200,
@@ -391,10 +396,12 @@ export const handler = async (event) => {
       }),
     };
   } catch (err) {
-    console.error("[Backchannel] error:", err);
+    if (trace) trace.error("handler", err); else console.error("[backchannel] failed before trace:", err?.name, err?.message);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: err.message }),
     };
+  } finally {
+    trace?.finish();
   }
 };

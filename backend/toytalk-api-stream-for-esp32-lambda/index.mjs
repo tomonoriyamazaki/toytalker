@@ -11,6 +11,7 @@
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
+  import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
   // 会話の間が数秒空くとLLM/TTSへのTLS接続が閉じられ、次のターンで
@@ -232,12 +233,7 @@
     const pad = Math.round(sampleRate * padMs / 1000);
     const headCut = Math.max(0, start - pad);
     const tailCut = Math.min(total - 1, end + pad);
-    const trimmed = pcm.slice(headCut * 2, (tailCut + 1) * 2);
-    const cutMs = Math.round(((total - (tailCut - headCut + 1)) / sampleRate) * 1000);
-    if (cutMs > 0) {
-      console.log(`[TrimSilence] cut ${cutMs}ms (head ${Math.round(headCut / sampleRate * 1000)}ms, tail ${Math.round((total - 1 - tailCut) / sampleRate * 1000)}ms)`);
-    }
-    return trimmed;
+    return pcm.slice(headCut * 2, (tailCut + 1) * 2);
   };
 
   const sha1  = (s)=>createHash("sha1").update(s).digest("hex");
@@ -286,41 +282,26 @@
 
 // OpenAI TTS → Buffer (raw PCM)
 async function ttsBufferOpenAI(text, voice, ttsModel) {
-  try {
-    const tts = await getOpenAI().audio.speech.create({
-      model: ttsModel,
+  const tts = await getOpenAI().audio.speech.create({
+    model: ttsModel,
+    input: text,
+    voice,
+    response_format: "pcm"
+  });
+  const buf = Buffer.from(await tts.arrayBuffer());
+
+  // 先頭が MP3 だったらフォールバックで WAV 再取得
+  if (buf[0] === 0xFF && (buf[1] === 0xF3 || buf[1] === 0xFB || buf[0] === 0x49)) {
+    console.warn("[TTS] OpenAI returned non-PCM, retrying as WAV");
+    const tts2 = await getOpenAI().audio.speech.create({
+      model: ttsModel.replace("mini", "tts"),
       input: text,
       voice,
-      response_format: "pcm"
+      format: "wav"
     });
-
-    const buf = Buffer.from(await tts.arrayBuffer());
-    console.log(`[TTS] PCM size: ${buf.length} bytes`);
-
-    // 先頭が MP3 だったらフォールバックで WAV 再取得
-    if (buf[0] === 0xFF && (buf[1] === 0xF3 || buf[1] === 0xFB || buf[0] === 0x49)) {
-      console.warn("[TTS] PCM not returned, retrying as WAV");
-      const tts2 = await getOpenAI().audio.speech.create({
-        model: ttsModel.replace("mini", "tts"),
-        input: text,
-        voice,
-        format: "wav"
-      });
-      return Buffer.from(await tts2.arrayBuffer());
-    }
-
-    // 本物のPCM Bufferを返す
-    // デバッグ: 最初の16バイトを確認
-    const head = buf.slice(0, 16);
-    console.log(`[TTS OpenAI] First 16 bytes (hex): ${head.toString('hex')}`);
-    console.log(`[TTS OpenAI] First 8 samples (int16LE): ${Array.from({length: 8}, (_, i) => head.readInt16LE(i*2)).join(', ')}`);
-
-    return buf;
-
-  } catch (err) {
-    console.error("[TTS] OpenAI PCM fetch failed:", err);
-    throw err;
+    return Buffer.from(await tts2.arrayBuffer());
   }
+  return buf;
 }
 
   // Google Cloud Text-to-Speech (API Key) → Buffer (raw PCM)
@@ -364,7 +345,6 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     }
     // json.audioContent は LINEAR16 (base64) → 生のBufferに変換
     const pcmBuffer = Buffer.from(json.audioContent, "base64");
-    console.log(`[TTS Google] PCM size: ${pcmBuffer.length} bytes`);
 
     // Google TTS特有の冒頭クリック音対策: フェードイン処理
     const fadeMs = 20;  // 20ミリ秒
@@ -374,12 +354,6 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       const sample = pcmBuffer.readInt16LE(i * 2);
       pcmBuffer.writeInt16LE(Math.round(sample * fade), i * 2);
     }
-
-    // デバッグ: 最初の16バイトを確認
-    const head = pcmBuffer.slice(0, 16);
-    console.log(`[TTS Google] First 16 bytes (hex): ${head.toString('hex')}`);
-    console.log(`[TTS Google] First 8 samples (int16LE): ${Array.from({length: 8}, (_, i) => head.readInt16LE(i*2)).join(', ')}`);
-
     return pcmBuffer;
   }
 
@@ -409,15 +383,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     if (!b64Pcm) throw new Error("Gemini TTS: empty audio");
 
     // 24kHz/mono PCM16 base64 → 生のBufferに変換
-    const pcmBuffer = Buffer.from(b64Pcm, "base64");
-    console.log(`[TTS Gemini] PCM size: ${pcmBuffer.length} bytes`);
-
-    // デバッグ: 最初の16バイトを確認
-    const head = pcmBuffer.slice(0, 16);
-    console.log(`[TTS Gemini] First 16 bytes (hex): ${head.toString('hex')}`);
-    console.log(`[TTS Gemini] First 8 samples (int16LE): ${Array.from({length: 8}, (_, i) => head.readInt16LE(i*2)).join(', ')}`);
-
-    return pcmBuffer;
+    return Buffer.from(b64Pcm, "base64");
   }
 
   // ElevenLabs TTS → Buffer (raw PCM)
@@ -449,20 +415,8 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       throw new Error(`ElevenLabs TTS failed: ${resp.status} ${errorText}`);
     }
 
-    // レスポンスヘッダーを確認
-    const contentType = resp.headers.get('content-type');
-    console.log(`[TTS ElevenLabs] Content-Type: ${contentType}`);
-
     // PCMバイナリデータを直接返す
-    const pcmBuffer = Buffer.from(await resp.arrayBuffer());
-    console.log(`[TTS ElevenLabs] PCM size: ${pcmBuffer.length} bytes`);
-
-    // デバッグ: 最初の16バイトを確認
-    const head = pcmBuffer.slice(0, 16);
-    console.log(`[TTS ElevenLabs] First 16 bytes (hex): ${head.toString('hex')}`);
-    console.log(`[TTS ElevenLabs] First 8 samples (int16LE): ${Array.from({length: 8}, (_, i) => head.readInt16LE(i*2)).join(', ')}`);
-
-    return pcmBuffer;
+    return Buffer.from(await resp.arrayBuffer());
   }
 
   // Cartesia TTS → Buffer (raw PCM 24kHz/16bit/mono)
@@ -494,9 +448,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       throw new Error(`Cartesia TTS failed: ${resp.status} ${errorText}`);
     }
 
-    const pcmBuffer = Buffer.from(await resp.arrayBuffer());
-    console.log(`[TTS Cartesia] PCM size: ${pcmBuffer.length} bytes`);
-    return pcmBuffer;
+    return Buffer.from(await resp.arrayBuffer());
   }
 
 
@@ -505,11 +457,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
   // 一度切り替えたらその返答の残りはずんだもんのまま。仕様: docs/tts-fallback-and-notifications.md
   const TTS_RETRY_WAITS_MS = [300, 600];
   const TTS_FALLBACK_NOTICE = "いまはこんでいるから、べつのこえでおはなしするね。";
-  function ttsErrorStatus(e) {
-    if (typeof e?.status === "number") return e.status;
-    const m = /\b([45]\d{2})\b/.exec(String(e?.message || ""));
-    return m ? Number(m[1]) : null;
-  }
+  const ttsErrorStatus = errorStatus;
   function isRetryableTtsError(e) {
     const s = ttsErrorStatus(e);
     return s === 429 || s === 408 || (s !== null && s >= 500);
@@ -530,9 +478,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       const errorText = await resp.text();
       throw new Error(`FishAudio TTS failed: ${resp.status} ${errorText}`);
     }
-    const pcmBuffer = Buffer.from(await resp.arrayBuffer());
-    console.log(`[TTS FishAudio] PCM size: ${pcmBuffer.length} bytes`);
-    return pcmBuffer;
+    return Buffer.from(await resp.arrayBuffer());
   }
 
   // Sakura (VOICEVOX) TTS → Buffer (raw PCM)
@@ -562,14 +508,13 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
     const wavBuffer = Buffer.from(await resp.arrayBuffer());
     // WAVヘッダ（44バイト）をスキップしてPCMデータを取得
-    const pcmBuffer = wavBuffer.slice(44);
-    console.log(`[TTS Sakura] WAV size: ${wavBuffer.length}, PCM size: ${pcmBuffer.length} bytes`);
-
-    return pcmBuffer;
+    return wavBuffer.slice(44);
   }
 
   // ZakiCorp TTS (clone voice via local GPU) — streaming PCM to ESP32
+  // 戻り値は { bytes, firstChunkMs }（最初の音声チャンクが届くまでの時間。ログの切り分け用）
   async function ttsStreamZakiCorp(text, { speaker = "vivian", language = "Japanese" } = {}, res, segSeq) {
+    const t = Date.now();
     const key = secret("ZAKICORP_API_KEY");
     const baseUrl = process.env.ZAKICORP_TTS_URL;
     if (!key || !baseUrl) throw new Error("ZAKICORP_API_KEY or ZAKICORP_TTS_URL is not set");
@@ -588,18 +533,17 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       throw new Error(`ZakiCorp TTS failed: ${resp.status} ${errorText}`);
     }
     let totalBytes = 0;
-    let firstChunk = true;
+    let firstChunkMs = null;
     for await (const raw of resp.body) {
       const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
-      if (firstChunk) {
+      if (firstChunkMs === null) {
+        firstChunkMs = Date.now() - t;
         sendMeta(res, "tts_start", { id: segSeq, size: 0, streaming: true });
-        firstChunk = false;
       }
       sendPCM(res, chunk);
       totalBytes += chunk.length;
     }
-    console.log(`[TTS ZakiCorp] streamed ${totalBytes} bytes, text="${text}"`);
-    return totalBytes;
+    return { bytes: totalBytes, firstChunkMs };
   }
 
   // DynamoDBからdevice_idに紐づくキャラクター＆ボイス設定を解決
@@ -667,12 +611,16 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     }
   }
 
-  export const handler = awslambda.streamifyResponse(async (event, res) => {
+  export const handler = awslambda.streamifyResponse(async (event, res, context) => {
+    const requestAt = Date.now();
     res.setContentType("application/octet-stream");
     await ensureSecrets();
 
     const body    = event.body ? JSON.parse(event.body) : {};
     if (body.warmup) { res.end(); return; }  // EventBridgeウォームアップping（コールドスタート対策）
+    // 切り分け用のログ。1リクエスト1行のJSONで、会話の文章は書かない（backend/shared/trace.mjs）
+    const trace = startTrace("turn", { event, context, t0: requestAt });
+    trace.mark("secrets");
     prewarmSpareInstance();  // 処理中に予備インスタンスを温める（同時2人目対策）
     prewarmConnections();    // LLM/TTS接続を先行確立（keep-alive切れ時の保険、非同期）
     loadDefaultLlm();        // デフォルトLLMを先読み（キャッシュ済みなら即時）
@@ -683,8 +631,13 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     // ---- ログ用メタデータ ----
     const sessionId  = typeof body.session_id === "string" ? body.session_id : "unknown";
     let   ownerId    = typeof body.owner_id   === "string" ? body.owner_id   : deviceId ?? "unknown";
-    const requestAt  = Date.now();
     const userTimestamp = new Date(requestAt).toISOString();
+    trace.set({
+      source: "esp", session_id: sessionId, device_id: deviceId, owner_id: ownerId,
+      backchannel_fired: backchannelFired, history_messages: messages.length,
+      user_chars: messages[messages.length - 1]?.content?.length ?? 0,
+      ...describeClient(event, body),
+    });
 
     function normalizeModelKey(k) {
       if (!k) return undefined;
@@ -718,9 +671,9 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         llmModelId  = charConfig.llmModelId;
         characterId = charConfig.characterId ?? "default";
         if (charConfig.ownerId) ownerId = charConfig.ownerId;
-        console.log(`[DynamoDB] device=${deviceId}, tts=${charConfig.provider}, voice=${charConfig.vendorId}, llm=${llmProvider}/${llmModelId}, hasPersonality=${!!personalityPrompt}, ownerId=${ownerId}`);
+        trace.set({ owner_id: ownerId, character_id: characterId, has_personality: !!personalityPrompt });
       } else {
-        console.log(`[DynamoDB] device=${deviceId} not found or no character set, using defaults`);
+        trace.set({ device_registered: false }); // 未登録か、キャラクター未設定。body の値で続ける
       }
     }
 
@@ -730,9 +683,10 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       llmProvider = d.provider;
       llmModelId  = d.modelId;
     }
-    console.log(`[LLM] provider=${llmProvider}, model=${llmModelId}`);
 
     const cfg = TTS_TABLE[ttsKey] ?? TTS_TABLE[TTS_DEFAULT];
+    trace.set({ llm: `${llmProvider}/${llmModelId}`, tts: cfg.ttsVendor, voice });
+    trace.mark("config");
 
     sendMeta(res, "mark", { k: "model", v: ttsKey });
     sendMeta(res, "mark", { k: "llm_vendor", v: llmProvider });
@@ -791,7 +745,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
     // ---- LLM ストリーム（共通モジュール。会社ごとの違いは backend/shared/llm.mjs に閉じる）----
     const toolsDef = enableTools ? [WEB_SEARCH_TOOL] : null;
-    const createLLMStream = (msgs, opts = {}) => chatStream({ provider: llmProvider, model: llmModelId, messages: msgs, tools: toolsDef, usage: llmUsage, ...opts });
+    const createLLMStream = (msgs, opts = {}) => chatStream({ provider: llmProvider, model: llmModelId, messages: msgs, tools: toolsDef, usage: llmUsage, trace, ...opts });
 
     let llmStream = createLLMStream(messagesWithSystem);
 
@@ -814,9 +768,15 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         firstTtsMarked = true;
       }
 
+      // ログ用（1文ごと）: text_at=LLMから文が揃った時刻、tts_ms=合成にかかった時間、first_chunk_ms=最初の音声が届くまで
+      // （ZakiCorpのストリーミングだけ。他は tts_ms と同じ）、sent_at=音声を書き終えた時刻。時刻はリクエスト開始からのms
+      const seg = { id: segSeq, chars: t.length, text_at: trace.elapsed(), vendor: cfg.ttsVendor, attempts: 0 };
+      const ttsStart = Date.now();
+
       // 音声チャンク（生PCMバイナリとして送信）
       // 主プロバイダーで合成。429/5xx は短く再試行し、だめならこの返答の残りはずんだもんで続ける
       async function synthesizePrimary(t) {
+        seg.attempts++;
         let pcmBuffer;
         if (cfg.ttsVendor === "openai") {
           const voiceName = voice === "default" ? "nova" : voice;
@@ -841,14 +801,16 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           pcmBuffer = await ttsBufferSakura(t, { model: modelName });
         } else if (cfg.ttsVendor === "zakicorp") {
           const speaker = voice === "default" ? "vivian" : voice;
-          await ttsStreamZakiCorp(t, { speaker }, res, segSeq);
+          const z = await ttsStreamZakiCorp(t, { speaker }, res, segSeq);
+          seg.bytes = z.bytes;
+          seg.first_chunk_ms = z.firstChunkMs;
           pcmBuffer = null;
         } else {
           throw new Error("Unknown ttsVendor");
         }
         return pcmBuffer;
       }
-      const synthesizeFallback = (t) => ttsBufferSakura(t, { model: "zundamon" });
+      const synthesizeFallback = (t) => { seg.attempts++; return ttsBufferSakura(t, { model: "zundamon" }); };
       try {
         let pcmBuffer;
         let usedFallback = false;
@@ -860,15 +822,17 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
             pcmBuffer = await synthesizePrimary(t);
           } catch (e) {
             let lastErr = e;
+            trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e), ms: Date.now() - ttsStart, error: true });
             if (cfg.ttsVendor !== "sakura" && isRetryableTtsError(e)) {
               for (const wait of TTS_RETRY_WAITS_MS) {
                 await sleepMs(wait);
-                try { pcmBuffer = await synthesizePrimary(t); lastErr = null; break; } catch (e2) { lastErr = e2; }
+                try { pcmBuffer = await synthesizePrimary(t); lastErr = null; break; }
+                catch (e2) { lastErr = e2; trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e2), error: true, retry: true }); }
               }
             }
             if (lastErr) {
               if (cfg.ttsVendor === "sakura") throw lastErr;
-              console.warn(`[TTS] ${cfg.ttsVendor} unavailable (${ttsErrorStatus(lastErr) ?? "?"}) -> fallback sakura: ${lastErr?.message || lastErr}`);
+              trace.error("tts_primary", lastErr); // この後ずんだもんへ切り替える
               ttsFallbackActive = true;
               usedFallback = true;
               // 切り替わった最初の文の頭に一言添える（音声だけ。画面のテキストは変えない）
@@ -877,26 +841,35 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
             }
           }
         }
-        if (usedFallback) ttsFallbackChars += t.length; else ttsInputChars += t.length;
+        seg.tts_ms = Date.now() - ttsStart;
+        if (usedFallback) { seg.fallback = "sakura"; ttsFallbackChars += t.length; } else ttsInputChars += t.length;
         if (pcmBuffer) {
+          const rawBytes = pcmBuffer.length;
           pcmBuffer = trimSilence(pcmBuffer);  // 前後の無音を削って切替体感を速く
+          seg.bytes = pcmBuffer.length;
+          seg.trim_ms = Math.round((rawBytes - pcmBuffer.length) / 48); // 24kHz/16bit/mono = 48 bytes/ms
           sendMeta(res, "tts_start", { id: segSeq, size: pcmBuffer.length });
           sendPCM(res, pcmBuffer);
-          console.log(`[Lambda] id=${segSeq}, pcm.length=${pcmBuffer.length} bytes, text="${t}"${usedFallback ? " (fallback sakura)" : ""}`);
         }
+        seg.sent_at = trace.elapsed();
       } catch (e) {
+        seg.error = ttsErrorStatus(e) ?? e?.name ?? "error";
+        trace.error("tts", e);
         sendMeta(res, "error", { message: `TTS failed: ${e?.message || e}` });
       }
+      trace.segment(seg);
     }
 
     // ---- LLM ストリーム処理（共通インターフェース）----
     try {
       // ---- LLM ストリーム処理（tool callループ対応）----
       let toolCallDetected = false;
+      trace.mark("llm_start");
       for await (const delta of llmStream) {
         if (delta.type === "toolCall") {
           toolCallDetected = true;
-          console.log(`[ToolCall] ${delta.name}(${JSON.stringify(delta.args)})`);
+          trace.mark("tool_call");
+          trace.set({ tool: delta.name }); // 検索語は発話から作られるので書かない
           // tool call前のつなぎテキストをflush
           const preBuf = buf.trim();
           if (preBuf) {
@@ -908,11 +881,10 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           let toolResult;
           if (delta.name === "web_search") {
             try {
-              toolResult = await searchWeb(delta.args.query);
+              toolResult = await searchWeb(delta.args.query, 3, trace);
               toolCalls.web_search = (toolCalls.web_search ?? 0) + 1;
-              console.log(`[ToolCall] search returned ${toolResult.length} results`);
             } catch (e) {
-              console.error(`[ToolCall] search error:`, e);
+              trace.error("web_search", e);
               toolResult = [{ title: "検索エラー", snippet: "検索に失敗しました", url: "" }];
             }
           } else {
@@ -922,12 +894,14 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           messagesWithSystem.push(...toolRoundMessages(delta, { results: toolResult, instruction: TOOL_RESULT_INSTRUCTION }));
           // 2回目は検索結果で答えさせる（Gemini 3系は再検索を要求しがちで、無視すると本文が空になる）
           llmStream = createLLMStream(messagesWithSystem, { toolChoice: "none" });
+          trace.mark("llm2_start");
 
           for await (const delta2 of llmStream) {
             if (delta2.type === "toolCall") {
-              console.log(`[ToolCall] nested tool call ignored: ${delta2.name}`);
+              trace.set({ nested_tool_ignored: delta2.name });
               break;
             }
+            trace.mark("llm2_first_token");
             textAll += delta2.text;
             buf     += delta2.text;
             if (DEBUG) sendMeta(res, "llm_token", { token: delta2.text });
@@ -945,6 +919,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           }
           break;
         }
+        trace.mark("llm_first_token");
         textAll += delta.text;
         buf     += delta.text;
         if (DEBUG) sendMeta(res, "llm_token", { token: delta.text });
@@ -960,6 +935,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           await emitSegment(segText);
         }
       }
+      trace.mark("llm_done");
       // 残り
       const tail = buf.trim();
       if (tail.length > 0) {
@@ -967,6 +943,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         await emitSegment(tail, { final: true });
       }
       sendMeta(res, "done", {});
+      trace.mark("done_sent");
 
       // ---- コスト計算 + usage書き込み + ログ保存 ----
       if (sessionId !== "unknown" && textAll.trim()) {
@@ -1052,11 +1029,19 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           cost_tool: toolCostTotal,
           cost_total: (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0) + toolCostTotal,
         });
+        trace.mark("usage_saved");
       }
     } catch (err) {
+      trace.error("handler", err);
       const msg = (err && err.message) ? err.message : String(err);
       sendMeta(res, "error", { message: msg });
     } finally {
       res.end();
+      trace.finish({
+        segments_count: segSeq, reply_chars: textAll.trim().length,
+        llm_tokens_in: llmUsage.in, llm_tokens_out: llmUsage.out,
+        tts_chars: ttsInputChars, tts_fallback_chars: ttsFallbackChars || undefined,
+        tool_calls: Object.keys(toolCalls).length > 0 ? toolCalls : undefined,
+      });
     }
   });

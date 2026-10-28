@@ -5,7 +5,8 @@ ESP32-S3スタンドアロン機（v3）のファーム開発の入口。ここ�
 ## 現在の状態（2026-09-16時点）
 
 - 開発先は [v0.7](../devices/mcu/esp32_s3/toytalker_mini_v0.7/toytalker_mini_v0.7.ino)（OTA対応、NLP既定=AGGR、`sketch.yaml` にボード設定あり）。[v0.6](../devices/mcu/esp32_s3/toytalker_mini_v0.6/toytalker_mini_v0.6.ino) は音量方式の検証版、[v0.5](../devices/mcu/esp32_s3/toytalker_mini_v0.5/toytalker_mini_v0.5.ino) は実機確認済み安定版として保持。
-- 試験機「v0.2 大スピーカー」（`90:da:72:49:ba:e5`）に入っている版は 0.7.2（2026-09-16、OTAで更新、app1で稼働、`fw_channel=beta`）。配布機は `toytalker_v07_serial_nowait`（2026-09-12夜書き込み、OTA非対応、版の報告なし）。
+- 試験機「v0.2 大スピーカー」（`90:da:72:49:ba:e5`）に入っている版は 0.7.2（2026-09-16、OTAで更新、app1で稼働、`fw_channel=beta`）。
+- 開発中の版は **0.7.3**（2026-10-28。本文・相槌の要求に `"fw":"<版>"` を添えるだけの変更。Lambdaの切り分けログ用。**未ビルド・未配布**。配布はロードマップ6の `stable` 発行と一緒に）。配布機は `toytalker_v07_serial_nowait`（2026-09-12夜書き込み、OTA非対応、版の報告なし）。
 - 実機構成: AEC後のAC RMSで音声割り込み判定、NLP=AGGR、音声割り込みON、ボタン即時消音、AEC毎ターン再作成、TLSはPSRAM固定、USBログ送信待ち0。TTSはCartesia基準。
 - NLP既定はAGGR（2026-09-16にNORMALから変更。実機構成と同じ）。NORMALで比較するときは `--build-property 'compiler.cpp.extra_flags=-DTOYTALKER_AEC_NLP_LEVEL=0'`。
 - AEC調整は一旦終了。「途中停止は減ったが、声で止めるには近づく必要がある」というトレードオフは既知で、最終的な限界とは扱わない。AEC本体の時刻整列・入力飽和・フィルタ等に未検証の改善候補あり。
