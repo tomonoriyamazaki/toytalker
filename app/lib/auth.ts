@@ -156,7 +156,8 @@ export async function signIn(provider?: Provider): Promise<Session | null> {
     usePKCE: true,
     extraParams: provider ? { identity_provider: provider } : {},
   });
-  const prompt = { preferEphemeralSession: true }; // cookie を共有しない（上のコメント）
+  // cookie を共有しない（上のコメント）。promptAsync の型には無いが、実装は openAuthSessionAsync へそのまま渡す（expo-auth-session 6.1）
+  const prompt = { preferEphemeralSession: true } as AuthSession.AuthRequestPromptOptions;
   let result = await request.promptAsync(discovery, prompt);
   if (result.type === "error" && /already found an entry/i.test(result.params?.error_description ?? "")) {
     // Cognito の既知の癖: 2社目のログインで既存の利用者にリンクした直後の1回目はエラーになり、もう一度で通る（docs/auth.md）
