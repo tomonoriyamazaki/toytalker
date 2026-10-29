@@ -1242,9 +1242,12 @@ export default function Chat() {
       };
       console.log("🚀 payload to Lambda:", JSON.stringify(payload, null, 2), attemptNo > 1 ? `(attempt ${attemptNo})` : "");
       // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）
+      // open() 後・send() 前なら非同期を挟んでよい。ハッシュに失敗しても送る（NONE の間は通る。IAM 後は 403 になりログで分かる）
       const json = JSON.stringify(payload);
-      for (const [k, v] of Object.entries(bodyHashHeader(json))) xhr.setRequestHeader(k, v);
-      xhr.send(json);
+      bodyHashHeader(json)
+        .then((h) => { for (const [k, v] of Object.entries(h)) xhr.setRequestHeader(k, v); })
+        .catch((e) => console.log("[SEND] body hash failed:", e?.message ?? e))
+        .finally(() => xhr.send(json));
     };
 
     try {
