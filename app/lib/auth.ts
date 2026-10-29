@@ -2,7 +2,6 @@ import * as AuthSession from "expo-auth-session";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useState } from "react";
 import { API_BASE_URL } from "./api";
-import { getStoredOwnerId, setOwnerId } from "../hooks/useOwnerId";
 
 /**
  * ログイン（ロードマップ4、docs/auth.md）。
@@ -39,6 +38,8 @@ export type Session = {
   expiresAt: number;
   email: string | null;
   provider: string | null;
+  /** アカウントの owner_id（GET /me の値）。端末の仮の ID とは別（hooks/useOwnerId.ts） */
+  ownerId?: string | null;
 };
 
 let session: Session | null | undefined; // undefined = まだ読んでいない
@@ -80,6 +81,7 @@ function toSession(t: AuthSession.TokenResponse, previous?: Session | null): Ses
     expiresAt: exp,
     email: typeof payload.email === "string" ? payload.email : previous?.email ?? null,
     provider: providerOf(payload),
+    ownerId: previous?.ownerId ?? null,
   };
 }
 
@@ -142,8 +144,7 @@ export async function getIdToken(): Promise<string | null> {
 
 /**
  * ログイン。provider を渡すとその IdP の画面へ直接飛ぶ（省略時は Cognito の選択画面）。
- * 成功したら設定Lambda の GET /me で端末の owner_id をアカウントに結び付け、サーバーが別の owner_id を返したら端末側も差し替える
- * （すでに他のアカウントのものだった owner_id は引き継げない。docs/auth.md）。
+ * 成功したら設定Lambda の GET /me でアカウントの owner_id を受け取りセッションに持つ（端末の仮の ID は触らない。docs/auth.md）。
  * 戻り値はセッション。利用者が画面を閉じたら null
  */
 export async function signIn(provider?: Provider): Promise<Session | null> {
@@ -179,16 +180,14 @@ export async function signIn(provider?: Provider): Promise<Session | null> {
   return next;
 }
 
-/** GET /me で端末の owner_id をアカウントへ結び付ける。失敗しても例外にしない（次の要求で Lambda が同じことをする） */
+/** GET /me でアカウントの owner_id を受け取り、セッションに持つ（初回は Lambda が users の行を作る）。失敗しても例外にしない */
 async function linkAccount(idToken: string): Promise<void> {
   try {
-    const local = await getStoredOwnerId();
-    const res = await fetch(`${API_BASE_URL}/me?owner_id=${encodeURIComponent(local ?? "")}`, { headers: { [TOKEN_HEADER]: idToken } });
+    const res = await fetch(`${API_BASE_URL}/me`, { headers: { [TOKEN_HEADER]: idToken } });
     const me = await res.json();
     if (typeof me?.auth_required === "boolean") authRequired = me.auth_required;
-    if (res.ok && typeof me?.owner_id === "string" && me.owner_id !== local) {
-      console.log("[auth] owner_id replaced by server:", me.owner_id);
-      await setOwnerId(me.owner_id);
+    if (res.ok && typeof me?.owner_id === "string" && session && me.owner_id !== session.ownerId) {
+      await save({ ...session, ownerId: me.owner_id });
     }
   } catch (e) {
     console.warn("[auth] link failed:", (e as Error)?.message);
@@ -196,7 +195,7 @@ async function linkAccount(idToken: string): Promise<void> {
 }
 
 /**
- * 起動時に呼ぶ。ログイン済みなら GET /me で owner_id をサーバーと揃える（別の端末で先にログインしていた、運用で付け替えた、など）。
+ * 起動時に呼ぶ。ログイン済みなら GET /me でアカウントの owner_id をサーバーと揃える（運用で付け替えた場合など）。
  * 未ログインなら何もしない
  */
 export async function syncAccount(): Promise<void> {
@@ -228,6 +227,18 @@ export async function signOut(): Promise<void> {
   } catch (e) {
     console.warn("[auth] revoke failed:", (e as Error)?.message);
   }
+}
+
+/** セッションの変化を購読する（hooks/useOwnerId.ts が使う）。戻り値で解除 */
+export function subscribeAuth(listener: () => void): () => void {
+  listeners.add(listener);
+  load().then(listener);
+  return () => { listeners.delete(listener); };
+}
+
+/** 現在のセッション（同期。まだ読んでいなければ null） */
+export function currentSession(): Session | null {
+  return session ?? null;
 }
 
 /** 画面用。セッションの変化を追う */

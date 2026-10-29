@@ -6,7 +6,7 @@
 
 - **RnD へ deploy 済（2026-10-29）。CLI で本物のトークンの経路まで確認済。残りはアプリの実機確認と Google / Apple の設定。** プール `ap-northeast-1_eTtAWro8f`（`toytalker-auth-rnd`）、アプリ用クライアント `j7mibe6i3eop4r2sakbgs52e5`、ログイン画面 `toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com`。Google / Apple の IdP は各社側の設定（下の「各社側の設定」）が済んでから `stages.ts` に ID を書いて deploy する。
 - 確認済（curl、固定ドメイン経由）: トークン無しは 200 で `auth: "none"`。不正トークンは `/me` `/stt-token` `/chat-app` `/read-aloud-app` すべて 401 `invalid_token`（LLM は走らない）。試験用利用者（`exodjp@gmail.com`、Cognito 利用者）のトークンで `GET /me` が users の行を作り（`created: true`、2回目は false）、`/characters` はクエリの `owner_id` を無視して本人分だけ、会話（`/chat-app`）がログイン中に通り（ログ `auth: "user"`、`owner_id` は users の値）、他人のデバイスへの `PUT` は 403 `not_owner`、鍵発行は 200。
-- 注意: `GET /me?owner_id=` で結び付けるのは `u_<uuid>` 形式だけ（curl の `u_authtest` は新しい ID が発行された。アプリの ID は常にこの形式）。アプリ用クライアントは CLI 確認用に `ADMIN_USER_PASSWORD_AUTH`（AWS 資格情報が要る管理者用）も許可している。
+- アプリ用クライアントは CLI 確認用に `ADMIN_USER_PASSWORD_AUTH`（AWS 資格情報が要る管理者用）も許可している。
 - RnD は `auth.required: false`（トークン無しも通す）。本番は `true`。
 - 小物2つ（脅威モデル#1・#2）: `DELETE /devices/{id}` の `owner_id` 必須化は**済**（トークン無しのときは本文の `owner_id` が無いと 400、違えば 403）。Soniox 一時鍵の寿命短縮は、ロードマップ11の試用（寿命3分・閾値2分）の結果で本番値を決めてから（Lambda の `DEFAULT_KEY_TTL_SEC` は 1時間のまま。短縮は古いファーム・アプリが消えてから）。
 
@@ -30,7 +30,7 @@
 | トークンのヘッダー | `x-toytalker-token`（`Authorization` は CloudFront の OAC が署名で上書きするので使えない） | CloudFront の origin request policy の allowList と Function URL の CORS に入れてある |
 | 検証 | `backend/shared/auth.mjs`（`aws-jwt-verify`。依存は `backend/shared/package.json`、`install-lambda-deps.sh` が入れる） | ID トークン、`tokenUse: "id"`、`clientId` 一致。JWKS は容器内キャッシュ。ネットワーク越しの認証を音声の経路に挟まない |
 | 同じ人を1人にする | 登録前トリガー `backend/toytalker-auth-presignup-lambda`（`toytalker-auth-presignup-<環境>`）。外部IdPからの初回ログインで、その IdP が検証した同じメールの既存利用者がいれば `AdminLinkProviderForUser` でリンクする | Google と Apple で入っても Cognito 上は1人（2026-10-29決定。本来の形は「3: Cognito の層で結ぶ」。自分のテーブルでメールを束ねる案は却下）。未検証のメールでは結ばない。Apple の「メールを非公開」は一致しないので別人になる（アプリの「前回は◯◯でログイン」で案内）。Cognito の癖で、リンク直後の1回目のログインはエラーになり、アプリが自動で2回目を試す |
-| 本人 → owner_id | DynamoDB `toytalker-users`（pk `sub`、GSI `owner_id-index`）。`owner_id` は内部IDのまま | 初回ログインで端末の `owner_id`（`u_<uuid>`）を、まだ誰のものでもなければそのまま結び付ける（データ移行なし）。誰かのものなら新しい ID を発行し、アプリは端末側の ID を差し替える（`GET /me` の応答） |
+| 本人 → owner_id | DynamoDB `toytalker-users`（pk `sub`、GSI `owner_id-index` は運用で「この owner_id は誰か」を引く用）。`owner_id` は内部IDのまま | **端末の ID とアカウントの ID は別**（2026-10-30決定）。初回ログインで新しい `owner_id` を発行する。端末の `u_<uuid>` は「ログインしていない人」の仮の ID で、ログイン中は使わず、ログアウトすると戻る。ログイン前のデータは引き継がない（本番はログイン必須なのでゲストのデータは無い。RnD で使っている数人は users の行を手で書いて引き継いだ） |
 | ログ | 1行JSON（`trace.mjs`）に `auth`（none / user / invalid）、`auth_reason`、`auth_provider`、`status`、`owner_id` | メールアドレスと sub は書かない |
 | 通知 | CloudWatch メトリクスフィルタ（`status` が 401/403）+ アラーム3つ（`toytalker-api-rejected-<環境>` 5分で20件、`-api-invocations-` 600件、`-api-errors-` 10件）→ 月次レポートと同じ SNS トピック（メール） | Lambda からはメールを送らない（応答が遅れ、連打でメールも連打される） |
 
@@ -49,7 +49,7 @@
 
 | ルート | 確認 |
 |---|---|
-| `GET /me` | 本人の `owner_id`・メール・IdP を返す。初回は users の行を作る（`?owner_id=` で端末の ID を結び付ける） |
+| `GET /me` | 本人の `owner_id`・メール・IdP を返す。初回は新しい `owner_id` を発行して users の行を作る |
 | `POST /devices` | 既存行が他人のものなら 403（本番）。新規は本人を書く |
 | `GET/PUT/DELETE /devices/{id}` | 行の所有者 = 本人 |
 | `PUT/DELETE /characters/{id}`、`PUT/DELETE /custom-voices/{id}` | 行の所有者 = 本人（system 製は従来どおり 403） |
@@ -68,8 +68,8 @@
 ### アプリの実機確認で分かったこと（2026-10-29）
 
 - 試験用利用者でのログインは通った。ただし CLI の確認で先に同じ利用者へ別の `owner_id` を結び付けていたため、アプリの端末 ID がそれに差し替わり、選択中だったキャラクターが「他人のもの」になって本文が 403（相槌だけ鳴った）。users の行は手で元の `owner_id` に戻した。
-- 直したこと: (a) 起動時にログイン済みなら `GET /me` で `owner_id` を揃える（`syncAccount`）、(b) 選択中のキャラクターが一覧に無ければ既定に戻す（他人のキャラクターを見せない）、(c) 本文が 401/403 のとき画面に理由を出す、(d) 相槌Lambdaも所有者確認（users を読むだけ）、(e) 最初の画面にログインボタン（`components/LoginButtons.tsx`。RnD は「ログインせずに使う」も出す。本番は `/me` の `auth_required` が true なので出ない）。
-- 本番でも「別の端末で先にログインしていた人」は同じ経路を通る（端末の ID はサーバーの値に揃い、ログイン前にその端末で作ったデータは引き継がれない）。
+- 直したこと: (a) 起動時にログイン済みなら `GET /me` でアカウントの `owner_id` を取り直す（`syncAccount`）、(b) 選択中のキャラクターが一覧に無ければ既定に戻す（他人のキャラクターを見せない）、(c) 本文が 401/403 のとき画面に理由を出す、(d) 相槌Lambdaも所有者確認（users を読むだけ）、(e) 最初の画面にログインボタン（`components/LoginButtons.tsx`。RnD は「ログインせずに使う」も出す。本番は `/me` の `auth_required` が true なので出ない）。
+- その後（2026-10-30）「端末の ID をアカウントの ID にする」近道をやめ、2つを別の ID にした（上の表）。ログイン/ログアウトで端末の ID は変わらず、試験アカウントで入っても端末側は汚れない。
 
 ## 各社側の設定（ユーザーの操作）
 

@@ -1,17 +1,17 @@
 import { useState, useEffect } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
+import { currentSession, subscribeAuth } from "../lib/auth";
 
-// owner_id はキーチェーン(SecureStore)を正として保持する。
+// 端末の owner_id（ログインしていない人の仮の ID）はキーチェーン(SecureStore)を正として保持する。
 // キーチェーンはアプリを削除しても端末に残るため、dev⇔TestFlightの入れ替えや
 // 再インストールでもIDが変わらない(iOS)。AsyncStorageは旧バージョンからの移行元。
-// ログイン（app/lib/auth.ts）すると、この端末の owner_id をアカウントに結び付ける。サーバーが別の owner_id を
-// 返したとき（すでに他のアカウントのものだった）は setOwnerId で差し替え、画面にも伝える（docs/auth.md）。
+// ログイン中（app/lib/auth.ts）は、useOwnerId がアカウントの owner_id（GET /me の値）を返し、端末の ID は触らない。
+// ログアウトすると端末の ID に戻る。2つは別の ID で、ログイン前のデータは引き継がない（docs/auth.md、2026-10-30決定）。
 const OWNER_ID_KEY = "owner_id";
 
 let current: string | null = null;
 let resolving: Promise<string> | null = null;
-const listeners = new Set<(id: string) => void>();
 
 function generateUUID(): string {
   const hex = "0123456789abcdef";
@@ -62,22 +62,22 @@ export async function getStoredOwnerId(): Promise<string> {
   return resolving;
 }
 
-/** サーバーが決めた owner_id に差し替える（ログイン時。app/lib/auth.ts） */
-export async function setOwnerId(id: string): Promise<void> {
-  current = id;
-  await persist(id);
-  listeners.forEach((l) => l(id));
+/** いま使う owner_id。ログイン中はアカウントの ID、それ以外は端末の仮の ID。どちらも未解決なら null */
+function effectiveOwnerId(): string | null {
+  const s = currentSession();
+  if (s) return s.ownerId ?? null; // ログイン直後で /me がまだなら null（取れ次第 subscribeAuth で更新される）
+  return current;
 }
 
 export function useOwnerId(): string | null {
-  const [ownerId, setState] = useState<string | null>(current);
+  const [ownerId, setState] = useState<string | null>(effectiveOwnerId());
 
   useEffect(() => {
     let alive = true;
-    getStoredOwnerId().then((id) => { if (alive) setState(id); });
-    const l = (id: string) => { if (alive) setState(id); };
-    listeners.add(l);
-    return () => { alive = false; listeners.delete(l); };
+    const update = () => { if (alive) setState(effectiveOwnerId()); };
+    getStoredOwnerId().then(update);
+    const unsubscribe = subscribeAuth(update);
+    return () => { alive = false; unsubscribe(); };
   }, []);
 
   return ownerId;

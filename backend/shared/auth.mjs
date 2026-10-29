@@ -10,15 +10,16 @@
 //             トークン付きなら本番と同じに検証するので、動作確認は RnD でできる。
 //     不正・期限切れのトークンはどの環境でも 401（auth: "invalid"）。
 //   - Cognito の sub → owner_id の対応は DynamoDB `toytalker-users`（pk: sub）。owner_id は内部IDのまま残す。
-//     初回ログイン時に、アプリが持っていた端末の owner_id（u_<uuid>）を、まだ誰のものでもなければそのまま結び付ける（データ移行が要らない）。
-//     誰かのものなら新しい owner_id を発行する。
+//     アカウントの owner_id は初回ログイン時に新しく発行する（端末の owner_id とは別。2026-10-30決定。
+//     端末の ID は「ログインしていない人」の仮の ID で、アカウントの ID は端末に依存しない「人」の ID。
+//     ログイン前のデータは引き継がない。本番はログイン必須なのでゲストのデータは最初から無い。RnD の数人は users の行を手で書く）。
 //   - ESP32 はログインしない。device_id だけ送り、Lambda が devices テーブルから所有者を引く。本番ではその行が無い
 //     （= アプリでログインして登録していない）機器を拒む（deviceGate）。製造時のデバイス鍵は後で（docs/security-review-2026-10-25.md）。
 //   - ログには auth の結果（none / user / invalid）と owner_id だけ書く。メールアドレスは書かない。
 import { randomUUID } from "node:crypto";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { tableName } from "./tables.mjs";
 
 /** トークンを載せるヘッダー名（小文字。Function URL はヘッダー名を小文字で渡す）。アプリは app/lib/api.ts */
@@ -29,7 +30,6 @@ export const AUTH_REQUIRED = process.env.AUTH_REQUIRED === "true";
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || "";
 const CLIENT_ID = process.env.COGNITO_CLIENT_ID || "";
 const USERS_TABLE = tableName("users");
-const OWNER_ID_PATTERN = /^u_[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const CACHE_MS = 5 * 60 * 1000;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -102,23 +102,10 @@ async function findBySub(sub) {
   return res.Item ?? null;
 }
 
-/** その owner_id をすでに持つ利用者がいるか（GSI owner_id-index） */
-async function ownerTaken(ownerId) {
-  const res = await ddb.send(new QueryCommand({
-    TableName: USERS_TABLE,
-    IndexName: "owner_id-index",
-    KeyConditionExpression: "owner_id = :o",
-    ExpressionAttributeValues: { ":o": ownerId },
-    Limit: 1,
-  }));
-  return (res.Count ?? 0) > 0;
-}
-
 /**
  * この要求で使う owner_id を決める。
- *   - auth "user": users テーブルの行。無ければ作る（初回ログイン）。claimedOwnerId（端末が持っていた u_<uuid>）が
- *     まだ誰のものでもなければそれを結び付け、そうでなければ新しい owner_id を発行する。
- *   - auth "none"（RnD でトークン無し）: claimedOwnerId をそのまま返す（従来の自称方式）。
+ *   - auth "user": users テーブルの行。無ければ新しい owner_id を発行して作る（初回ログイン）。クライアントが名乗る owner_id は使わない。
+ *   - auth "none"（RnD でトークン無し）: claimedOwnerId（端末の仮の ID）をそのまま返す（従来の自称方式）。
  * @returns {Promise<{ ownerId: string|null, user: object|null, created: boolean }>}
  */
 export async function resolveOwner(identity, claimedOwnerId) {
@@ -128,7 +115,7 @@ export async function resolveOwner(identity, claimedOwnerId) {
   const existing = await findBySub(identity.sub);
   if (existing) return { ownerId: existing.owner_id, user: existing, created: false };
 
-  let ownerId = claimed && OWNER_ID_PATTERN.test(claimed) && !(await ownerTaken(claimed)) ? claimed : `u_${randomUUID()}`;
+  const ownerId = `u_${randomUUID()}`;
   const now = new Date().toISOString();
   const item = { sub: identity.sub, owner_id: ownerId, email: identity.email, provider: identity.provider, created_at: now, last_login_at: now };
   try {

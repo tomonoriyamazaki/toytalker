@@ -166,7 +166,7 @@ async function route(method, path, event, body, identity, who, trace) {
   const ownerOr = (fallback) => ownerId ?? fallback;
   const deny = (gate) => { trace.set({ reason: gate.error }); return response(gate.statusCode, { error: gate.error }); };
   {
-    // ---- GET /me ---- 本人（アプリがログイン直後に呼ぶ。初回は端末の owner_id を結び付ける。docs/auth.md）
+    // ---- GET /me ---- 本人（アプリがログイン直後と起動時に呼ぶ。初回はアカウントの owner_id を新しく発行する。docs/auth.md）
     if (method === "GET" && path === "/me") {
       if (identity.auth !== "user") {
         return response(200, { auth: "none", owner_id: ownerId, auth_required: AUTH_REQUIRED });
