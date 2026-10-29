@@ -1,5 +1,4 @@
 import * as AuthSession from "expo-auth-session";
-import * as WebBrowser from "expo-web-browser";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useState } from "react";
 import { API_BASE_URL } from "./api";
@@ -10,6 +9,9 @@ import { getStoredOwnerId, setOwnerId } from "../hooks/useOwnerId";
  * Cognito のログイン画面（managed login。Google / Sign in with Apple のボタンが並ぶ）を認可コード + PKCE で開き、
  * ID トークンを `x-toytalker-token` ヘッダーで Lambda へ送る（app/lib/api.ts）。
  * トークンは SecureStore（キーチェーン）に置き、期限（1時間）が近づいたらリフレッシュトークン（180日）で取り直す。
+ * ログイン画面は Safari と cookie を共有しない一時セッションで開く（iOS の「“ToyTalk”が“amazoncognito.com”を使用して
+ * サインインしようとしています」の確認ダイアログを出さないため。2026-10-30決定）。Cognito 側のログイン状態は残らないので、
+ * ログアウト時にブラウザで Cognito の /logout を開く必要も無い。
  * 値は CDK の出力（`cdk deploy` の UserPoolClientId / AuthDomain）。環境を変えるときは EAS の env で上書きする。
  */
 export const COGNITO_DOMAIN = process.env.EXPO_PUBLIC_COGNITO_DOMAIN ?? "toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com";
@@ -17,7 +19,6 @@ export const COGNITO_CLIENT_ID = process.env.EXPO_PUBLIC_COGNITO_CLIENT_ID ?? "j
 /** トークンを載せるヘッダー名。backend/shared/auth.mjs の TOKEN_HEADER と同じ */
 export const TOKEN_HEADER = "x-toytalker-token";
 const REDIRECT_URI = "toytalk://auth/callback"; // app.json の scheme。CDK の callbackUrls と同じ
-const LOGOUT_URI = "toytalk://auth/signout";
 const SESSION_KEY = "auth_session";
 const REFRESH_MARGIN_MS = 60 * 1000;
 
@@ -155,11 +156,12 @@ export async function signIn(provider?: Provider): Promise<Session | null> {
     usePKCE: true,
     extraParams: provider ? { identity_provider: provider } : {},
   });
-  let result = await request.promptAsync(discovery);
+  const prompt = { preferEphemeralSession: true }; // cookie を共有しない（上のコメント）
+  let result = await request.promptAsync(discovery, prompt);
   if (result.type === "error" && /already found an entry/i.test(result.params?.error_description ?? "")) {
     // Cognito の既知の癖: 2社目のログインで既存の利用者にリンクした直後の1回目はエラーになり、もう一度で通る（docs/auth.md）
     console.log("[auth] linked to existing user, retrying sign-in");
-    result = await request.promptAsync(discovery);
+    result = await request.promptAsync(discovery, prompt);
   }
   if (result.type !== "success") {
     if (result.type === "error") throw new Error(result.params?.error_description ?? result.error?.message ?? "ログインに失敗しました");
@@ -215,7 +217,7 @@ export async function getAuthRequired(): Promise<boolean> {
   return authRequired ?? false;
 }
 
-/** ログアウト。リフレッシュトークンを失効させ、端末のセッションを消す。Cognito 側のログイン状態（ブラウザの cookie）も消す */
+/** ログアウト。リフレッシュトークンを失効させ、端末のセッションを消す（ログイン画面は一時セッションなので Cognito 側に残るものは無い） */
 export async function signOut(): Promise<void> {
   const s = await load();
   await save(null);
@@ -224,12 +226,6 @@ export async function signOut(): Promise<void> {
     if (s.refreshToken) await AuthSession.revokeAsync({ clientId: COGNITO_CLIENT_ID, token: s.refreshToken }, discovery);
   } catch (e) {
     console.warn("[auth] revoke failed:", (e as Error)?.message);
-  }
-  try {
-    const url = `${discovery.endSessionEndpoint}?client_id=${encodeURIComponent(COGNITO_CLIENT_ID)}&logout_uri=${encodeURIComponent(LOGOUT_URI)}`;
-    await WebBrowser.openAuthSessionAsync(url, LOGOUT_URI);
-  } catch {
-    // ブラウザを開けなくても端末側は消えている
   }
 }
 

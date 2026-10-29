@@ -60,7 +60,7 @@
 
 ### アプリ（`app/lib/auth.ts`、`app/lib/api.ts`）
 
-- `expo-auth-session` で Cognito のログイン画面を開く（iOS は ASWebAuthenticationSession、Android は Custom Tabs。Google が埋め込み WebView を拒むので WebView は使わない）。ネイティブモジュールは増えていない（`expo-web-browser` `expo-crypto` `expo-secure-store` は既存）。
+- `expo-auth-session` で Cognito のログイン画面を開く（iOS は ASWebAuthenticationSession、Android は Custom Tabs。Google が埋め込み WebView を拒むので WebView は使わない）。Safari と cookie を共有しない一時セッション（`preferEphemeralSession`）で開き、iOS の「サインインしようとしています」の確認ダイアログを出さない（2026-10-30）。Google の画面でアカウントを毎回選ぶことになるが、アプリ側は180日ログインが保たれる。ネイティブモジュールは増えていない（`expo-web-browser` `expo-crypto` `expo-secure-store` は既存）。
 - トークンは SecureStore に置き、`apiFetch` と XHR（会話・読み上げ）が `x-toytalker-token` を自動で添える。期限の1分前からリフレッシュする。
 - 設定タブ「アカウント情報」でログイン / ログアウト。値は `EXPO_PUBLIC_COGNITO_DOMAIN` / `EXPO_PUBLIC_COGNITO_CLIENT_ID`（既定は RnD。クライアント ID は deploy 後に `app/lib/auth.ts` の既定値へ書く）。
 - 未ログインでも RnD では今までどおり使える。本番向けビルドでは 401 になるので、ログイン必須の導線（起動時にアカウント画面へ）は本番の前に足す。
