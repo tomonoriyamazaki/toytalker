@@ -240,10 +240,8 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
       xhr.ontimeout = () => reject(new Error("タイムアウト"));
       // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）
       const json = JSON.stringify(body);
-      bodyHashHeader(json)
-        .then((h) => { for (const [k, v] of Object.entries(h)) xhr.setRequestHeader(k, v); })
-        .catch(() => {})
-        .finally(() => xhr.send(json));
+      for (const [k, v] of Object.entries(bodyHashHeader(json))) xhr.setRequestHeader(k, v);
+      xhr.send(json);
     });
 
   const onSpeak = async () => {

@@ -1,4 +1,4 @@
-import * as Crypto from "expo-crypto";
+import { sha256Hex } from "./sha256";
 
 /**
  * APIの入口（CloudFront の固定ドメイン。docs/roadmap.md の3、2026-10-29）。
@@ -11,18 +11,13 @@ export const API_BASE_URL = process.env.EXPO_PUBLIC_API_BASE_URL ?? "https://api
 
 export const apiUrl = (path: string): string => `${API_BASE_URL}${path}`;
 
-const EMPTY_BODY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-
 /**
  * CloudFront から Lambda へは署名付きで渡る（Origin Access Control）。署名は本文のハッシュを含むので、
  * GET / HEAD 以外の要求は本文の SHA-256（本文が無ければ空文字列のハッシュ）を x-amz-content-sha256 で添える。
  * 無いと Function URL を IAM 認証にしたときに 403 になる（CloudFront 開発者ガイド「Restrict access to an AWS Lambda function URL origin」）。
  */
-export async function bodyHashHeader(body?: string): Promise<Record<string, string>> {
-  const hex = body
-    ? await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, body, { encoding: Crypto.CryptoEncoding.HEX })
-    : EMPTY_BODY_SHA256;
-  return { "x-amz-content-sha256": hex };
+export function bodyHashHeader(body?: string): Record<string, string> {
+  return { "x-amz-content-sha256": sha256Hex(body ?? "") };
 }
 
 /** fetch の薄い包み。path は "/" 始まり。本文は文字列（JSON.stringify 済み）で渡す */
@@ -31,7 +26,7 @@ export async function apiFetch(path: string, init: RequestInit = {}): Promise<Re
   const headers: Record<string, string> = { ...((init.headers as Record<string, string> | undefined) ?? {}) };
   if (method !== "GET" && method !== "HEAD") {
     if (init.body !== undefined && typeof init.body !== "string") throw new Error("apiFetch: body は文字列で渡す");
-    Object.assign(headers, await bodyHashHeader(init.body as string | undefined));
+    Object.assign(headers, bodyHashHeader(init.body as string | undefined));
   }
   return fetch(apiUrl(path), { ...init, headers });
 }

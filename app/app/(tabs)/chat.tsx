@@ -1241,12 +1241,10 @@ export default function Chat() {
         backchannel_fired: backchannelFiredRef.current,
       };
       console.log("🚀 payload to Lambda:", JSON.stringify(payload, null, 2), attemptNo > 1 ? `(attempt ${attemptNo})` : "");
-      // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）。open() 後・send() 前なら非同期を挟んでよい
+      // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）
       const json = JSON.stringify(payload);
-      bodyHashHeader(json)
-        .then((h) => { for (const [k, v] of Object.entries(h)) xhr.setRequestHeader(k, v); })
-        .catch((e) => console.log("[SEND] body hash failed:", e?.message ?? e))
-        .finally(() => xhr.send(json));
+      for (const [k, v] of Object.entries(bodyHashHeader(json))) xhr.setRequestHeader(k, v);
+      xhr.send(json);
     };
 
     try {
