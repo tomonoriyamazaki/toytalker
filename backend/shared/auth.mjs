@@ -30,16 +30,12 @@ export const AUTH_REQUIRED = process.env.AUTH_REQUIRED === "true";
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || "";
 const CLIENT_ID = process.env.COGNITO_CLIENT_ID || "";
 const USERS_TABLE = tableName("users");
-const CACHE_MS = 5 * 60 * 1000;
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 // JWKS（公開鍵）は初回検証で取りに行き、容器の間は保持する。鍵が替わったら自動で取り直す（ライブラリの既定）
 const verifier = USER_POOL_ID && CLIENT_ID
   ? CognitoJwtVerifier.create({ userPoolId: USER_POOL_ID, tokenUse: "id", clientId: CLIENT_ID })
   : null;
-
-/** sub → { ownerId, at } の容器内キャッシュ。5分で取り直す（owner_id は変わらないので長くてもよいが、削除に追従するため） */
-const ownerCache = new Map();
 
 /** ID トークンの出どころ（Google / SignInWithApple / cognito）。federated だと identities に入る */
 function providerOf(payload) {
@@ -94,11 +90,14 @@ export function describeAuth(identity) {
   return { auth: identity.auth, ...(identity.reason ? { auth_reason: identity.reason } : {}), ...(identity.provider ? { auth_provider: identity.provider } : {}) };
 }
 
+/**
+ * users の行。毎回読む（容器内キャッシュはしない。2026-10-30決定）。
+ * 読み取りは 5〜15ms で会話1ターン（2〜5秒）に埋もれる一方、キャッシュすると運用で owner_id を付け替えたとき
+ * 容器ごとに答えが違う時間が生まれ、古い ID でログが書かれる。キャッシュしてよいのは変わらないもの（JWKS）か、
+ * 遅れても困らないもの（SSM の鍵）だけ
+ */
 async function findBySub(sub) {
-  const cached = ownerCache.get(sub);
-  if (cached && Date.now() - cached.at < CACHE_MS) return cached.item;
   const res = await ddb.send(new GetCommand({ TableName: USERS_TABLE, Key: { sub } }));
-  if (res.Item) ownerCache.set(sub, { item: res.Item, at: Date.now() });
   return res.Item ?? null;
 }
 
@@ -120,12 +119,10 @@ export async function resolveOwner(identity, claimedOwnerId) {
   const item = { sub: identity.sub, owner_id: ownerId, email: identity.email, provider: identity.provider, created_at: now, last_login_at: now };
   try {
     await ddb.send(new PutCommand({ TableName: USERS_TABLE, Item: item, ConditionExpression: "attribute_not_exists(#s)", ExpressionAttributeNames: { "#s": "sub" } }));
-    ownerCache.set(identity.sub, { item, at: Date.now() });
     return { ownerId, user: item, created: true };
   } catch (e) {
     if (e?.name !== "ConditionalCheckFailedException") throw e;
     // 同時に2本の要求が初回登録に来た。先に書かれた行を使う
-    ownerCache.delete(identity.sub);
     const row = await findBySub(identity.sub);
     return { ownerId: row?.owner_id ?? null, user: row, created: false };
   }
