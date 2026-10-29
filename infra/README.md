@@ -1,6 +1,6 @@
 # ToyTalker infra（AWS CDK / TypeScript）
 
-ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル・S3・SNS・温めルール・月次Scheduler）を1スタック `toytalker-<stage>`（RnDは改名まで旧名 `ToyTalker-rnd`。`config/stages.ts` の `legacyNames` と `stackName()`）で管理する。この文書は手順だけを持つ。いまの状態と残作業は [docs/roadmap.md](../docs/roadmap.md)、決定と根拠は [docs/multi-account-iac-plan.md](../docs/multi-account-iac-plan.md)。
+ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル・S3・SNS・温めルール・月次Scheduler・CloudFront 固定ドメイン）を1スタック `toytalker-<stage>`（RnDは改名まで旧名 `ToyTalker-rnd`。`config/stages.ts` の `legacyNames` と `stackName()`）で管理する。CloudFront が us-east-1 に要求する ACM 証明書と WAF は `<スタック名>-edge`（`lib/toytalker-edge-stack.ts`）に置き、本体が参照する。この文書は手順だけを持つ。いまの状態と残作業は [docs/roadmap.md](../docs/roadmap.md)、決定と根拠は [docs/multi-account-iac-plan.md](../docs/multi-account-iac-plan.md)。
 
 ## 構成
 
@@ -9,7 +9,8 @@ ToyTalkerのAWS資源（Lambda 8本・Function URL 7本・DynamoDB 8テーブル
 | `bin/toytalker.ts` | 入口。`--context stage=<rnd\|stg\|prd\|prd-dg>` で環境を選び、資格情報のアカウントが一致するか確認し、SSMに秘密が登録済みか確かめてスタックを作る |
 | `config/stages.ts` | 環境ごとの秘密でない設定（アカウントID・リージョン・通知先・ZakiCorp URL・テーブル名の末尾・S3バケット名・アーキテクチャ） |
 | `lib/secrets.ts` | SSM Parameter Store（SecureString）の名前一覧と読み出し。名前は全環境共通 `/toytalker/<key>` |
-| `lib/toytalker-stack.ts` | 資源定義。Lambdaは `backend/<dir>/index.mjs` をesbuildでまとめる（旧deploy.shと同じ指定。deploy.shは2026-09-16に削除） |
+| `lib/toytalker-stack.ts` | 資源定義。Lambdaは `backend/<dir>/index.mjs` をesbuildでまとめる（旧deploy.shと同じ指定。deploy.shは2026-09-16に削除）。CloudFront は `createApiDistribution` |
+| `lib/toytalker-edge-stack.ts` | us-east-1 のスタック `<スタック名>-edge`: ACM 証明書（DNS 検証）と WAF（レート制限）。本体が crossRegionReferences で参照する |
 | `scripts/` | 初回移行用（下記） |
 
 ## 使い方
@@ -21,7 +22,7 @@ bash scripts/install-lambda-deps.sh     # 各Lambdaディレクトリのnpm依�
 npx cdk synth  --context stage=rnd      # テンプレート生成（cdk.out/）
 npx cdk synth  --context stage=rnd --context nag=true   # cdk-nag の静的点検。指摘があると止まる（deploy前に通す）
 npx cdk diff   --context stage=rnd      # 本番との差分。Replace が1つも無いことを確認してから deploy
-npx cdk deploy --context stage=rnd
+npx cdk deploy --context stage=rnd --all   # スタックは edge（us-east-1）・本体・org の3つ。本体は edge に依存するので順番は CDK が決める
 ```
 
 cdk-nag で受け入れる指摘は `lib/toytalker-stack.ts` の `acknowledgeNagFindings` に理由付きで書く（根拠は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md)）。
@@ -75,7 +76,8 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 |---|---|
 | `kind` | `turn`（本文）/ `backchannel`（相槌）/ `stt-token`（Soniox鍵発行とOTA判定）/ `read-aloud`（読み上げ） |
 | `request_id` `session_id` `device_id` `owner_id` | 識別子。`request_id` はLambdaの requestId（`REPORT` 行と同じ値） |
-| `source` `fw` `app_version` `ua` | 出どころ。`source` は `esp` / `app`。`fw` はESP32が本文に添えるファーム版（v0.7.3以降）、`app_version` はアプリ版（`app/lib/appVersion.ts`。次の配布以降）。古い版からの要求は null。**送信元IPは書かない**（個人に結びつく。2026-10-28決定）。地域が要るときは CloudFront（ロードマップ3）の `CloudFront-Viewer-Country` から国コードだけを足す |
+| `source` `fw` `app_version` `ua` | 出どころ。`source` は `esp` / `app`。`fw` はESP32が本文に添えるファーム版（v0.7.3以降）、`app_version` はアプリ版（`app/lib/appVersion.ts`。次の配布以降）。古い版からの要求は null。**送信元IPは書かない**（個人に結びつく。2026-10-28決定） |
+| `edge` `country` | 経路（2026-10-29）。`cloudfront` = 固定ドメイン経由で、`country` に `CloudFront-Viewer-Country` の国コード（JP など）。`direct` = Function URL を直接呼ぶ旧ファーム・旧アプリで、`country` は null。`direct` が無くなったら Function URL を IAM 認証にする（下の「固定ドメイン」） |
 | `llm` `tts` `voice` `character_id` `has_personality` | 使った設定 |
 | `marks` | 段階の経過時刻（リクエスト開始からのms）。本文は `secrets`（SSM鍵）→ `config`（DynamoDB）→ `llm_start` → `llm_first_token` →（検索時 `tool_call` → `llm2_start` → `llm2_first_token`）→ `llm_done` → `done_sent` → `usage_saved` |
 | `ext` | 外部サービス呼び出し。`service`（gemini / openai / anthropic / brave / soniox / cartesia …）、`status`、`ms`（応答ヘッダが返るまで）、`at`（開始時刻）。TTSは失敗したときだけ載る |
@@ -92,6 +94,33 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 ```
 
 音声が途切れた箇所の切り分け: `segments` の `sent_at` の間隔が空いた文を見つけ、その文の `sent_at - text_at` が大きければTTS側、前の文との `text_at` の差が大きければLLM側（`marks.tool_call` があれば検索待ち）、`ext` に 429 / 5xx があれば外部サービス側。相槌は `marks.llm_done` と `marks.tts_done` の差で見る。
+
+## 固定ドメイン（CloudFront、ロードマップ3）
+
+`config/stages.ts` の `apiDomain`（RnD は `api-rnd.zakicorp.com`）を CloudFront の別名にし、Function URL 7本を1つのドメインの経路に束ねる（`lib/toytalker-stack.ts` の `createApiDistribution`、各 Lambda の `url.route`）。目的は URL の固定（Function URL のホスト名はスタックを作り直すと変わる）、WAF のレート制限（費用燃やしの天井）、国コードのログ。キャッシュはしない。ストリーミング応答はそのまま通る。
+
+| 経路 | Lambda |
+|---|---|
+| `/chat-app` `/chat-mcu` | 本文（App / ESP32） |
+| `/backchannel-app` `/backchannel-mcu` | 相槌 |
+| `/stt-token` | Soniox 一時キー発行（OTA 判定も） |
+| `/read-aloud-app` | 読み上げ |
+| それ以外（`/devices` `/characters` `/voices` `/llms` `/logs/*` `/usage*` `/custom-voices*`） | 設定Lambda（path を自分で振り分ける） |
+
+- **クライアントの約束**: CloudFront → Lambda は OAC の SigV4 署名で渡り、署名が本文のハッシュを含む。GET / HEAD 以外は本文の SHA-256（本文が無ければ空文字列のハッシュ）を `x-amz-content-sha256` ヘッダーで添える。アプリは `app/lib/api.ts` の `apiFetch` / `bodyHashHeader`、ESP32 は `sha256Hex()`。無いと Function URL が IAM 認証のとき 403。
+- **段階**: `directFunctionUrls: true`（RnD の今）は Function URL が `NONE` + 公開ポリシーのままで、CloudFront 経由と直接の両方を受ける。配布済みの旧ファーム・旧アプリが直接呼ぶ間はこのまま。Lambda ログの `edge: "direct"` が無くなったら `false` にして deploy すると `AWS_IAM` になり、CloudFront（OAC）だけが呼べる。authType の変更は作り直しにならず、ホスト名も変わらない。新しい環境は最初から `false`。
+- **オリジンへ渡すヘッダーは allowList**（`content-type` `accept` `user-agent` `origin` `access-control-request-*` `cloudfront-viewer-country`。`x-amz-content-sha256` は OAC が扱うので書けない）。Host を渡すと Function URL が受け付けない。`Authorization` は OAC が上書きするので、認証（ロードマップ4）のトークンは別名のヘッダーにし、allowList にも足す。
+- **WAF は本番だけ**（`apiRateLimitPer5Min` のある環境。RnD は省略、理由は [docs/deferred-items.md](../docs/deferred-items.md)）: 送信元 IP ごとに 5分で 300 件を超えると 403。サンプル要求の保存とログは切る（IP を残さない）。件数は us-east-1 の CloudWatch `AWS/WAFV2` の `BlockedRequests`。費用は WebACL $5 + ルール $1 + 100万要求あたり $0.60（月約 $6）。CloudFront と ACM は無料枠内。
+- **応答待ちは 60 秒**（最初の1バイトまで、および途中のパケット間隔）。LLM の初回トークンがそれより遅いと 504。
+- **アクセスログは取らない**（送信元 IP が入る。cdk-nag の CFR3 を理由付きで受け入れ）。地域制限も掛けない（海外の利用者。CFR1）。
+
+初回の出し方（RnD は 2026-10-29 に実施済み。次の環境でも同じ）:
+
+1. us-east-1 を bootstrap する（cdk.json の無いディレクトリから。「新しい環境の立ち上げ」の 3 と同じ理由）: `npx cdk bootstrap aws://342082316736/us-east-1`
+2. `npx cdk deploy --context stage=rnd ToyTalker-rnd-edge`。ACM 証明書の検証で止まるので、`aws acm describe-certificate --region us-east-1 --certificate-arn <arn>` の `ResourceRecord`（CNAME の名前と値）を Cloudflare の `zakicorp.com` ゾーンに **DNS only** で足す。数分で検証が通り deploy が終わる
+3. `npx cdk deploy --context stage=rnd ToyTalker-rnd`。出力 `ApiDistributionDomainName`（`d….cloudfront.net`）を、Cloudflare に `CNAME api-rnd → その値`（**DNS only**。Proxied にすると Cloudflare の証明書になり、ESP32 の CA 束と合わない）で足す
+4. `curl -s https://api-rnd.zakicorp.com/voices | head -c 200`（設定Lambda）と `curl -s "https://api-rnd.zakicorp.com/stt-token?ttl=60"`（鍵発行）で通ることを確かめる。本文のある POST は `x-amz-content-sha256` 付きで
+5. アプリ（EAS ビルド）と試験機（ファーム 0.7.4 を beta に発行して OTA）を切り替え、実機で会話・相槌・読み上げ・設定画面を確かめる。Lambda ログに `edge: "cloudfront"` と `country` が出る
 
 ## バックアップと復元（AWS Backup、ロードマップ10）
 

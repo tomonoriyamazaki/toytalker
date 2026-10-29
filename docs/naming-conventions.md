@@ -60,9 +60,9 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 
 2026-10-15時点の実体: ユーザー `yamazaki`（gmail）1人、グループ `admins`（`yamazaki` が所属）、権限セット `AdministratorAccess`（セッション8時間）が4アカウント全部へ `admins` に割り当て済み。
 
-### 固定ドメイン（未定）
+### 固定ドメイン
 
-ロードマップ3で決める。案は `api-stg.zakicorp.com`。
+**`api-<環境>.zakicorp.com`**（2026-10-29決定。`api-rnd` `api-stg` `api-prd` `api-prd-dg`）。正本は `infra/config/stages.ts` の `apiDomain`。CloudFront の別名で、DNS は Cloudflare の CNAME（DNS only）。本番の名前を短くしたくなったら7で見直す。
 
 ## DynamoDB のキー名・属性名
 

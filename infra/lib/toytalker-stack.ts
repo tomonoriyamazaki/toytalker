@@ -12,6 +12,9 @@ import * as logs from "aws-cdk-lib/aws-logs";
 import * as events from "aws-cdk-lib/aws-events";
 import * as scheduler from "aws-cdk-lib/aws-scheduler";
 import * as schedulerTargets from "aws-cdk-lib/aws-scheduler-targets";
+import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
+import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
+import type * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StageConfig } from "../config/stages.js";
@@ -20,6 +23,38 @@ import { CLOUDTRAIL_BUCKET_NAME } from "./toytalker-org-stack.js";
 
 /** 全Lambda共通のランタイム。EOLのときはここ1か所を変える */
 export const LAMBDA_RUNTIME = lambda.Runtime.NODEJS_24_X;
+
+/**
+ * Function URL を OAC 付きのオリジンにする。CDK の `FunctionUrlOrigin.withOriginAccessControl` は L2 の FunctionUrl を要求し、
+ * authType が AWS_IAM でないと synth で止めるが、ここは import で引き取った L1（CfnUrl）で、旧クライアントが残る間は
+ * NONE のまま CloudFront も通す（stages.ts の directFunctionUrls）。そこで同じこと（OAC の付与と CloudFront への Invoke 許可）を自前で行う。
+ */
+class LambdaUrlOrigin extends origins.HttpOrigin {
+  constructor(
+    private readonly fn: lambda.Function,
+    url: lambda.CfnUrl,
+    private readonly oac: cloudfront.IOriginAccessControl,
+    props: origins.HttpOriginProps,
+  ) {
+    super(cdk.Fn.select(2, cdk.Fn.split("/", url.attrFunctionUrl)), {
+      ...props,
+      protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
+      originSslProtocols: [cloudfront.OriginSslPolicy.TLS_V1_2],
+    });
+  }
+
+  bind(scope: Construct, options: cloudfront.OriginBindOptions): cloudfront.OriginBindConfig {
+    const config = super.bind(scope, options);
+    const principal = new iam.ServicePrincipal("cloudfront.amazonaws.com");
+    const sourceArn = `arn:${cdk.Aws.PARTITION}:cloudfront::${cdk.Aws.ACCOUNT_ID}:distribution/${options.distributionId}`;
+    this.fn.addPermission("CloudFrontInvokeUrl", { principal, action: "lambda:InvokeFunctionUrl", sourceArn });
+    this.fn.addPermission("CloudFrontInvoke", { principal, action: "lambda:InvokeFunction", sourceArn, invokedViaFunctionUrl: true });
+    return {
+      ...config,
+      originProperty: { ...config.originProperty!, originAccessControlId: this.oac.originAccessControlId },
+    };
+  }
+}
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const BACKEND_DIR = path.join(REPO_ROOT, "backend");
@@ -68,6 +103,11 @@ export interface ToyTalkerStackProps extends cdk.StackProps {
    * ロール・ポリシー・Lambda Permissionを出さず、既存ロールを参照する。
    */
   readonly importPhase: boolean;
+  /**
+   * CloudFront 固定ドメイン（ロードマップ3）に要る us-east-1 の資源（lib/toytalker-edge-stack.ts）。
+   * 渡すとディストリビューションを作る。importPhase では渡さない
+   */
+  readonly edge?: { readonly certificate: acm.ICertificate; readonly webAclArn?: string };
 }
 
 /**
@@ -104,6 +144,12 @@ interface FunctionSpec {
   readonly url?: {
     readonly invokeMode: "RESPONSE_STREAM" | "BUFFERED";
     readonly cors?: lambda.CfnUrl.CorsProperty;
+    /**
+     * 固定ドメイン（config.apiDomain）での経路。CloudFront がこの path pattern の要求をこの Function URL へ送る。
+     * Lambda には path がそのまま届く（本文・相槌・鍵発行・読み上げは path を見ない）。"default" はそれ以外の全部で、
+     * `/devices` `/characters` `/voices` `/logs/*` `/usage*` `/custom-voices*` を自分で振り分ける設定Lambdaに割り当てる
+     */
+    readonly route: string | "default";
   };
   /** 温めルール（5分ごと）の対象。並び順がターゲットID（warm1〜）になる。既存はESP32用メインが先 */
   readonly warm: boolean;
@@ -158,7 +204,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     requireShim: true,
     env: [...TTS_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
-    url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
+    url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-mcu" },
     warm: true,
     selfWarm: true,
     readTables: ["devices", "characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
@@ -173,7 +219,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     format: "esm",
     env: [...TTS_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
-    url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
+    url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-app" },
     warm: true,
     selfWarm: true,
     readTables: ["characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
@@ -188,7 +234,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     format: "esm",
     env: [...TTS_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY"],
-    url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY },
+    url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/backchannel-app" },
     warm: true,
     selfWarm: true,
     readTables: ["characters", "voices"],
@@ -204,7 +250,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     requireShim: true,
     env: [...TTS_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY"],
-    url: { invokeMode: "BUFFERED" },
+    url: { invokeMode: "BUFFERED", route: "/backchannel-mcu" },
     warm: true,
     selfWarm: true,
     readTables: ["devices", "characters", "voices"],
@@ -219,7 +265,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     format: "esm",
     env: ["SONIOX_MODEL", "FIRMWARE_BUCKET"],
     secrets: ["SONIOX_API_KEY"],
-    url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY },
+    url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY, route: "/stt-token" },
     warm: true,
     selfWarm: false,
     readTables: ["devices"],
@@ -235,7 +281,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     format: "cjs",
     env: ["ZAKICORP_TTS_URL"],
     secrets: ["CARTESIA_API_KEY", "ZAKICORP_API_KEY", "ZAKICORP_EDGE_KEY"],
-    url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY },
+    url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY, route: "default" },
     warm: false,
     selfWarm: false,
     // 書くのは devices / characters / voices だけ（index.mjs の Put/Update/Delete の対象）。
@@ -260,6 +306,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
         allowOrigins: ["*"],
         exposeHeaders: ["content-type", "x-audio-format", "content-disposition"],
       },
+      route: "/read-aloud-app",
     },
     warm: false,
     selfWarm: false,
@@ -284,9 +331,12 @@ const FUNCTIONS: readonly FunctionSpec[] = [
 ];
 
 export class ToyTalkerStack extends cdk.Stack {
+  private readonly config: StageConfig;
+
   constructor(scope: Construct, id: string, props: ToyTalkerStackProps) {
     super(scope, id, props);
     const { config, envSecrets, importPhase } = props;
+    this.config = config;
 
     // ---- タグ（全資源。docs/naming-conventions.md） ----
     cdk.Tags.of(this).add("project", "toytalker");
@@ -348,6 +398,7 @@ export class ToyTalkerStack extends cdk.Stack {
     };
 
     const functions = new Map<string, lambda.Function>();
+    const urls = new Map<string, lambda.CfnUrl>();
     const logGroups = new Map<string, logs.ILogGroup>();
     for (const spec of FUNCTIONS) {
       const { id, name } = nameOf(spec.key);
@@ -388,14 +439,18 @@ export class ToyTalkerStack extends cdk.Stack {
       functions.set(spec.key, fn);
 
       if (spec.url) {
+        // 入口は CloudFront の固定ドメイン（createApiDistribution）。Function URL を直接呼ぶ旧クライアントが残る間だけ
+        // NONE + 公開ポリシーで直接も受け、全部が移ったら AWS_IAM にして CloudFront（OAC）だけが呼べるようにする。
+        // authType の変更は作り直しにならない（ホスト名は変わらない）
         const url = new lambda.CfnUrl(this, `${id}Url`, {
           targetFunctionArn: fn.functionArn,
-          authType: "NONE",
+          authType: config.directFunctionUrls ? "NONE" : "AWS_IAM",
           invokeMode: spec.url.invokeMode,
           cors: spec.url.cors,
         });
         url.applyRemovalPolicy(RETAIN);
-        if (!importPhase) {
+        urls.set(spec.key, url);
+        if (!importPhase && config.directFunctionUrls) {
           fn.addPermission(`${id}UrlPublicAccess`, {
             principal: new iam.AnyPrincipal(),
             action: "lambda:InvokeFunctionUrl",
@@ -430,6 +485,9 @@ export class ToyTalkerStack extends cdk.Stack {
         }
       }
     }
+
+    // ---- CloudFront 固定ドメイン（ロードマップ3） ----
+    if (props.edge && !importPhase) this.createApiDistribution(config, props.edge, functions, urls);
 
     // ---- デバイス設定Lambda: クローンボイス登録でS3へ保存・削除 ----
     if (!importPhase) speakersBucket.grantReadWrite(functions.get("settings-app")!);
@@ -543,6 +601,90 @@ export class ToyTalkerStack extends cdk.Stack {
     ack("Serverless-SNSRedrivePolicy", "メール購読のみ。配信失敗の再処理先は不要");
     ack("Serverless-CloudWatchLogGroupRetentionPeriod", "引き取り時の設定（無期限）を維持。保持期間はロードマップ8(e)で決める");
     ack("Serverless-LambdaTracing", "X-Ray は使っていない。必要になったら有効化する（費用と情報量の追加）");
+    ack("AwsSolutions-CFR1", "海外の利用者が使うAPIなので地域制限は掛けない（ロードマップ3、2026-10-27決定）。天井は WAF のレート制限");
+    ack("AwsSolutions-CFR3", "アクセスログには送信元IPが入る。IPは個人に結びつくので残さない（2026-10-28決定）。国コードだけを Lambda ログに書く");
+    if (this.config.apiRateLimitPer5Min === undefined) {
+      ack("AwsSolutions-CFR2", "WAF は本番だけ（2026-10-29決定、docs/deferred-items.md）。RnD は Function URL の IAM 認証化で直叩きを塞ぎ、天井は4の認証とポイント制で作る");
+    }
+  }
+
+  /**
+   * 固定ドメイン `config.apiDomain` の CloudFront ディストリビューション（ロードマップ3）。
+   *
+   * - 目的は3つ: (1) URLの固定（Function URL のホスト名はスタックを作り直すと変わる。アプリ・ESP32に直書きだった）、
+   *   (2) WAF のレート制限（費用燃やしの天井。脅威モデル#1。本番だけ。stages.ts の apiRateLimitPer5Min）、
+   *   (3) 国コード（CloudFront-Viewer-Country）を Lambda ログへ。
+   * - 1つのドメインに経路で振り分ける（FunctionSpec.url.route）。キャッシュはしない。ストリーミング応答はそのまま通る。
+   * - オリジンは Function URL + OAC（SigV4 署名）。Function URL を AWS_IAM にすれば CloudFront だけが呼べる。
+   *   署名の都合で、本文のある要求（POST/PUT）はクライアントが本文の SHA-256 を `x-amz-content-sha256` で添える
+   *   （CloudFront 開発者ガイド「Restrict access to an AWS Lambda function URL origin」）。アプリは app/lib/api.ts、ESP32 は sha256Hex()。
+   * - オリジンへ渡すヘッダーは allowList（Host を渡すと Function URL が受け付けない）。`Authorization` は OAC が上書きするので
+   *   渡らない。認証（ロードマップ4）のトークンは別名のヘッダーにし、ここの allowList にも足す
+   * - 応答待ちは 60 秒（最初の1バイトまで、および途中のパケット間隔。既定30秒。LLM の初回トークンが遅いときの保険）
+   */
+  private createApiDistribution(
+    config: StageConfig,
+    edge: NonNullable<ToyTalkerStackProps["edge"]>,
+    functions: ReadonlyMap<string, lambda.Function>,
+    urls: ReadonlyMap<string, lambda.CfnUrl>,
+  ): void {
+    const oac = new cloudfront.FunctionUrlOriginAccessControl(this, "ApiOriginAccessControl", {
+      originAccessControlName: `toytalker-api-${config.stage}`,
+      signing: cloudfront.Signing.SIGV4_ALWAYS,
+    });
+    const originRequestPolicy = new cloudfront.OriginRequestPolicy(this, "ApiOriginRequestPolicy", {
+      originRequestPolicyName: `toytalker-api-${config.stage}`,
+      comment: "ToyTalker API: all query strings, selected headers + viewer country, no cookies",
+      headerBehavior: cloudfront.OriginRequestHeaderBehavior.allowList(
+        "content-type",
+        "accept",
+        "user-agent",
+        "origin",
+        "access-control-request-method",
+        "access-control-request-headers",
+        "cloudfront-viewer-country",
+        // x-amz-content-sha256 は書けない（CloudFront が「not allowed」で拒否。OAC が署名用に自分で扱う。2026-10-29 deploy で判明）
+      ),
+      queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
+      cookieBehavior: cloudfront.OriginRequestCookieBehavior.none(),
+    });
+
+    const behaviorFor = (key: string): cloudfront.BehaviorOptions => ({
+      origin: new LambdaUrlOrigin(functions.get(key)!, urls.get(key)!, oac, {
+        originId: key,
+        readTimeout: cdk.Duration.seconds(60),
+        keepaliveTimeout: cdk.Duration.seconds(60),
+      }),
+      allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+      cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+      originRequestPolicy,
+      viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
+      compress: false, // 音声バイナリと SSE。圧縮は効かず、ストリーミングの妨げになる
+    });
+    const routed = FUNCTIONS.filter((s) => s.url);
+    const defaults = routed.filter((s) => s.url!.route === "default");
+    if (defaults.length !== 1) throw new Error(`route "default" の Lambda は1つだけ（今は ${defaults.map((s) => s.key).join(", ")}）`);
+    const additionalBehaviors: Record<string, cloudfront.BehaviorOptions> = {};
+    for (const spec of routed) if (spec.url!.route !== "default") additionalBehaviors[spec.url!.route] = behaviorFor(spec.key);
+
+    const distribution = new cloudfront.Distribution(this, "ApiDistribution", {
+      comment: `ToyTalker API ${config.stage} (${config.apiDomain})`,
+      domainNames: [config.apiDomain],
+      certificate: edge.certificate,
+      minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+      webAclId: edge.webAclArn, // undefined なら WAF なし
+      httpVersion: cloudfront.HttpVersion.HTTP2_AND_3,
+      defaultBehavior: behaviorFor(defaults[0].key),
+      additionalBehaviors,
+      enableLogging: false, // アクセスログは送信元IPを含むので取らない（acknowledgeNagFindings の CFR3）
+    });
+    // 消えるとドメインの向き先が無くなる。スタックを消しても残す（Function URL と同じ扱い）
+    distribution.applyRemovalPolicy(cdk.RemovalPolicy.RETAIN);
+    new cdk.CfnOutput(this, "ApiDomain", { value: `https://${config.apiDomain}` });
+    new cdk.CfnOutput(this, "ApiDistributionDomainName", {
+      value: distribution.distributionDomainName,
+      description: `Cloudflare に CNAME ${config.apiDomain} -> この値（DNS only）を置く`,
+    });
   }
 
   /**

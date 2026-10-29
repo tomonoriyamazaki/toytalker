@@ -30,6 +30,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { APP_VERSION } from "../../lib/appVersion";
+import { API_BASE_URL, apiFetch, bodyHashHeader } from "../../lib/api";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
 import ReadAloud from "../../components/ReadAloud";
@@ -40,9 +41,8 @@ let SONIOX_MODEL = "stt-rt-v4";
 const SONIOX_SAMPLE_RATE = 16000;
 const SONIOX_CHANNELS = 1;
 
-/** Soniox temporary key発行Lambda。POSTしてkey idを受け取りセットする */
-const SONIOX_KEY_URL =
-  "https://ug5fcnjsxa22vtnrzlwpfgshd40nngbo.lambda-url.ap-northeast-1.on.aws/";
+/** Soniox temporary key発行Lambda（固定ドメイン経由。app/lib/api.ts）。GETでkeyを受け取りセットする */
+const SONIOX_KEY_URL = `${API_BASE_URL}/stt-token`;
 /**
  * 一時キーはLambdaに頼む寿命（SONIOX_KEY_TTL_SEC）で発行される。期限切れのキーで接続すると会話が
  * 始まらないので、取得から SONIOX_KEY_MAX_AGE_MINUTES を越えたらWSを開く前に取り直す。
@@ -55,10 +55,8 @@ let sonioxKeyInflight: Promise<string> | null = null;
 
 const fetchSonioxTempKey = async (): Promise<string> => {
   // app_version は Lambda の切り分けログ用（本文・相槌と同じ）
-  const res = await fetch(`${SONIOX_KEY_URL}?ttl=${SONIOX_KEY_TTL_SEC}&app_version=${encodeURIComponent(APP_VERSION)}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-  });
+  // 本文の無い要求なので GET（ESP32 と同じ。CloudFront 経由では本文の無い POST に署名用のハッシュが要るので避ける）
+  const res = await fetch(`${SONIOX_KEY_URL}?ttl=${SONIOX_KEY_TTL_SEC}&app_version=${encodeURIComponent(APP_VERSION)}`);
   const js = await res.json();
   if (!res.ok || !js?.api_key) throw new Error("Failed to get Soniox temp key");
   if (js.stt_model) SONIOX_MODEL = js.stt_model;
@@ -91,13 +89,11 @@ let DEBUG_TIME = false;
 type Turn = { role: "user" | "assistant"; text: string; ts: number };
 const DEBUG_HISTORY = false;
 
-/* 既存：あなたのSSEサーバ（LLM→TTS）*/
-const STREAM_URL =
-  "https://ruc3x2rt3bcnsqxvuyvwdshhh40mzadk.lambda-url.ap-northeast-1.on.aws/";
+/* 会話Lambda（LLM→TTS、SSE）。固定ドメイン経由 */
+const STREAM_URL = `${API_BASE_URL}/chat-app`;
 
-/* 相槌Lambda */
-const BACKCHANNEL_URL =
-  "https://5zcqptvuekdtfjnl4fian2crnm0alohv.lambda-url.ap-northeast-1.on.aws/";
+/* 相槌Lambda（固定ドメイン経由の経路） */
+const BACKCHANNEL_PATH = "/backchannel-app";
 const BACKCHANNEL_TRIGGER_CHARS = 7;
 
 /* === ユーティリティ === */
@@ -191,7 +187,6 @@ export default function Chat() {
   const [selectedCharacter, setSelectedCharacter] = useState<CharacterItem>({ character_id: "default", name: "トイトーカー", owner_id: "system" });
   const selectedCharacterRef = useRef<CharacterItem>({ character_id: "default", name: "トイトーカー", owner_id: "system" });
 
-  const DEVICE_SETTING_URL = "https://7k6nkpy3tf2drljy77pnouohjm0buoux.lambda-url.ap-northeast-1.on.aws";
 
   // 起動時に保存済みキャラクターを復元
   useEffect(() => {
@@ -217,7 +212,7 @@ export default function Chat() {
       if (!ownerId) return;
       (async () => {
         try {
-          const res = await fetch(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
+          const res = await apiFetch(`/characters?owner_id=${encodeURIComponent(ownerId)}`);
           const data = await res.json();
           setCharacters(data.characters ?? []);
         } catch {}
@@ -241,7 +236,7 @@ export default function Chat() {
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/logs/sessions?owner_id=${encodeURIComponent(ownerId!)}&device_id=app`);
+      const res = await apiFetch(`/logs/sessions?owner_id=${encodeURIComponent(ownerId!)}&device_id=app`);
       const data = await res.json();
       setSessions(data.sessions ?? []);
     } catch {}
@@ -260,7 +255,7 @@ export default function Chat() {
   const loadSession = async (sid: string) => {
     closeDrawer();
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/logs/messages?owner_id=${encodeURIComponent(ownerId!)}&device_id=app&session_id=${sid}`);
+      const res = await apiFetch(`/logs/messages?owner_id=${encodeURIComponent(ownerId!)}&device_id=app&session_id=${sid}`);
       const data = await res.json();
       const messages: any[] = data.messages ?? [];
       const newLog: string[] = [];
@@ -742,7 +737,7 @@ export default function Chat() {
             console.log("[BC] fetch firing:", bcPartial, "historyLen=", historyRef.current.length);
             (async () => {
               try {
-                const r = await fetch(BACKCHANNEL_URL, {
+                const r = await apiFetch(BACKCHANNEL_PATH, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({
@@ -1246,7 +1241,12 @@ export default function Chat() {
         backchannel_fired: backchannelFiredRef.current,
       };
       console.log("🚀 payload to Lambda:", JSON.stringify(payload, null, 2), attemptNo > 1 ? `(attempt ${attemptNo})` : "");
-      xhr.send(JSON.stringify(payload));
+      // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）。open() 後・send() 前なら非同期を挟んでよい
+      const json = JSON.stringify(payload);
+      bodyHashHeader(json)
+        .then((h) => { for (const [k, v] of Object.entries(h)) xhr.setRequestHeader(k, v); })
+        .catch((e) => console.log("[SEND] body hash failed:", e?.message ?? e))
+        .finally(() => xhr.send(json));
     };
 
     try {

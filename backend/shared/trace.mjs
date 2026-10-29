@@ -34,16 +34,27 @@ export function shortMessage(e) {
 }
 
 /**
- * リクエストの出どころ。本文の fw（ESP32ファーム版）/ app_version（アプリ版）と User-Agent。
- * 送信元IP（requestContext.http.sourceIp）は個人に結びつくので書かない（2026-10-28決定）。
- * 地域が要るときは CloudFront を前に置いたあと（ロードマップ3）、CloudFront-Viewer-Country の国コードだけを足す。
+ * 要求が通った経路（ロードマップ3、2026-10-29）。
+ *   edge:    "cloudfront"（固定ドメイン api-<環境>.zakicorp.com 経由）| "direct"（Function URL を直接呼ぶ旧ファーム・旧アプリ）
+ *   country: CloudFront-Viewer-Country の国コード（ISO 3166-1 alpha-2）。direct のときは null
+ * 送信元IP（requestContext.http.sourceIp）は個人に結びつくので書かない（2026-10-28決定）。国だけなら誰かを特定できない。
+ * "direct" が無くなったら Function URL を IAM 認証に切り替える（infra/config/stages.ts の directFunctionUrls）。
+ */
+export function describeEdge(event) {
+  const headers = event?.headers ?? {};
+  const country = typeof headers["cloudfront-viewer-country"] === "string" ? headers["cloudfront-viewer-country"].slice(0, 2) : null;
+  return { edge: country ? "cloudfront" : "direct", country };
+}
+
+/**
+ * リクエストの出どころ。本文の fw（ESP32ファーム版）/ app_version（アプリ版）と User-Agent、経路と国（describeEdge）。
  */
 export function describeClient(event, body) {
   const headers = event?.headers ?? {};
   const ua = headers["user-agent"] ?? headers["User-Agent"] ?? null;
   const fw = typeof body?.fw === "string" ? body.fw.slice(0, 32) : null;
   const appVersion = typeof body?.app_version === "string" ? body.app_version.slice(0, 32) : null;
-  return { fw, app_version: appVersion, ua };
+  return { fw, app_version: appVersion, ua, ...describeEdge(event) };
 }
 
 /**

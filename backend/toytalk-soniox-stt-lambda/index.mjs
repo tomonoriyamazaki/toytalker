@@ -4,7 +4,7 @@ import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
-import { startTrace } from "../shared/trace.mjs";
+import { startTrace, describeEdge } from "../shared/trace.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -146,6 +146,7 @@ export const handler = async (event, context) => {
       // 頼まれた寿命（秒）。null は ttl を付けない古いファーム・アプリ（1時間）。3分キーへの移行状況をログで数えるため
       ttl_sec: body.expires_in_seconds, ttl_requested: query.ttl != null,
       app_version: query.app_version ? String(query.app_version).slice(0, 16) : null,
+      ...describeEdge(event),
     });
 
     const sonioxStart = Date.now();

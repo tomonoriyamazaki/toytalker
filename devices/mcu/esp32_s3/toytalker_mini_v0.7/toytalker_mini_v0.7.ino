@@ -35,6 +35,7 @@
 #include "FirmwareVersion.h"
 #include "OtaUpdater.h"
 #include <esp_arduino_version.h>
+#include <mbedtls/sha256.h>  // sha256Hex（CloudFront 経由の POST に本文ハッシュを添える）
 
 // ==== デバッグ設定 ====
 #define DEBUG_MEMORY 0
@@ -69,16 +70,24 @@ bool bleDeviceConnected = false;
 bool oldBleDeviceConnected = false;
 String deviceMacAddress = "";
 
+// ==== API（CloudFront の固定ドメイン。docs/roadmap.md の3、0.7.4 から） ====
+// Function URL のホスト名はスタックを作り直すと変わるので、本体はこの名前だけを知る。経路で Lambda が分かれる。
+// CloudFront → Lambda は署名付き（OAC）なので、POST は本文の SHA-256 を x-amz-content-sha256 で添える（sha256Hex）。
+// 環境を変えるときはここだけ（infra/config/stages.ts の apiDomain）。
+#ifndef TOYTALKER_API_HOST
+#define TOYTALKER_API_HOST "api-rnd.zakicorp.com"
+#endif
+
 // ==== Lambda (TTS) - Binary Streaming ====
-const char* LAMBDA_HOST = "koufofwm3w4tidbe52crbyhpyq0cshss.lambda-url.ap-northeast-1.on.aws";
-const char* LAMBDA_PATH = "/";
+const char* LAMBDA_HOST = TOYTALKER_API_HOST;
+const char* LAMBDA_PATH = "/chat-mcu";
 
 // ==== Lambda (Backchannel) ====
-const char* BACKCHANNEL_HOST = "birb7yjw4nkldidcza4xfiyn5e0taluh.lambda-url.ap-northeast-1.on.aws";
-const char* BACKCHANNEL_PATH = "/";
+const char* BACKCHANNEL_HOST = TOYTALKER_API_HOST;
+const char* BACKCHANNEL_PATH = "/backchannel-mcu";
 
 // ==== Lambda (Soniox Key) ====
-const char* SONIOX_LAMBDA_URL = "https://ug5fcnjsxa22vtnrzlwpfgshd40nngbo.lambda-url.ap-northeast-1.on.aws/";
+const char* SONIOX_LAMBDA_URL = "https://" TOYTALKER_API_HOST "/stt-token";
 
 // ==== Soniox ====
 const char* SONIOX_WS_URL = "stt-rt.soniox.com";
@@ -232,6 +241,17 @@ static uint32_t sonioxServiceMaxMs = 0;
 
 bool sonioxKeyIsOld() {
   return millis() - sonioxKeyFetchedMs >= SONIOX_KEY_MAX_AGE_MINUTES * 60UL * 1000UL;  // 符号なしの差なので millis() の桁あふれでも正しい
+}
+
+// 本文の SHA-256（16進小文字64文字）。CloudFront → Lambda の署名（OAC）が本文ハッシュを含むため、
+// POST はこの値を x-amz-content-sha256 ヘッダーで添える（無いと Function URL が IAM 認証になったとき 403）。
+String sha256Hex(const String& body) {
+  unsigned char digest[32];
+  mbedtls_sha256((const unsigned char*)body.c_str(), body.length(), digest, 0);
+  char hex[65];
+  for (int i = 0; i < 32; i++) sprintf(hex + i * 2, "%02x", digest[i]);
+  hex[64] = 0;
+  return String(hex);
 }
 
 // Lambda に GET して本文を返す。WiFi 切替直後などの一時的な失敗に備えて attempts 回まで試す。
@@ -1650,6 +1670,7 @@ void fetchBackchannel(void* param) {
     HTTPClient http;
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
+    http.addHeader("x-amz-content-sha256", sha256Hex(payload));
     http.setTimeout(8000);
     const char* headerKeys[] = {"X-Backchannel-Text", "x-backchannel-text"};
     http.collectHeaders(headerKeys, 2);
@@ -1938,6 +1959,7 @@ void sendToLambdaAndPlay(const String& text) {
     String("POST ") + LAMBDA_PATH + " HTTP/1.1\r\n"
     "Host: " + LAMBDA_HOST + "\r\n"
     "Content-Type: application/json\r\n"
+    "x-amz-content-sha256: " + sha256Hex(payload) + "\r\n"
     "Accept: text/event-stream\r\n"
     "Connection: close\r\n"
     "Content-Length: " + payload.length() + "\r\n\r\n"

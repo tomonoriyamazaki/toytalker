@@ -26,6 +26,24 @@ export interface StageConfig {
   /** ESP32ファームのOTA配布先（manifest.json と .bin）。Soniox鍵発行Lambdaが読んで署名付きURLを返す */
   readonly firmwareBucketName: string;
   /**
+   * APIの固定ドメイン（ロードマップ3）。CloudFront の別名で、ACM 証明書（us-east-1、`<スタック名>-edge`）と
+   * Cloudflare の CNAME（DNS only）をこの名前で作る。アプリ・ESP32はこの名前だけを知り、Function URL のホスト名は知らない。
+   * 経路は `/chat-app` `/chat-mcu` `/backchannel-app` `/backchannel-mcu` `/stt-token` `/read-aloud-app`、それ以外は設定Lambda（lib/toytalker-stack.ts の API_ROUTES）
+   */
+  readonly apiDomain: string;
+  /**
+   * WAF のレート制限。送信元IPごと、5分あたりの要求数で、超えた分は CloudFront が 403 を返す。
+   * 省略した環境は WAF を作らない（月約$6）。RnD は省略（2026-10-29決定。docs/deferred-items.md）、本番だけ置く
+   */
+  readonly apiRateLimitPer5Min?: number;
+  /**
+   * Function URL を CloudFront を通さず直接呼べるままにするか（authType NONE + 公開ポリシー）。
+   * 配布済みの旧ファーム・旧アプリが Function URL を直接呼ぶ間は true。全部が apiDomain へ移った
+   * （Lambdaログの `edge: "direct"` が無くなった）ら false にして IAM 認証にし、CloudFront（OAC の署名）だけが呼べるようにする。
+   * 切り替えは Function URL の設定変更だけで、ホスト名は変わらない。
+   */
+  readonly directFunctionUrls: boolean;
+  /**
    * 消されても戻せる仕組み（ロードマップ10）。AWS Backup で DynamoDB 全テーブルと S3 バケット（speakers・firmware、管理アカウントでは CloudTrail も）を日次で
    * 保管庫 `toytalker-backup-<環境>` に取り、Vault Lock（コンプライアンスモード）で管理者にも root にも消せなくする。
    * `retentionDays` は保管庫の最小保持日数（最大はその+1日）で、ロック確定後は変えられない（変えるなら新しい保管庫）。
@@ -76,6 +94,8 @@ export const stages: Record<StageName, StageConfig> = {
     tableSuffix: "", // 既存テーブル名をそのまま維持。改名時に "-rnd" へ
     speakersBucketName: "toytalker-tts-speakers", // 既存バケット名をそのまま維持
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
+    apiDomain: "api-rnd.zakicorp.com",
+    directFunctionUrls: true, // 配布機（OTA非対応の旧ファーム）と旧アプリが Function URL を直接呼ぶ間は true。ロードマップ6の書き換え後に false
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
@@ -93,6 +113,8 @@ export const stages: Record<StageName, StageConfig> = {
     tableSuffix: "-stg",
     speakersBucketName: "toytalker-tts-speakers-stg",
     firmwareBucketName: "toytalker-firmware-stg",
+    apiDomain: "api-stg.zakicorp.com",
+    directFunctionUrls: false, // 新しい環境は最初から CloudFront 経由だけ
   },
   prd: {
     ...common,
@@ -102,6 +124,10 @@ export const stages: Record<StageName, StageConfig> = {
     tableSuffix: "-prd",
     speakersBucketName: "toytalker-tts-speakers-prd",
     firmwareBucketName: "toytalker-firmware-prd",
+    apiDomain: "api-prd.zakicorp.com",
+    directFunctionUrls: false,
+    // 1ターン = 本文1 + 相槌1、Soniox鍵は3分に1回。家庭のNATの裏に数台いても 5分で300 には届かない。費用燃やしの天井が目的で、精密な値ではない
+    apiRateLimitPer5Min: 300,
   },
   "prd-dg": {
     ...common,
@@ -111,12 +137,20 @@ export const stages: Record<StageName, StageConfig> = {
     tableSuffix: "-prd-dg",
     speakersBucketName: "toytalker-tts-speakers-prd-dg",
     firmwareBucketName: "toytalker-firmware-prd-dg",
+    apiDomain: "api-prd-dg.zakicorp.com",
+    directFunctionUrls: false,
+    apiRateLimitPer5Min: 300,
   },
 };
 
 /** CloudFormationスタック名。旧名は `ToyTalker-rnd`、新名は小文字で `toytalker-<環境>` */
 export function stackName(config: StageConfig): string {
   return config.legacyNames ? `ToyTalker-${config.stage}` : `toytalker-${config.stage}`;
+}
+
+/** CloudFront 用に us-east-1 に置く資源（ACM 証明書・WAF）のスタック名。本体スタックが参照する */
+export function edgeStackName(config: StageConfig): string {
+  return `${stackName(config)}-edge`;
 }
 
 export function getStage(name: unknown): StageConfig {

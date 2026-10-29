@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { fetchWithRetry } from "../../lib/fetchWithRetry";
+import { API_BASE_URL, apiFetch } from "../../lib/api";
 import {
   SafeAreaView,
   Text,
@@ -27,7 +28,6 @@ const CHAR_COMMAND_UUID  = "12345678-1234-1234-1234-123456789ab3";
 const CHAR_STATUS_UUID   = "12345678-1234-1234-1234-123456789ab4";
 const CHAR_MAC_UUID      = "12345678-1234-1234-1234-123456789ab5";
 
-const DEVICE_SETTING_URL   = "https://7k6nkpy3tf2drljy77pnouohjm0buoux.lambda-url.ap-northeast-1.on.aws";
 const DEFAULT_CHARACTER_ID = "default";
 
 const bleManager = new BleManager();
@@ -114,7 +114,7 @@ export default function Toy() {
     if (!ownerId) return;
     (async () => {
       try {
-        const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/devices?owner_id=${encodeURIComponent(ownerId)}`);
+        const res = await fetchWithRetry(`${API_BASE_URL}/devices?owner_id=${encodeURIComponent(ownerId)}`);
         const data = await res.json();
         if (data.devices?.length > 0) {
           const devices = data.devices.map((d: any) => ({
@@ -136,7 +136,7 @@ export default function Toy() {
     if (!ownerId) return;
     (async () => {
       try {
-        const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
+        const res = await fetchWithRetry(`${API_BASE_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
         const data = await res.json();
         setCharacters(data.characters ?? []);
       } catch {}
@@ -173,7 +173,7 @@ export default function Toy() {
       return updated;
     });
     try {
-      await fetch(`${DEVICE_SETTING_URL}/devices/${encodeURIComponent(targetDeviceId)}`, {
+      await apiFetch(`/devices/${encodeURIComponent(targetDeviceId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ device_name: name }),
@@ -300,7 +300,7 @@ export default function Toy() {
 
   const registerDevice = async (mac: string) => {
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/devices`, {
+      const res = await apiFetch(`/devices`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ device_id: mac, owner_id: ownerId }),
@@ -308,7 +308,7 @@ export default function Toy() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
       // 登録後にデバイス情報を取得
-      const deviceRes = await fetch(`${DEVICE_SETTING_URL}/devices/${encodeURIComponent(mac)}`);
+      const deviceRes = await apiFetch(`/devices/${encodeURIComponent(mac)}`);
       const deviceData = await deviceRes.json();
       await addOrUpdateDevice({ ...deviceData, device_name: deviceData.device_name ?? "" });
       setStatusMessage("デバイス登録完了！");
@@ -362,7 +362,7 @@ export default function Toy() {
     setCharactersLoading(true);
     setScreen("character-select");
     try {
-      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId!)}`);
+      const res = await fetchWithRetry(`${API_BASE_URL}/characters?owner_id=${encodeURIComponent(ownerId!)}`);
       const data = await res.json();
       setCharacters(data.characters ?? []);
     } catch (e: any) {
@@ -376,7 +376,7 @@ export default function Toy() {
     if (!deviceId) return;
     setUpdatingCharacter(true);
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/devices/${encodeURIComponent(deviceId)}`, {
+      const res = await apiFetch(`/devices/${encodeURIComponent(deviceId)}`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ character_id: characterId }),
@@ -400,7 +400,7 @@ export default function Toy() {
     setSessionsLoading(true);
     setScreen("conversation-log");
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/logs/sessions?owner_id=${encodeURIComponent(ownerId!)}&device_id=${encodeURIComponent(deviceId)}`);
+      const res = await apiFetch(`/logs/sessions?owner_id=${encodeURIComponent(ownerId!)}&device_id=${encodeURIComponent(deviceId)}`);
       const data = await res.json();
       setSessions(data.sessions ?? []);
     } catch (e: any) {
@@ -416,7 +416,7 @@ export default function Toy() {
     setSelectedSessionId(sessionId);
     setScreen("conversation-messages");
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/logs/messages?owner_id=${encodeURIComponent(ownerId!)}&device_id=${encodeURIComponent(deviceId)}&session_id=${encodeURIComponent(sessionId)}`);
+      const res = await apiFetch(`/logs/messages?owner_id=${encodeURIComponent(ownerId!)}&device_id=${encodeURIComponent(deviceId)}&session_id=${encodeURIComponent(sessionId)}`);
       const data = await res.json();
       setLogMessages(data.messages ?? []);
     } catch (e: any) {
@@ -584,7 +584,7 @@ export default function Toy() {
           style: "destructive",
           onPress: async () => {
             try {
-              await fetch(`${DEVICE_SETTING_URL}/devices/${encodeURIComponent(deviceId!)}`, {
+              await apiFetch(`/devices/${encodeURIComponent(deviceId!)}`, {
                 method: "DELETE",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ owner_id: ownerId }),
@@ -638,7 +638,7 @@ export default function Toy() {
                   return updated;
                 });
                 try {
-                  await fetch(`${DEVICE_SETTING_URL}/devices/${encodeURIComponent(deviceId!)}`, {
+                  await apiFetch(`/devices/${encodeURIComponent(deviceId!)}`, {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ backchannel_enabled: val }),

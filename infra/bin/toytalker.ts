@@ -1,10 +1,11 @@
 import * as cdk from "aws-cdk-lib";
 import { AwsSolutionsChecks, ServerlessChecks } from "cdk-nag";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { getStage, stackName } from "../config/stages.js";
+import { edgeStackName, getStage, stackName } from "../config/stages.js";
 import { assertSecretsExist, loadSecrets } from "../lib/secrets.js";
 import { ToyTalkerStack } from "../lib/toytalker-stack.js";
 import { ToyTalkerOrgStack } from "../lib/toytalker-org-stack.js";
+import { ToyTalkerEdgeStack } from "../lib/toytalker-edge-stack.js";
 
 const app = new cdk.App();
 const config = getStage(app.node.tryGetContext("stage"));
@@ -33,13 +34,27 @@ const keepEnvSecrets = String(app.node.tryGetContext("keepEnvSecrets")) === "tru
 const envSecrets = keepEnvSecrets ? await loadSecrets(config.region) : undefined;
 if (!keepEnvSecrets) await assertSecretsExist(config.region);
 
+// CloudFront が要求する us-east-1 の資源（ACM 証明書・WAF）。本体スタックが crossRegionReferences で参照する（ロードマップ3）。
+// 初回は us-east-1 の `cdk bootstrap` が要る（参照の受け渡しに小さな custom resource を置くため）
+const edge = importPhase
+  ? undefined
+  : new ToyTalkerEdgeStack(app, edgeStackName(config), {
+      env: { account: config.account, region: "us-east-1" },
+      config,
+      crossRegionReferences: true,
+      terminationProtection: true,
+      description: `ToyTalker ${config.stage} edge (us-east-1): ACM certificate and WAF for ${config.apiDomain}`,
+    });
+
 new ToyTalkerStack(app, stackName(config), {
   env: { account: config.account, region: config.region },
   config,
   envSecrets,
   importPhase,
+  edge: edge ? { certificate: edge.certificate, webAclArn: edge.webAclArn } : undefined,
+  crossRegionReferences: true,
   terminationProtection: true,
-  description: `ToyTalker ${config.stage}: Lambda, DynamoDB, S3, SNS, warmer, monthly ops`,
+  description: `ToyTalker ${config.stage}: Lambda, DynamoDB, S3, SNS, warmer, monthly ops, CloudFront API domain`,
 });
 
 // 組織全体で1つの資源（CloudTrail 組織トレイル）は管理アカウントの環境にだけ出す

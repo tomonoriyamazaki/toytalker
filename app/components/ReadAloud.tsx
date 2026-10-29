@@ -24,13 +24,10 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import Sound from "react-native-sound";
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from "expo-av";
 import { Buffer } from "buffer";
+import { API_BASE_URL, apiFetch, bodyHashHeader } from "../lib/api";
 
-/* toytalker-tts-only-lambda（テキスト→TTSのみ。音声バイナリ直返し）*/
-const TTS_ONLY_URL =
-  "https://y2ln7ndym3ktjhnkqgzwrk7ogu0ikkno.lambda-url.ap-northeast-1.on.aws/";
-/* ボイス一覧（toytalker-device-setting-lambda の GET /voices）*/
-const DEVICE_SETTING_URL =
-  "https://7k6nkpy3tf2drljy77pnouohjm0buoux.lambda-url.ap-northeast-1.on.aws";
+/* 読み上げLambda（テキスト→TTSのみ。音声バイナリ直返し）。固定ドメイン経由（app/lib/api.ts） */
+const TTS_ONLY_URL = `${API_BASE_URL}/read-aloud-app`;
 
 const RECENT_KEY = "readAloudRecents";
 const MAX_RECENTS = 20;
@@ -105,7 +102,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
 
   const loadVoices = async () => {
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/voices`);
+      const res = await apiFetch(`/voices`);
       const data = await res.json();
       const systemVoices: Voice[] = data.voices ?? [];
 
@@ -114,9 +111,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
       let customVoices: Voice[] = [];
       if (ownerId) {
         try {
-          const cr = await fetch(
-            `${DEVICE_SETTING_URL}/custom-voices?owner_id=${encodeURIComponent(ownerId)}`
-          );
+          const cr = await apiFetch(`/custom-voices?owner_id=${encodeURIComponent(ownerId)}`);
           const cd = await cr.json();
           customVoices = (cd.voices ?? [])
             .filter((v: any) => v.owner_id !== "system")
@@ -243,7 +238,12 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
       };
       xhr.onerror = () => reject(new Error("ネットワークエラー"));
       xhr.ontimeout = () => reject(new Error("タイムアウト"));
-      xhr.send(JSON.stringify(body));
+      // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）
+      const json = JSON.stringify(body);
+      bodyHashHeader(json)
+        .then((h) => { for (const [k, v] of Object.entries(h)) xhr.setRequestHeader(k, v); })
+        .catch(() => {})
+        .finally(() => xhr.send(json));
     });
 
   const onSpeak = async () => {

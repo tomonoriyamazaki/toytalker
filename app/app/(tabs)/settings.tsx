@@ -18,6 +18,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { fetchWithRetry } from "../../lib/fetchWithRetry";
+import { API_BASE_URL, apiFetch } from "../../lib/api";
 import AudioRecord from "react-native-audio-record";
 import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
@@ -53,7 +54,6 @@ type LlmItem = {
   is_default?: boolean;
 };
 
-const DEVICE_SETTING_URL = "https://7k6nkpy3tf2drljy77pnouohjm0buoux.lambda-url.ap-northeast-1.on.aws";
 // プロバイダー一覧はvoicesテーブルから動的に取得
 
 const PERSONALITY_TEMPLATES = [
@@ -133,7 +133,7 @@ export default function Settings() {
     if (!ownerId) return;
     setUsageLoading(true);
     try {
-      const res = await fetch(`${DEVICE_SETTING_URL}/usage?owner_id=${encodeURIComponent(ownerId)}&month=${month}`);
+      const res = await apiFetch(`/usage?owner_id=${encodeURIComponent(ownerId)}&month=${month}`);
       const data = await res.json();
       setUsageData(data);
     } catch (e) {
@@ -227,7 +227,7 @@ export default function Settings() {
     setUsageDetailLoading(true);
     navigateTo("usage-detail");
     if (characters.length === 0) loadCharacters();
-    fetch(`${DEVICE_SETTING_URL}/usage/detail?owner_id=${encodeURIComponent(ownerId)}&date=${date}`)
+    apiFetch(`/usage/detail?owner_id=${encodeURIComponent(ownerId)}&date=${date}`)
       .then(r => r.json())
       .then(data => setUsageDetailData(data))
       .catch(e => console.error("[UsageDetail] error:", e))
@@ -245,7 +245,7 @@ export default function Settings() {
     if (!ownerId) return;
     setCharsLoading(true);
     try {
-      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
+      const res = await fetchWithRetry(`${API_BASE_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
       const data = await res.json();
       setCharacters(data.characters ?? []);
     } catch (e: any) {
@@ -258,7 +258,7 @@ export default function Settings() {
   const loadVoices = async () => {
     setVoicesLoading(true);
     try {
-      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/voices`);
+      const res = await fetchWithRetry(`${API_BASE_URL}/voices`);
       const data = await res.json();
       const list: VoiceItem[] = data.voices ?? [];
       setVoices(list);
@@ -274,7 +274,7 @@ export default function Settings() {
   const loadLlms = async () => {
     setLlmsLoading(true);
     try {
-      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/llms`);
+      const res = await fetchWithRetry(`${API_BASE_URL}/llms`);
       const data = await res.json();
       const list: LlmItem[] = data.llms ?? [];
       setLlms(list);
@@ -318,7 +318,7 @@ export default function Settings() {
     if (!ownerId) return;
     setCustomVoicesLoading(true);
     try {
-      const res = await fetchWithRetry(`${DEVICE_SETTING_URL}/custom-voices?owner_id=${encodeURIComponent(ownerId)}`);
+      const res = await fetchWithRetry(`${API_BASE_URL}/custom-voices?owner_id=${encodeURIComponent(ownerId)}`);
       const data = await res.json();
       setCustomVoices(data.voices ?? []);
     } catch (e: any) {
@@ -398,7 +398,7 @@ export default function Settings() {
       const audioBase64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
       const mimeType = cvUploadedFile?.mimeType || "audio/wav";
 
-      const res = await fetch(`${DEVICE_SETTING_URL}/custom-voices`, {
+      const res = await apiFetch(`/custom-voices`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ label: cvName.trim(), audio_base64: audioBase64, owner_id: ownerId, mime_type: mimeType, provider: cvProvider }),
@@ -475,7 +475,7 @@ export default function Settings() {
         text: "削除する", style: "destructive",
         onPress: async () => {
           try {
-            await fetch(`${DEVICE_SETTING_URL}/custom-voices/${encodeURIComponent(voiceId)}`, { method: "DELETE" });
+            await apiFetch(`/custom-voices/${encodeURIComponent(voiceId)}`, { method: "DELETE" });
             setCustomVoices(prev => prev.filter(v => v.voice_id !== voiceId));
           } catch {
             Alert.alert("エラー", "削除に失敗しました");
@@ -511,7 +511,7 @@ export default function Settings() {
         onPress: async () => {
           setDeletingId(characterId);
           try {
-            await fetch(`${DEVICE_SETTING_URL}/characters/${encodeURIComponent(characterId)}`, { method: "DELETE" });
+            await apiFetch(`/characters/${encodeURIComponent(characterId)}`, { method: "DELETE" });
             setCharacters((prev) => prev.filter((c) => c.character_id !== characterId));
             navigateTo("character-list", "back");
           } catch {
@@ -540,7 +540,7 @@ export default function Settings() {
     try {
       if (editingCharacter) {
         // 既存キャラ更新
-        const res = await fetch(`${DEVICE_SETTING_URL}/characters/${encodeURIComponent(editingCharacter.character_id)}`, {
+        const res = await apiFetch(`/characters/${encodeURIComponent(editingCharacter.character_id)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: charName.trim(), description: charDesc.trim(), personality_prompt: charPrompt.trim(), voice_id: charVoiceId, llm_id: charLlmId }),
@@ -548,7 +548,7 @@ export default function Settings() {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
       } else {
         // 新規作成
-        const res = await fetch(`${DEVICE_SETTING_URL}/characters`, {
+        const res = await apiFetch(`/characters`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ name: charName.trim(), description: charDesc.trim(), personality_prompt: charPrompt.trim(), voice_id: charVoiceId, llm_id: charLlmId, owner_id: ownerId }),
@@ -686,7 +686,7 @@ export default function Settings() {
         return;
       }
       try {
-        const res = await fetch(`${DEVICE_SETTING_URL}/custom-voices/${encodeURIComponent(voiceId)}`, {
+        const res = await apiFetch(`/custom-voices/${encodeURIComponent(voiceId)}`, {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ label: newLabel.trim() }),

@@ -86,7 +86,7 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
    - 同日、アプリ（会話・読み上げ・設定保存・クローンボイス登録）とESP32（会話・OTA）の確認後に後片付け: 旧ロール `toytalker-ops-monthly-role` `toytalker-ops-monthly-scheduler-role` と旧Permission（Sid `FunctionURLAllowPublicAccess` `FunctionURLAllowInvokeAction` `toytalker-warmer`）を削除。**`toytalk-lambda-role-dev` は残した**（v1の旧Lambda `toytalk-openai-api-dev` `toytalk-api-raspi` がまだ使っている。API Gateway `toytalk-chat-apigateway-dev` ともども、消すなら別途判断）。
 6. **済（スクリプトのみ）マスターデータの投入スクリプト。** `infra/scripts/export-master-data.ts` / `import-master-data.ts`。出力先 `infra/master-data/` はGit対象外（人格プロンプトを含む）。
 7. **済（2026-10-16、deployと投入を除く）STGアカウントの準備。** 作成・`cdk bootstrap`・SSM投入まで。`cdk deploy` とマスターデータ投入はロードマップ3（固定ドメインの後。理由はロードマップ）。
-8. **エンドポイントの固定名化（ロードマップ3）。** Function URLはアカウントごとにホスト名が変わるので、CloudFrontを前段に置いて `api-stg.zakicorp.com` のような固定名にする（ストリーミングはCloudFront経由でも通る）。アプリは `eas.json` のビルドプロファイルで、ESP32はビルドフラグで接続先を切り替える。現在のハードコード箇所: `app/app/(tabs)/chat.tsx`・`settings.tsx`・`toy.tsx`・`app/components/ReadAloud.tsx`、ESP32は各版の `.ino`。
+8. **済（コード、2026-10-29。deploy と実機確認はロードマップ3）エンドポイントの固定名化。** `api-<環境>.zakicorp.com`（`stages.ts` の `apiDomain`）を CloudFront の別名にし、Function URL 7本を経路で束ねる。us-east-1 の ACM 証明書と WAF は `<スタック名>-edge` スタック。アプリは `app/lib/api.ts` の `API_BASE_URL`（EAS の env `EXPO_PUBLIC_API_BASE_URL` で上書き）、ESP32 は `TOYTALKER_API_HOST` で接続先を切り替える。構成と手順は [infra/README](../infra/README.md) の「固定ドメイン」。
 9. **済（コードのみ、このPCへの反映は未実施）ZakiCorp TTSのURL同期を止める。** 固定URLのときは照合と警告だけにし、書き込みはngrok経路に限った。 公開URLが `https://tts.zakicorp.com` で固定になったので `stages.ts` の値にした。`tools/tts-service/supervisor.py` の同期はimport後に不要になる（CDKがdeployのたびに環境変数を上書きするので、同期を残すと互いに書き合う）。反映はロードマップ9。
 10. STGで一通り動いたら、同じスタックを自分用本番、DG向け本番の順に出す（ロードマップ7）。
 11. ~~本番が2つになったらGitHub Actions + OIDC~~ → 2026-10-25に見送り（[先送り項目](deferred-items.md)）。
