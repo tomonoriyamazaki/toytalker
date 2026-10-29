@@ -1,0 +1,14 @@
+{
+  "name": "toytalker-shared",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "全Lambda共通モジュールの依存。esbuild は import 元（backend/shared）の node_modules から解決する。install-lambda-deps.sh が入れる",
+  "dependencies": {
+    "aws-jwt-verify": "^5.2.1"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-dynamodb": "^3.1159.0",
+    "@aws-sdk/lib-dynamodb": "^3.1159.0"
+  }
+}

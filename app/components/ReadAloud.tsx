@@ -24,7 +24,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import Sound from "react-native-sound";
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from "expo-av";
 import { Buffer } from "buffer";
-import { API_BASE_URL, apiFetch, bodyHashHeader } from "../lib/api";
+import { API_BASE_URL, apiFetch, requestHeaders } from "../lib/api";
 
 /* 読み上げLambda（テキスト→TTSのみ。音声バイナリ直返し）。固定ドメイン経由（app/lib/api.ts） */
 const TTS_ONLY_URL = `${API_BASE_URL}/read-aloud-app`;
@@ -238,9 +238,9 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
       };
       xhr.onerror = () => reject(new Error("ネットワークエラー"));
       xhr.ontimeout = () => reject(new Error("タイムアウト"));
-      // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）
+      // CloudFront → Lambda の署名用に本文のハッシュと、ログイン中ならトークンを添える（app/lib/api.ts）
       const json = JSON.stringify(body);
-      bodyHashHeader(json)
+      requestHeaders(json)
         .then((h) => { for (const [k, v] of Object.entries(h)) xhr.setRequestHeader(k, v); })
         .catch(() => {})
         .finally(() => xhr.send(json));

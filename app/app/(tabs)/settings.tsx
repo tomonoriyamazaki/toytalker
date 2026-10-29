@@ -17,8 +17,8 @@ import {
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
 import { useOwnerId } from "../../hooks/useOwnerId";
-import { fetchWithRetry } from "../../lib/fetchWithRetry";
-import { API_BASE_URL, apiFetch } from "../../lib/api";
+import { apiFetch } from "../../lib/api";
+import { authConfigured, signIn, signOut, useAuthSession, type Provider } from "../../lib/auth";
 import AudioRecord from "react-native-audio-record";
 import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
@@ -26,7 +26,7 @@ import * as FileSystem from "expo-file-system";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
-type SettingsScreen = "main" | "stt-select" | "character-list" | "character-edit" | "voice-select" | "llm-select" | "version" | "usage" | "usage-detail" | "custom-voice-list" | "custom-voice-record";
+type SettingsScreen = "main" | "account" | "stt-select" | "character-list" | "character-edit" | "voice-select" | "llm-select" | "version" | "usage" | "usage-detail" | "custom-voice-list" | "custom-voice-record";
 
 type CharacterItem = {
   character_id: string;
@@ -66,6 +66,8 @@ const PERSONALITY_TEMPLATES = [
 
 export default function Settings() {
   const ownerId = useOwnerId();
+  const auth = useAuthSession();
+  const [authBusy, setAuthBusy] = useState(false);
   const [screen, setScreen] = useState<SettingsScreen>("main");
   const slideAnim = useRef(new Animated.Value(0)).current;
 
@@ -245,7 +247,7 @@ export default function Settings() {
     if (!ownerId) return;
     setCharsLoading(true);
     try {
-      const res = await fetchWithRetry(`${API_BASE_URL}/characters?owner_id=${encodeURIComponent(ownerId)}`);
+      const res = await apiFetch(`/characters?owner_id=${encodeURIComponent(ownerId)}`, { retries: 2 });
       const data = await res.json();
       setCharacters(data.characters ?? []);
     } catch (e: any) {
@@ -258,7 +260,7 @@ export default function Settings() {
   const loadVoices = async () => {
     setVoicesLoading(true);
     try {
-      const res = await fetchWithRetry(`${API_BASE_URL}/voices`);
+      const res = await apiFetch(`/voices`, { retries: 2 });
       const data = await res.json();
       const list: VoiceItem[] = data.voices ?? [];
       setVoices(list);
@@ -274,7 +276,7 @@ export default function Settings() {
   const loadLlms = async () => {
     setLlmsLoading(true);
     try {
-      const res = await fetchWithRetry(`${API_BASE_URL}/llms`);
+      const res = await apiFetch(`/llms`, { retries: 2 });
       const data = await res.json();
       const list: LlmItem[] = data.llms ?? [];
       setLlms(list);
@@ -318,7 +320,7 @@ export default function Settings() {
     if (!ownerId) return;
     setCustomVoicesLoading(true);
     try {
-      const res = await fetchWithRetry(`${API_BASE_URL}/custom-voices?owner_id=${encodeURIComponent(ownerId)}`);
+      const res = await apiFetch(`/custom-voices?owner_id=${encodeURIComponent(ownerId)}`, { retries: 2 });
       const data = await res.json();
       setCustomVoices(data.voices ?? []);
     } catch (e: any) {
@@ -475,7 +477,7 @@ export default function Settings() {
         text: "削除する", style: "destructive",
         onPress: async () => {
           try {
-            await apiFetch(`/custom-voices/${encodeURIComponent(voiceId)}`, { method: "DELETE" });
+            await apiFetch(`/custom-voices/${encodeURIComponent(voiceId)}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner_id: ownerId }) });
             setCustomVoices(prev => prev.filter(v => v.voice_id !== voiceId));
           } catch {
             Alert.alert("エラー", "削除に失敗しました");
@@ -511,7 +513,7 @@ export default function Settings() {
         onPress: async () => {
           setDeletingId(characterId);
           try {
-            await apiFetch(`/characters/${encodeURIComponent(characterId)}`, { method: "DELETE" });
+            await apiFetch(`/characters/${encodeURIComponent(characterId)}`, { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner_id: ownerId }) });
             setCharacters((prev) => prev.filter((c) => c.character_id !== characterId));
             navigateTo("character-list", "back");
           } catch {
@@ -1374,6 +1376,76 @@ export default function Settings() {
     );
   }
 
+  // ---- アカウント画面（ログイン / ログアウト。docs/auth.md） ----
+  if (screen === "account") {
+    const providerLabel = (p: string | null) => (p === "Google" ? "Google" : p === "SignInWithApple" ? "Apple" : p ?? "");
+    const doSignIn = async (provider?: Provider) => {
+      setAuthBusy(true);
+      try {
+        const s = await signIn(provider);
+        if (s) Alert.alert("ログインしました", s.email ?? "");
+      } catch (e: any) {
+        Alert.alert("ログインできませんでした", e?.message ?? String(e));
+      } finally {
+        setAuthBusy(false);
+      }
+    };
+    const doSignOut = () => {
+      Alert.alert("ログアウトしますか？", "この端末のキャラクター・ログ・デバイスはアカウントに残ります。", [
+        { text: "キャンセル", style: "cancel" },
+        { text: "ログアウト", style: "destructive", onPress: async () => { setAuthBusy(true); try { await signOut(); } finally { setAuthBusy(false); } } },
+      ]);
+    };
+    return (
+      <SafeAreaView style={s.root}>
+        <Animated.View style={[s.flex, { transform: [{ translateX: slideAnim }] }]}>
+          <View style={s.header}>
+            <TouchableOpacity onPress={() => navigateTo("main", "back")} hitSlop={{ top: 12, bottom: 12, left: 12, right: 24 }}>
+              <Text style={s.back}>←</Text>
+            </TouchableOpacity>
+            <Text style={s.headerTitle}>アカウント情報</Text>
+          </View>
+          <ScrollView contentContainerStyle={s.wrap}>
+            {!auth.ready || authBusy ? (
+              <ActivityIndicator size="large" color="#007AFF" style={{ marginTop: 24 }} />
+            ) : auth.session ? (
+              <>
+                <Text style={s.sectionTitle}>ログイン中</Text>
+                <Text style={s.accountLine}>{auth.session.email ?? "（メールアドレスなし）"}</Text>
+                <Text style={s.accountSub}>{providerLabel(auth.session.provider)} でログイン</Text>
+                <Text style={s.accountSub}>ID: {ownerId}</Text>
+                <TouchableOpacity style={[s.button, s.buttonDanger, { marginTop: 24 }]} onPress={doSignOut}>
+                  <Text style={s.buttonText}>ログアウト</Text>
+                </TouchableOpacity>
+              </>
+            ) : (
+              <>
+                <Text style={s.sectionTitle}>未ログイン</Text>
+                <Text style={s.accountSub}>ログインすると、キャラクター・会話ログ・おもちゃの設定が自分のアカウントに結び付き、他の人から見えなくなります。</Text>
+                <Text style={s.accountSub}>ID: {ownerId}</Text>
+                {authConfigured() ? (
+                  <>
+                    <TouchableOpacity style={[s.button, { marginTop: 24 }]} onPress={() => doSignIn("Google")}>
+                      <Text style={s.buttonText}>Google でログイン</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[s.button, s.buttonDark]} onPress={() => doSignIn("SignInWithApple")}>
+                      <Text style={s.buttonText}>Apple でログイン</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={s.linkButton} onPress={() => doSignIn()}>
+                      <Text style={s.linkText}>メールアドレスでログイン（試験用）</Text>
+                    </TouchableOpacity>
+                  </>
+                ) : (
+                  <Text style={[s.accountSub, { marginTop: 24 }]}>このビルドにはログインの設定がありません。</Text>
+                )}
+              </>
+            )}
+          </ScrollView>
+        </Animated.View>
+      </SafeAreaView>
+    );
+  }
+
   // ---- メイン設定画面 ----
   return (
     <SafeAreaView style={s.root}>
@@ -1385,8 +1457,9 @@ export default function Settings() {
           </TouchableOpacity>
         </View>
         <ScrollView contentContainerStyle={s.wrap}>
-          <TouchableOpacity style={s.navRow} onPress={() => {}}>
+          <TouchableOpacity style={s.navRow} onPress={() => navigateTo("account")}>
             <Text style={s.navText}>アカウント情報</Text>
+            <Text style={s.navSub}>{auth.session ? (auth.session.email ?? "ログイン中") : "未ログイン"}</Text>
             <Text style={s.chevron}>›</Text>
           </TouchableOpacity>
 
@@ -1448,6 +1521,13 @@ const s = StyleSheet.create({
   // ナビゲーション
   navRow:                  { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, paddingHorizontal: 16, backgroundColor: "#f9f9f9", borderRadius: 8, borderWidth: 1, borderColor: "#e0e0e0" },
   navText:                 { fontSize: 16, color: "#333" },
+  navSub:                  { fontSize: 12, color: "#999", flex: 1, textAlign: "right", marginRight: 8 },
+  // アカウント
+  accountLine:             { fontSize: 16, color: "#333" },
+  accountSub:              { fontSize: 13, color: "#888", marginTop: 4 },
+  buttonDark:              { backgroundColor: "#111" },
+  linkButton:              { paddingVertical: 10, alignItems: "center" },
+  linkText:                { fontSize: 14, color: "#007AFF" },
   chevron:                 { fontSize: 20, color: "#999" },
   // ヘッダー
   header:                  { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 8, gap: 12, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: "#e0e0e0" },

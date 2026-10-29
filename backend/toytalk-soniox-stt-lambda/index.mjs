@@ -5,6 +5,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeEdge } from "../shared/trace.mjs";
+import { authenticate, authGate, describeAuth, deviceGate } from "../shared/auth.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -149,6 +150,18 @@ export const handler = async (event, context) => {
       ...describeEdge(event),
     });
 
+    // 本人確認（backend/shared/auth.mjs、docs/auth.md）。アプリ（device_id 無し）はトークン。本番はトークン必須、RnD はトークン無しも通す。
+    // ESP32（device_id あり）はログインしないので、本番では登録済みの機器か（下の deviceGate）で見る
+    if (!deviceId) {
+      const identity = await authenticate(event);
+      trace.set(describeAuth(identity));
+      const denied = authGate(identity);
+      if (denied) {
+        trace.set({ status: denied.statusCode, reason: denied.error });
+        return { statusCode: denied.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: denied.error }) };
+      }
+    }
+
     const sonioxStart = Date.now();
     const [sonioxRes, deviceSettings, manifest] = await Promise.all([
       fetch(url, {
@@ -167,6 +180,14 @@ export const handler = async (event, context) => {
       recordDeviceReport(deviceId, query),
     ]);
     trace.mark("parallel_done");
+
+    if (deviceId) {
+      const gate = deviceGate(deviceSettings?.Item ?? null);
+      if (gate) {
+        trace.set({ status: gate.statusCode, reason: gate.error });
+        return { statusCode: gate.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: gate.error }) };
+      }
+    }
 
     if (!sonioxRes.ok) {
       const text = await sonioxRes.text();

@@ -12,6 +12,7 @@
   import { tableName } from "../shared/tables.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
   import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
+import { deviceGate } from "../shared/auth.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
   // 会話の間が数秒空くとLLM/TTSへのTLS接続が閉じられ、次のターンで
@@ -555,7 +556,8 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         Key: { device_id: deviceId },
       }));
       const device = deviceRes.Item;
-      if (!device) return null;
+      if (!device) return { registered: false }; // 未登録機。本番では拒む（deviceGate）
+      const partial = { registered: true, ownerId: device.owner_id ?? null, characterId: device.character_id ?? "default" };
 
       let voiceId = null;
       let personalityPrompt = null;
@@ -574,13 +576,13 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       }
 
       if (!voiceId) voiceId = device.voice_id ?? null;
-      if (!voiceId) return null;
+      if (!voiceId) return partial; // 登録済みだがキャラクター未設定。body の値で続ける
 
       const voiceRes = await ddb.send(new GetCommand({
         TableName: VOICES_TABLE,
         Key: { voice_id: voiceId },
       }));
-      if (!voiceRes.Item) return null;
+      if (!voiceRes.Item) return partial;
 
       // LLM設定を解決（llm_id未設定なら null のまま返し、handler側でデフォルトを充当）
       let llmProvider = null;
@@ -597,11 +599,10 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       }
 
       return {
+        ...partial,
         provider: voiceRes.Item.provider,
         vendorId: voiceRes.Item.vendor_id,
         personalityPrompt,
-        ownerId: device.owner_id ?? null,
-        characterId: device.character_id ?? "default",
         llmProvider,
         llmModelId,
       };
@@ -661,9 +662,23 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     let llmModelId  = null;
     let characterId = "default";
 
+    // 拒否応答（403）。ストリームを開く前に JSON 1つで返す。LLM も TTS も走らない
+    const reject = (gate) => {
+      trace.set({ status: gate.statusCode, reason: gate.error });
+      trace.finish();
+      const s = awslambda.HttpResponseStream.from(res, { statusCode: gate.statusCode, headers: { "Content-Type": "application/json" } });
+      s.write(JSON.stringify({ error: gate.error }));
+      s.end();
+    };
+    // ESP32 はログインしない。本番（AUTH_REQUIRED）では devices テーブルに登録済み（= アプリでログインして結び付けた）機器だけ通す（docs/auth.md）。
+    // DynamoDB の失敗（null）は従来どおり body の値で続ける
+    const charConfig = deviceId ? await resolveCharacterFromDynamo(deviceId) : { registered: false };
+    if (charConfig?.registered === false) {
+      const gate = deviceGate(null);
+      if (gate) return reject(gate);
+    }
     if (deviceId) {
-      const charConfig = await resolveCharacterFromDynamo(deviceId);
-      if (charConfig) {
+      if (charConfig?.provider) {
         ttsKey = normalizeModelKey(charConfig.provider) ?? ttsKey;
         voice    = charConfig.vendorId ?? voice;
         personalityPrompt = charConfig.personalityPrompt;
@@ -673,7 +688,8 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         if (charConfig.ownerId) ownerId = charConfig.ownerId;
         trace.set({ owner_id: ownerId, character_id: characterId, has_personality: !!personalityPrompt });
       } else {
-        trace.set({ device_registered: false }); // 未登録か、キャラクター未設定。body の値で続ける
+        if (charConfig?.ownerId) { ownerId = charConfig.ownerId; trace.set({ owner_id: ownerId }); }
+        trace.set({ device_registered: charConfig?.registered === true }); // 未登録か、キャラクター未設定。body の値で続ける
       }
     }
 

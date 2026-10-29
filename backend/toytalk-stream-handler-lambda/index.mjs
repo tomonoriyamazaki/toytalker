@@ -11,6 +11,7 @@
   import { tableName } from "../shared/tables.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
   import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
+import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
 
   // ---- 予備インスタンスの事前ウォームアップ ----
   // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -670,6 +671,7 @@
         personalityPrompt,
         llmProvider,
         llmModelId,
+        ownerId: charRes.Item.owner_id ?? null,
       };
     } catch (e) {
       console.error("[DynamoDB] resolveCharacterFromDynamo error:", e);
@@ -687,6 +689,19 @@
     // 切り分け用のログ。1リクエスト1行のJSONで、会話の文章は書かない（backend/shared/trace.mjs）
     const trace = startTrace("turn", { event, context, t0: requestAt });
     trace.mark("secrets");
+    // 拒否応答（401/403）。ストリームを開く前に JSON 1つで返す。LLM も TTS も走らない
+    const reject = (gate) => {
+      trace.set({ status: gate.statusCode, reason: gate.error });
+      trace.finish();
+      const s = awslambda.HttpResponseStream.from(res, { statusCode: gate.statusCode, headers: { "Content-Type": "application/json" } });
+      s.write(JSON.stringify({ error: gate.error }));
+      s.end();
+    };
+    // 本人確認（backend/shared/auth.mjs、docs/auth.md）。本番はトークン必須、RnD はトークン無しも通す
+    const identity = await authenticate(event);
+    trace.set(describeAuth(identity));
+    const denied = authGate(identity);
+    if (denied) return reject(denied);
     prewarmSpareInstance();  // 処理中に予備インスタンスを温める（同時2人目対策）
     const messages  = body.messages ?? [{ role:"user", content:"自己紹介して" }];
     const rawModel  = typeof body.model === "string" ? body.model : undefined;
@@ -698,7 +713,8 @@
 
     // ---- ログ用メタデータ ----
     const sessionId  = typeof body.session_id === "string" ? body.session_id : "unknown";
-    const ownerId    = typeof body.owner_id   === "string" ? body.owner_id   : "user_123";
+    // トークン付きなら users テーブルの owner_id（クライアントの自称は無視）。無しなら従来どおり本文の owner_id
+    const ownerId    = (await resolveOwner(identity, typeof body.owner_id === "string" ? body.owner_id : undefined)).ownerId ?? "user_123";
     const deviceId   = typeof body.device_id  === "string" ? body.device_id  : "app";
     const userTimestamp = new Date(requestAt).toISOString();
     const backchannelFired = !!body.backchannel_fired;
@@ -717,6 +733,10 @@
     if (characterId) {
       const charConfig = await resolveCharacterFromDynamo(characterId);
       if (charConfig) {
+        // 他人のキャラクター（人格プロンプト = 子どもに話す内容）は使えない。system 製は誰でも
+        if (identity.auth === "user" && charConfig.ownerId && charConfig.ownerId !== "system" && charConfig.ownerId !== ownerId) {
+          return reject({ statusCode: 403, error: "not_owner" });
+        }
         ttsKey = normalizeModelKey(charConfig.provider) ?? ttsKey;
         voice    = charConfig.vendorId ?? voice;
         personalityPrompt = charConfig.personalityPrompt;

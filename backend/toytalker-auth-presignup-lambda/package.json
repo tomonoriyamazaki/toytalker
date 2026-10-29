@@ -1,0 +1,9 @@
+{
+  "name": "toytalker-auth-presignup-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "description": "Cognito PreSignUp trigger: link external IdP sign-ins with the same verified email to one user. AWS SDK はランタイム同梱のものを使う",
+  "dependencies": {}
+}

@@ -195,6 +195,8 @@ CloudTrail は毎回別のキーで新しいファイルを書くので、バー
 
 ## 認証フェーズへ渡す所有者確認の一覧
 
+**実装済（2026-10-29、deploy 未）。現在の確認の表は [利用者認証](auth.md) の「所有者確認」。** 以下は実装前に書いた一覧（そのまま実装した）。`DELETE /devices/{id}` の `owner_id` 必須化（小物）も同時に入れた。
+
 `backend/toytalker-device-setting-lambda/index.mjs`:
 
 - `POST /devices`: 既存行の `owner_id` と本人が違えば403（新規登録は本人を書く）。

@@ -66,6 +66,7 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 - 鍵を入れ替えるときはSSMを変えるだけ。稼働中のLambdaは5分を過ぎた次の呼び出しで取り直す（deploy不要）
 - 鍵を発行元で作り直す手順（値は書かない）は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md) の「鍵の再発行手順」
 - Lambdaに鍵を新しく使わせるとき: `lib/secrets.ts` に名前を足し、その関数の `secrets` に加え、コードでは `secret("名前")` で読む
+- **例外は外部IdP（ロードマップ4）の秘密2件**（Google のクライアントシークレット、Apple の秘密鍵。`lib/secrets.ts` の `IDP_SECRETS`）。Cognito の IdP は deploy 時に値が要り、CloudFormation の `ssm-secure` が Cognito に対応していないので Secrets Manager（`toytalker/google-oauth-client-secret`、`toytalker/apple-signin-private-key`）に置き、`{{resolve:secretsmanager}}` で読む。登録手順は [docs/auth.md](../docs/auth.md)。`stages.ts` の `auth.google` / `auth.apple` が無い環境では参照しない
 - 環境変数方式の環境を移すときだけ2段階でdeployする（コードと設定の更新が別々に行われ、その間に鍵が読めなくなるのを避ける）: `npx cdk deploy --context stage=<stage> --context keepEnvSecrets=true` → ログの `[secrets] loaded n/n from SSM` と動作を確認 → フラグ無しで `npx cdk deploy`。新しく作る環境は最初からフラグ無し
 
 ## Lambdaログの見方（2026-10-28、ロードマップ9）
@@ -109,7 +110,7 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 
 - **クライアントの約束**: CloudFront → Lambda は OAC の SigV4 署名で渡り、署名が本文のハッシュを含む。GET / HEAD 以外は本文の SHA-256（本文が無ければ空文字列のハッシュ）を `x-amz-content-sha256` ヘッダーで添える。アプリは `app/lib/api.ts` の `apiFetch` / `bodyHashHeader`、ESP32 は `sha256Hex()`。無いと Function URL が IAM 認証のとき 403。
 - **段階**: `directFunctionUrls: true`（RnD の今）は Function URL が `NONE` + 公開ポリシーのままで、CloudFront 経由と直接の両方を受ける。配布済みの旧ファーム・旧アプリが直接呼ぶ間はこのまま。Lambda ログの `edge: "direct"` が無くなったら `false` にして deploy すると `AWS_IAM` になり、CloudFront（OAC）だけが呼べる。authType の変更は作り直しにならず、ホスト名も変わらない。新しい環境は最初から `false`。
-- **オリジンへ渡すヘッダーは allowList**（`content-type` `accept` `user-agent` `origin` `access-control-request-*` `cloudfront-viewer-country`。`x-amz-content-sha256` は OAC が扱うので書けない）。Host を渡すと Function URL が受け付けない。`Authorization` は OAC が上書きするので、認証（ロードマップ4）のトークンは別名のヘッダーにし、allowList にも足す。
+- **オリジンへ渡すヘッダーは allowList**（`content-type` `accept` `user-agent` `origin` `access-control-request-*` `cloudfront-viewer-country` `x-toytalker-token`。`x-amz-content-sha256` は OAC が扱うので書けない）。Host を渡すと Function URL が受け付けない。`Authorization` は OAC が上書きするので、認証（ロードマップ4）のトークンは `x-toytalker-token`（[docs/auth.md](../docs/auth.md)）。
 - **WAF は本番だけ**（`apiRateLimitPer5Min` のある環境。RnD は省略、理由は [docs/deferred-items.md](../docs/deferred-items.md)）: 送信元 IP ごとに 5分で 300 件を超えると 403。サンプル要求の保存とログは切る（IP を残さない）。件数は us-east-1 の CloudWatch `AWS/WAFV2` の `BlockedRequests`。費用は WebACL $5 + ルール $1 + 100万要求あたり $0.60（月約 $6）。CloudFront と ACM は無料枠内。
 - **応答待ちは 60 秒**（最初の1バイトまで、および途中のパケット間隔）。LLM の初回トークンがそれより遅いと 504。
 - **アクセスログは取らない**（送信元 IP が入る。cdk-nag の CFR3 を理由付きで受け入れ）。地域制限も掛けない（海外の利用者。CFR1）。
@@ -121,6 +122,10 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 3. `npx cdk deploy --context stage=rnd ToyTalker-rnd`。出力 `ApiDistributionDomainName`（`d….cloudfront.net`）を、Cloudflare に `CNAME api-rnd → その値`（**DNS only**。Proxied にすると Cloudflare の証明書になり、ESP32 の CA 束と合わない）で足す
 4. `curl -s https://api-rnd.zakicorp.com/voices | head -c 200`（設定Lambda）と `curl -s "https://api-rnd.zakicorp.com/stt-token?ttl=60"`（鍵発行）で通ることを確かめる。本文のある POST は `x-amz-content-sha256` 付きで
 5. アプリ（EAS ビルド）と試験機（ファーム 0.7.4 を beta に発行して OTA）を切り替え、実機で会話・相槌・読み上げ・設定画面を確かめる。Lambda ログに `edge: "cloudfront"` と `country` が出る
+
+## 利用者認証（Cognito、ロードマップ4）
+
+状態・仕組み・各社側の設定・確認の仕方は [docs/auth.md](../docs/auth.md)。CDK は `lib/toytalker-stack.ts` の `createAuth`（ユーザープール `toytalker-auth-<環境>`、managed login、アプリ用クライアント、外部IdP）と `createApiAlarms`（401/403・呼び出し数・エラー数のアラーム → 月次レポートと同じ SNS）。環境ごとの設定は `config/stages.ts` の `auth`。deploy の出力 `UserPoolId` / `UserPoolClientId` / `AuthDomain` をアプリ（`app/lib/auth.ts`）と各社側の設定に使う。
 
 ## バックアップと復元（AWS Backup、ロードマップ10）
 

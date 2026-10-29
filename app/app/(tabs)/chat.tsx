@@ -30,7 +30,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { APP_VERSION } from "../../lib/appVersion";
-import { API_BASE_URL, apiFetch, bodyHashHeader } from "../../lib/api";
+import { API_BASE_URL, apiFetch, requestHeaders } from "../../lib/api";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
 import ReadAloud from "../../components/ReadAloud";
@@ -42,7 +42,6 @@ const SONIOX_SAMPLE_RATE = 16000;
 const SONIOX_CHANNELS = 1;
 
 /** Soniox temporary key発行Lambda（固定ドメイン経由。app/lib/api.ts）。GETでkeyを受け取りセットする */
-const SONIOX_KEY_URL = `${API_BASE_URL}/stt-token`;
 /**
  * 一時キーはLambdaに頼む寿命（SONIOX_KEY_TTL_SEC）で発行される。期限切れのキーで接続すると会話が
  * 始まらないので、取得から SONIOX_KEY_MAX_AGE_MINUTES を越えたらWSを開く前に取り直す。
@@ -56,7 +55,7 @@ let sonioxKeyInflight: Promise<string> | null = null;
 const fetchSonioxTempKey = async (): Promise<string> => {
   // app_version は Lambda の切り分けログ用（本文・相槌と同じ）
   // 本文の無い要求なので GET（ESP32 と同じ。CloudFront 経由では本文の無い POST に署名用のハッシュが要るので避ける）
-  const res = await fetch(`${SONIOX_KEY_URL}?ttl=${SONIOX_KEY_TTL_SEC}&app_version=${encodeURIComponent(APP_VERSION)}`);
+  const res = await apiFetch(`/stt-token?ttl=${SONIOX_KEY_TTL_SEC}&app_version=${encodeURIComponent(APP_VERSION)}`);
   const js = await res.json();
   if (!res.ok || !js?.api_key) throw new Error("Failed to get Soniox temp key");
   if (js.stt_model) SONIOX_MODEL = js.stt_model;
@@ -1241,10 +1240,10 @@ export default function Chat() {
         backchannel_fired: backchannelFiredRef.current,
       };
       console.log("🚀 payload to Lambda:", JSON.stringify(payload, null, 2), attemptNo > 1 ? `(attempt ${attemptNo})` : "");
-      // CloudFront → Lambda の署名用に本文のハッシュを添える（app/lib/api.ts）
+      // CloudFront → Lambda の署名用に本文のハッシュと、ログイン中ならトークンを添える（app/lib/api.ts）
       // open() 後・send() 前なら非同期を挟んでよい。ハッシュに失敗しても送る（NONE の間は通る。IAM 後は 403 になりログで分かる）
       const json = JSON.stringify(payload);
-      bodyHashHeader(json)
+      requestHeaders(json)
         .then((h) => { for (const [k, v] of Object.entries(h)) xhr.setRequestHeader(k, v); })
         .catch((e) => console.log("[SEND] body hash failed:", e?.message ?? e))
         .finally(() => xhr.send(json));

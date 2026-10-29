@@ -6,6 +6,8 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanComm
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { startTrace, describeClient } from "../shared/trace.mjs";
+import { authenticate, authGate, describeAuth, resolveOwner, ownerGate, touchLogin, AUTH_REQUIRED } from "../shared/auth.mjs";
 
 const client = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(client);
@@ -116,14 +118,65 @@ const response = (statusCode, body) => ({
   body: JSON.stringify(body),
 });
 
-export const handler = async (event) => {
+/**
+ * 本人確認（ロードマップ4、docs/auth.md）。
+ *   - トークン付き（auth "user"）: users テーブルの owner_id を使う。クライアントが名乗る owner_id は無視する。
+ *   - トークン無しで通す環境（RnD。auth "none"）: 従来どおりクエリ・本文の owner_id を使う。
+ * 行の所有者確認は ownerGate（他人の行は 403）。
+ */
+export const handler = async (event, context) => {
+  const start = Date.now();
   const method = event.requestContext?.http?.method ?? "GET";
   const path   = event.rawPath ?? "/";
-
-  console.log(`[Request] ${method} ${path}`);
-
+  let body = {};
+  try { body = event.body ? JSON.parse(event.body) : {}; } catch { body = {}; }
+  // 切り分け用のログ。1リクエスト1行のJSON（backend/shared/trace.mjs）。本文の中身（キャラクターのプロンプト等）は書かない
+  const trace = startTrace("settings", { event, context, t0: start });
+  trace.set({ method, path: path.split("/").slice(0, 3).join("/"), ...describeClient(event, body) });
   try {
     await ensureSecrets();
+    trace.mark("secrets");
+    const identity = await authenticate(event);
+    trace.set(describeAuth(identity));
+    const denied = authGate(identity);
+    if (denied) {
+      trace.set({ status: denied.statusCode, reason: denied.error });
+      return response(denied.statusCode, { error: denied.error });
+    }
+    const claimed = event.queryStringParameters?.owner_id ?? (typeof body.owner_id === "string" ? body.owner_id : undefined);
+    const who = await resolveOwner(identity, claimed);
+    if (who.created) trace.set({ user_created: true });
+    trace.set({ owner_id: who.ownerId });
+    trace.mark("auth");
+    const result = await route(method, path, event, body, identity, who, trace);
+    trace.set({ status: result.statusCode });
+    return result;
+  } catch (err) {
+    trace.error("handler", err);
+    trace.set({ status: 500 });
+    return response(500, { error: err?.message ?? "Internal server error" });
+  } finally {
+    trace.finish();
+  }
+};
+
+async function route(method, path, event, body, identity, who, trace) {
+  // 本人の owner_id。トークン無し（RnD）はクライアントの自称。昔のクライアントは付けないことがあるので既定値で補う
+  const ownerId = who.ownerId;
+  const ownerOr = (fallback) => ownerId ?? fallback;
+  const deny = (gate) => { trace.set({ reason: gate.error }); return response(gate.statusCode, { error: gate.error }); };
+  {
+    // ---- GET /me ---- 本人（アプリがログイン直後に呼ぶ。初回は端末の owner_id を結び付ける。docs/auth.md）
+    if (method === "GET" && path === "/me") {
+      if (identity.auth !== "user") {
+        return response(200, { auth: "none", owner_id: ownerId, auth_required: AUTH_REQUIRED });
+      }
+      await touchLogin(identity.sub);
+      return response(200, {
+        auth: "user", owner_id: ownerId, email: who.user?.email ?? identity.email, provider: who.user?.provider ?? identity.provider,
+        created: who.created, auth_required: AUTH_REQUIRED,
+      });
+    }
 
     // ---- GET /llms ---- LLM一覧取得
     if (method === "GET" && path === "/llms") {
@@ -140,7 +193,7 @@ export const handler = async (event) => {
 
     // ---- GET /characters ---- キャラクター一覧取得（system + 自分のキャラ）
     if (method === "GET" && path === "/characters") {
-      const userId = event.queryStringParameters?.owner_id ?? "user_123";
+      const userId = ownerOr("user_123");
       const result = await ddb.send(new ScanCommand({
         TableName: CHARACTERS_TABLE,
         FilterExpression: "owner_id = :system OR owner_id = :userId",
@@ -154,8 +207,8 @@ export const handler = async (event) => {
 
     // ---- POST /characters ---- キャラクター作成
     if (method === "POST" && path === "/characters") {
-      const body = JSON.parse(event.body ?? "{}");
-      const { name, description = "", personality_prompt = "", voice_id = "elevenlabs_sameno", llm_id = "openai_gpt41mini", owner_id = "user_123" } = body;
+      const { name, description = "", personality_prompt = "", voice_id = "elevenlabs_sameno", llm_id = "openai_gpt41mini" } = body;
+      const owner_id = ownerOr("user_123");
       if (!name) return response(400, { error: "name is required" });
 
       const character_id = `${owner_id}_${Date.now()}`;
@@ -178,8 +231,12 @@ export const handler = async (event) => {
     // ---- PUT /characters/{character_id} ---- キャラクター更新
     if (method === "PUT" && path.startsWith("/characters/")) {
       const character_id = decodeURIComponent(path.split("/")[2]);
-      const body = JSON.parse(event.body ?? "{}");
       const { name, description, personality_prompt, voice_id } = body;
+      const existing = await ddb.send(new GetCommand({ TableName: CHARACTERS_TABLE, Key: { character_id } }));
+      if (!existing.Item) return response(404, { error: "Character not found" });
+      if (existing.Item.owner_id === "system") return response(403, { error: "Cannot edit system character" });
+      const gate = ownerGate(identity, ownerId, existing.Item);
+      if (gate) return deny(gate);
 
       // name / description は DynamoDB 予約語なので ExpressionAttributeNames でエスケープ
       const updates = [];
@@ -211,6 +268,8 @@ export const handler = async (event) => {
       }));
       if (!existing.Item) return response(404, { error: "Character not found" });
       if (existing.Item.owner_id === "system") return response(403, { error: "Cannot delete system character" });
+      const gate = ownerGate(identity, ownerId, existing.Item);
+      if (gate) return deny(gate);
 
       await ddb.send(new DeleteCommand({
         TableName: CHARACTERS_TABLE,
@@ -221,9 +280,17 @@ export const handler = async (event) => {
 
     // ---- POST /devices ---- デバイス登録
     if (method === "POST" && path === "/devices") {
-      const body      = JSON.parse(event.body ?? "{}");
-      const { device_id, owner_id = "user_123" } = body;
+      const { device_id } = body;
+      const owner_id = ownerOr("user_123");
       if (!device_id) return response(400, { error: "device_id is required" });
+      // 本番（ログイン必須）では、登録済みの機器を別の利用者が自分のものにできない。持ち主が消してから登録し直す
+      if (identity.auth === "user") {
+        const existing = await ddb.send(new GetCommand({ TableName: DEVICES_TABLE, Key: { device_id } }));
+        if (existing.Item && existing.Item.owner_id !== owner_id) {
+          const gate = ownerGate(identity, ownerId, existing.Item);
+          if (gate) return deny(gate);
+        }
+      }
 
       const now = new Date().toISOString();
       await ddb.send(new PutCommand({
@@ -257,7 +324,7 @@ export const handler = async (event) => {
 
     // ---- GET /devices ---- デバイス一覧取得（owner_id でフィルタ）
     if (method === "GET" && path === "/devices") {
-      const owner_id = event.queryStringParameters?.owner_id;
+      const owner_id = ownerId;
       if (!owner_id) return response(400, { error: "owner_id is required" });
 
       const result = await ddb.send(new ScanCommand({
@@ -268,20 +335,16 @@ export const handler = async (event) => {
       return response(200, { devices: result.Items ?? [] });
     }
 
-    // ---- DELETE /devices/{device_id} ---- デバイス削除
+    // ---- DELETE /devices/{device_id} ---- デバイス削除（所有者だけ。トークン無しのときも owner_id が必須。脅威モデル#2、2026-10-29）
     if (method === "DELETE" && path.startsWith("/devices/")) {
       const device_id = decodeURIComponent(path.split("/")[2]);
-      const body = JSON.parse(event.body ?? "{}");
-      const { owner_id } = body;
-
       const existing = await ddb.send(new GetCommand({
         TableName: DEVICES_TABLE,
         Key: { device_id },
       }));
       if (!existing.Item) return response(404, { error: "Device not found" });
-      if (owner_id && existing.Item.owner_id !== owner_id) {
-        return response(403, { error: "Not authorized to delete this device" });
-      }
+      const gate = ownerGate(identity, ownerId, existing.Item, { requireClaim: true });
+      if (gate) return deny(gate);
 
       await ddb.send(new DeleteCommand({
         TableName: DEVICES_TABLE,
@@ -298,6 +361,8 @@ export const handler = async (event) => {
         Key: { device_id },
       }));
       if (!result.Item) return response(404, { error: "Device not found" });
+      const gate = ownerGate(identity, ownerId, result.Item);
+      if (gate) return deny(gate);
       return response(200, result.Item);
     }
 
@@ -305,8 +370,11 @@ export const handler = async (event) => {
     // fw_channel は OTA の配布チャネル（stable|beta）、fw_target は版の固定（空文字で解除）。docs/esp32-ota-settings-plan.md
     if (method === "PUT" && path.startsWith("/devices/")) {
       const device_id = decodeURIComponent(path.split("/")[2]);
-      const body      = JSON.parse(event.body ?? "{}");
       const { character_id, device_name, backchannel_enabled, fw_channel, fw_target } = body;
+      const existing = await ddb.send(new GetCommand({ TableName: DEVICES_TABLE, Key: { device_id } }));
+      if (!existing.Item) return response(404, { error: "Device not found" });
+      const gate = ownerGate(identity, ownerId, existing.Item);
+      if (gate) return deny(gate);
 
       const updates = ["last_seen = :t"];
       const removes = [];
@@ -338,7 +406,7 @@ export const handler = async (event) => {
 
     // ---- GET /logs/sessions ---- セッション一覧取得
     if (method === "GET" && path === "/logs/sessions") {
-      const ownerId  = event.queryStringParameters?.owner_id  ?? "user_123";
+      const ownerId  = ownerOr("user_123");
       const deviceId = event.queryStringParameters?.device_id ?? "app";
       const pk = `owner_id#${ownerId}#device_id#${deviceId}`;
       const result = await ddb.send(new QueryCommand({
@@ -375,7 +443,7 @@ export const handler = async (event) => {
 
     // ---- GET /logs/messages ---- セッション内メッセージ取得
     if (method === "GET" && path === "/logs/messages") {
-      const ownerId   = event.queryStringParameters?.owner_id   ?? "user_123";
+      const ownerId   = ownerOr("user_123");
       const deviceId  = event.queryStringParameters?.device_id  ?? "app";
       const sessionId = event.queryStringParameters?.session_id;
       if (!sessionId) return response(400, { error: "session_id is required" });
@@ -392,7 +460,7 @@ export const handler = async (event) => {
 
     // ---- GET /usage ---- 月次利用状況取得
     if (method === "GET" && path === "/usage") {
-      const ownerId = event.queryStringParameters?.owner_id ?? "user_123";
+      const ownerId = ownerOr("user_123");
       const month   = event.queryStringParameters?.month ?? new Date().toISOString().slice(0, 7);
 
       // usageテーブルから該当月のレコードを取得
@@ -470,7 +538,7 @@ export const handler = async (event) => {
 
     // ---- GET /usage/detail ---- 日次詳細（会話ごとのコスト）
     if (method === "GET" && path === "/usage/detail") {
-      const ownerId  = event.queryStringParameters?.owner_id  ?? "user_123";
+      const ownerId  = ownerOr("user_123");
       const deviceId = event.queryStringParameters?.device_id;
       const date     = event.queryStringParameters?.date;
       if (!date) return response(400, { error: "date is required" });
@@ -571,7 +639,7 @@ export const handler = async (event) => {
 
     // ---- GET /custom-voices ---- クローンボイス一覧（ZakiCorp / Cartesia の system + 自分のカスタム）
     if (method === "GET" && path === "/custom-voices") {
-      const userId = event.queryStringParameters?.owner_id;
+      const userId = ownerId;
       if (!userId) return response(400, { error: "owner_id is required" });
       const result = await ddb.send(new ScanCommand({
         TableName: VOICES_TABLE,
@@ -583,8 +651,8 @@ export const handler = async (event) => {
 
     // ---- POST /custom-voices ---- カスタムボイス登録（provider: "ZakiCorp"（既定） | "Cartesia"）
     if (method === "POST" && path === "/custom-voices") {
-      const body = JSON.parse(event.body ?? "{}");
-      const { label, audio_base64, owner_id, mime_type } = body;
+      const { label, audio_base64, mime_type } = body;
+      const owner_id = ownerId;
       if (!label || !audio_base64) return response(400, { error: "label and audio_base64 are required" });
       if (!owner_id) return response(400, { error: "owner_id is required" });
       const provider = body.provider === "Cartesia" ? "Cartesia" : "ZakiCorp";
@@ -685,7 +753,6 @@ export const handler = async (event) => {
     // ---- PUT /custom-voices/{voice_id} ---- カスタムボイス更新（ラベル変更）
     if (method === "PUT" && path.startsWith("/custom-voices/")) {
       const voiceId = decodeURIComponent(path.split("/")[2]);
-      const body = JSON.parse(event.body ?? "{}");
       const { label } = body;
       if (!label) return response(400, { error: "label is required" });
 
@@ -695,6 +762,8 @@ export const handler = async (event) => {
       }));
       if (!existing.Item) return response(404, { error: "Voice not found" });
       if (existing.Item.owner_id === "system") return response(403, { error: "Cannot edit system voice" });
+      const gate = ownerGate(identity, ownerId, existing.Item);
+      if (gate) return deny(gate);
 
       await ddb.send(new UpdateCommand({
         TableName: VOICES_TABLE,
@@ -717,8 +786,10 @@ export const handler = async (event) => {
       }));
       if (!existing.Item) return response(404, { error: "Voice not found" });
       if (existing.Item.owner_id === "system") return response(403, { error: "Cannot delete system voice" });
+      const gate = ownerGate(identity, ownerId, existing.Item);
+      if (gate) return deny(gate);
 
-      const ownerId = existing.Item.owner_id;
+      const rowOwnerId = existing.Item.owner_id;
 
       if (existing.Item.provider === "Cartesia") {
         // Cartesia側のボイスも消す（無ければ無視）。控えの音声もS3から削除
@@ -737,7 +808,7 @@ export const handler = async (event) => {
         // ZakiCorp: S3の embedding を削除
         await s3.send(new DeleteObjectCommand({
           Bucket: SPEAKERS_BUCKET,
-          Key: `${ownerId}/speaker_${voiceId}.pt`,
+          Key: `${rowOwnerId}/speaker_${voiceId}.pt`,
         }));
       }
 
@@ -752,9 +823,5 @@ export const handler = async (event) => {
     }
 
     return response(404, { error: "Not found" });
-
-  } catch (err) {
-    console.error("[Error]", err);
-    return response(500, { error: err?.message ?? "Internal server error" });
   }
-};
+}

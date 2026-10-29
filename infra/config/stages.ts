@@ -44,6 +44,23 @@ export interface StageConfig {
    */
   readonly directFunctionUrls: boolean;
   /**
+   * 利用者認証（ロードマップ4、docs/auth.md）。Cognito ユーザープール `toytalker-auth-<環境>` を作り、Lambda が ID トークンを検証する
+   * （backend/shared/auth.mjs）。
+   * - required: トークン無しの要求を 401 で止めるか。本番は true。RnD は false（トークン無しも通し、ログに auth: "none"。
+   *   トークン付きなら本番と同じに検証するので動作確認は RnD でできる）。環境変数 AUTH_REQUIRED で Lambda へ渡す
+   * - domainPrefix: ログイン画面（managed login）のドメイン `<prefix>.auth.<region>.amazoncognito.com`。リージョン内で一意
+   * - google / apple: 外部IdP（Google ログイン、Sign in with Apple）。省略した環境は Cognito の利用者
+   *   （`admin-create-user` で作る試験用）だけでログインできる。ID は公開情報なのでここに書く。秘密（Google のクライアントシークレット、
+   *   Apple の秘密鍵）は Secrets Manager（lib/secrets.ts の IDP_SECRETS）。SSM の ssm-secure は Cognito の IdP に使えない
+   *   （CloudFormation の対応資源に無い。2026-10-29確認）ので、この2件だけ Secrets Manager
+   */
+  readonly auth: {
+    readonly required: boolean;
+    readonly domainPrefix: string;
+    readonly google?: { readonly clientId: string };
+    readonly apple?: { readonly servicesId: string; readonly teamId: string; readonly keyId: string };
+  };
+  /**
    * 消されても戻せる仕組み（ロードマップ10）。AWS Backup で DynamoDB 全テーブルと S3 バケット（speakers・firmware、管理アカウントでは CloudTrail も）を日次で
    * 保管庫 `toytalker-backup-<環境>` に取り、Vault Lock（コンプライアンスモード）で管理者にも root にも消せなくする。
    * `retentionDays` は保管庫の最小保持日数（最大はその+1日）で、ロック確定後は変えられない（変えるなら新しい保管庫）。
@@ -96,6 +113,7 @@ export const stages: Record<StageName, StageConfig> = {
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
     apiDomain: "api-rnd.zakicorp.com",
     directFunctionUrls: true, // 配布機（OTA非対応の旧ファーム）と旧アプリが Function URL を直接呼ぶ間は true。ロードマップ6の書き換え後に false
+    auth: { required: false, domainPrefix: "toytalker-auth-rnd" }, // google / apple は各社側の設定後に足す（docs/auth.md）
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
@@ -115,6 +133,7 @@ export const stages: Record<StageName, StageConfig> = {
     firmwareBucketName: "toytalker-firmware-stg",
     apiDomain: "api-stg.zakicorp.com",
     directFunctionUrls: false, // 新しい環境は最初から CloudFront 経由だけ
+    auth: { required: true, domainPrefix: "toytalker-auth-stg" },
   },
   prd: {
     ...common,
@@ -126,6 +145,7 @@ export const stages: Record<StageName, StageConfig> = {
     firmwareBucketName: "toytalker-firmware-prd",
     apiDomain: "api-prd.zakicorp.com",
     directFunctionUrls: false,
+    auth: { required: true, domainPrefix: "toytalker-auth-prd" },
     // 1ターン = 本文1 + 相槌1、Soniox鍵は3分に1回。家庭のNATの裏に数台いても 5分で300 には届かない。費用燃やしの天井が目的で、精密な値ではない
     apiRateLimitPer5Min: 300,
   },
@@ -139,6 +159,7 @@ export const stages: Record<StageName, StageConfig> = {
     firmwareBucketName: "toytalker-firmware-prd-dg",
     apiDomain: "api-prd-dg.zakicorp.com",
     directFunctionUrls: false,
+    auth: { required: true, domainPrefix: "toytalker-auth-prd-dg" },
     apiRateLimitPer5Min: 300,
   },
 };

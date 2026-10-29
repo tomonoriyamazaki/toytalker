@@ -11,6 +11,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - セキュリティ: [セキュリティ見直し](docs/security-review-2026-10-25.md)
 - ESP32ファーム: [ESP32ファーム](docs/esp32-firmware.md)（状態・ビルド・調査メモ一覧）
 - ZakiCorp TTS（クローンボイス）: [ZakiCorp TTS](docs/zakicorp-tts.md)（状態・所在）、[起動・復旧](docs/tts-boot-recovery.md)（手順）、[バッチエンジン](docs/qwen3-tts-batch-engine-2026-09-12.md)（設計・計測）
+- 利用者認証（Cognito + Google / Apple。ロードマップ4）: [利用者認証](docs/auth.md)（状態・仕組み・各社側の設定・確認の仕方）
 - 原価・課金・前払いポイント制: [原価と課金の考え方](docs/pricing-and-cost-model.md)
 - TTSフォールバックと通知（未実装）: [仕様](docs/tts-fallback-and-notifications.md)。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)
 - MacBookでの開発: [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md)
@@ -32,7 +33,8 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **インフラ**: RnDアカウントのToyTalker資源はCDK（`infra/`）のスタック `ToyTalker-rnd` の管理下。APIキー類の正本はSSM `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い）。テーブル名はCDKが配る `TABLE_SUFFIX` から `backend/shared/tables.mjs` で組む。
 - **Lambdaログ**: 会話経路の各Lambdaが1リクエスト1行のJSONを出す（`backend/shared/trace.mjs`）。**会話の文章（発話・返答・検索語・相槌）はログに書かない**（正本は `chat-logs`）。新しいログを足すときも文章を入れない。項目と見方は [infra/README](infra/README.md) の「Lambdaログの見方」。
 - デバイス世代: v1 Raspberry Pi（廃止）、v2 スマホアプリ経由（現行）、v3 ESP32-S3スタンドアロン（現行、アプリ不要で直接AWS通信）。
-- **Lambda 8本**（ディレクトリは `backend/<Lambda名>`）: App用メイン `toytalk-stream-handler-lambda`、ESP32用メイン `toytalk-api-stream-for-esp32-lambda`、相槌 `toytalker-backchannel-for-app-lambda` / `-for-esp32-lambda`、Soniox一時キー発行（ESP32のOTA更新確認も同梱）`toytalk-soniox-stt-lambda`、デバイス登録・ボイス設定・コスト管理・クローンボイス登録 `toytalker-device-setting-lambda`、App用読み上げ `toytalker-tts-only-lambda`、月次運用レポート `toytalker-ops-monthly-lambda`。DynamoDB 8テーブルは `backend/shared/tables.mjs`。
+- **Lambda 8本**（ディレクトリは `backend/<Lambda名>`）: App用メイン `toytalk-stream-handler-lambda`、ESP32用メイン `toytalk-api-stream-for-esp32-lambda`、相槌 `toytalker-backchannel-for-app-lambda` / `-for-esp32-lambda`、Soniox一時キー発行（ESP32のOTA更新確認も同梱）`toytalk-soniox-stt-lambda`、本人（`/me`）・デバイス登録・ボイス設定・コスト管理・クローンボイス登録 `toytalker-device-setting-lambda`、App用読み上げ `toytalker-tts-only-lambda`、月次運用レポート `toytalker-ops-monthly-lambda`。ほかに Cognito の登録前トリガー `toytalker-auth-presignup-lambda`（同じメールの利用者を1人にする）。DynamoDB 9テーブルは `backend/shared/tables.mjs`（`users` は Cognito の sub → owner_id）。
+- **利用者認証**: Cognito の ID トークンを `x-toytalker-token` ヘッダーで送り、Lambda が `backend/shared/auth.mjs` で検証する。本番はトークン必須、RnD はトークン無しも通す（`infra/config/stages.ts` の `auth.required`）。ESP32 はログインせず、本番では登録済みの機器だけ通す。詳細は [利用者認証](docs/auth.md)。
 
 ### コスト記録の方針
 

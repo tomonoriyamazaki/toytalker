@@ -8,6 +8,7 @@ import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
+import { authenticate, authGate, describeAuth } from "../shared/auth.mjs";
 
 // ---- 予備インスタンスの事前ウォームアップ ----
 // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -337,6 +338,14 @@ export const handler = async (event, context) => {
     if (body.warmup) return { statusCode: 200, body: "warm" };  // EventBridgeウォームアップping
     trace = startTrace("backchannel", { event, context, t0: start });
     trace.mark("secrets");
+    // 本人確認（backend/shared/auth.mjs、docs/auth.md）。本番はトークン必須、RnD はトークン無しも通す。相槌は本人の owner_id を使わない
+    const identity = await authenticate(event);
+    trace.set(describeAuth(identity));
+    const denied = authGate(identity);
+    if (denied) {
+      trace.set({ status: denied.statusCode, reason: denied.error });
+      return { statusCode: denied.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: denied.error }) };
+    }
     prewarmSpareInstance();  // 処理中に予備インスタンスを温める（同時2人目対策）
     const partialText = body.partial_text ?? "";
     const characterId = body.character_id ?? null;

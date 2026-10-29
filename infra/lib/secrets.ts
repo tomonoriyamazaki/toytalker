@@ -24,6 +24,17 @@ export const OPTIONAL_SECRETS = {
   ANTHROPIC_ADMIN_KEY: "/toytalker/anthropic-admin-key",
 } as const;
 
+/**
+ * 外部IdP（ロードマップ4）の秘密。この2件だけ Secrets Manager（名前は全環境で同じ、値はアカウントごと）。
+ * Cognito の IdP は deploy 時に値が要り、SSM の ssm-secure は CloudFormation が Cognito に対応していないため、
+ * `{{resolve:secretsmanager:…}}`（全資源で使える。値はテンプレートに残らない）で渡す。登録は docs/auth.md。
+ * 該当環境の stages.ts に google / apple が無ければ参照しない（無くても deploy できる）。
+ */
+export const IDP_SECRETS = {
+  GOOGLE_OAUTH_CLIENT_SECRET: "toytalker/google-oauth-client-secret",
+  APPLE_SIGNIN_PRIVATE_KEY: "toytalker/apple-signin-private-key",
+} as const;
+
 export type RequiredSecretName = keyof typeof REQUIRED_SECRETS;
 export type OptionalSecretName = keyof typeof OPTIONAL_SECRETS;
 export type SecretName = RequiredSecretName | OptionalSecretName;

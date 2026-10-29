@@ -1,9 +1,9 @@
 #!/bin/bash
 # CDKのバンドル（esbuild）は各Lambdaディレクトリの node_modules から依存を解決する。
-# 新しいマシンや clone 直後はこれを1回実行する。
+# 新しいマシンや clone 直後はこれを1回実行する。shared/ は共通モジュールの依存（aws-jwt-verify 等）。
 set -euo pipefail
 cd "$(dirname "$0")/../../backend"
-for d in *-lambda; do
+for d in shared *-lambda; do
   if [ -f "$d/package-lock.json" ]; then
     echo "📦 $d (npm ci)"; (cd "$d" && npm ci --silent)
   elif [ -f "$d/package.json" ] && grep -q '"dependencies": {[^}]' "$d/package.json"; then

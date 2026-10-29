@@ -13,6 +13,7 @@ import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
+import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -292,7 +293,7 @@ async function resolveVoiceFromDynamo(voiceId) {
   try {
     const res = await ddb.send(new GetCommand({ TableName: VOICES_TABLE, Key: { voice_id: voiceId } }));
     if (!res.Item) return null;
-    return { provider: res.Item.provider, vendorId: res.Item.vendor_id };
+    return { provider: res.Item.provider, vendorId: res.Item.vendor_id, ownerId: res.Item.owner_id ?? null };
   } catch (e) {
     console.error("[DynamoDB] resolveVoiceFromDynamo error:", e);
     return null;
@@ -442,8 +443,8 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
 
   const text    = typeof body.text === "string" ? body.text.trim() : "";
   const voiceId = typeof body.voice_id === "string" ? body.voice_id : null;
-  const ownerId = typeof body.owner_id === "string" ? body.owner_id : "user_123";
-  trace.set({ source: "app", owner_id: ownerId, voice_id: voiceId, text_chars: [...text].length, ...describeClient(event, body) });
+  let ownerId = typeof body.owner_id === "string" ? body.owner_id : "user_123";
+  trace.set({ source: "app", voice_id: voiceId, text_chars: [...text].length, ...describeClient(event, body) });
 
   const fail = (statusCode, message) => {
     trace.set({ status: statusCode, reason: message.split(":")[0] });
@@ -456,6 +457,15 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
     s.end();
   };
 
+  // 本人確認（backend/shared/auth.mjs、docs/auth.md）。本番はトークン必須、RnD はトークン無しも通す
+  const identity = await authenticate(event);
+  trace.set(describeAuth(identity));
+  const denied = authGate(identity);
+  if (denied) return fail(denied.statusCode, denied.error);
+  // トークン付きなら users テーブルの owner_id（クライアントの自称は無視）
+  ownerId = (await resolveOwner(identity, ownerId)).ownerId ?? "user_123";
+  trace.set({ owner_id: ownerId });
+
   if (!text)    return fail(400, "text is required");
   if (!voiceId) return fail(400, "voice_id is required");
 
@@ -464,6 +474,8 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
   let voice  = VOICE_DEFAULT;
   const v = await resolveVoiceFromDynamo(voiceId);
   if (!v) return fail(404, `voice_id not found: ${voiceId}`);
+  // 他人のクローンボイスは使えない。system 製と所有者なしの行は誰でも
+  if (identity.auth === "user" && v.ownerId && v.ownerId !== "system" && v.ownerId !== ownerId) return fail(403, "not_owner");
   ttsKey = normalizeModelKey(v.provider) ?? TTS_DEFAULT;
   voice  = v.vendorId ?? VOICE_DEFAULT;
   const cfg = TTS_TABLE[ttsKey] ?? TTS_TABLE[TTS_DEFAULT];

@@ -11,6 +11,7 @@ import { Agent, setGlobalDispatcher } from "undici";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
+import { deviceGate } from "../shared/auth.mjs";
 
 // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
 // 会話の間が空くとLLM/TTSへのTLS接続が閉じられ、次の相槌でハンドシェイクからやり直しになる
@@ -82,7 +83,7 @@ async function resolveCharacterFromDevice(deviceId) {
       Key: { device_id: deviceId },
     }));
     const device = deviceRes.Item;
-    if (!device) return null;
+    if (!device) return { registered: false }; // 未登録機。本番では拒む（deviceGate）
 
     if (device.character_id) {
       return resolveCharacter(device.character_id);
@@ -379,8 +380,19 @@ export const handler = async (event, context) => {
     let personalityPrompt = null;
 
     let charConfig = null;
+    // ESP32 はログインしない。本番（AUTH_REQUIRED）では devices テーブルに登録済みの機器だけ通す（docs/auth.md）。
+    // DynamoDB の失敗（null）は従来どおり続ける
+    let registered = false;
     if (deviceId) {
-      charConfig = await resolveCharacterFromDevice(deviceId);
+      const fromDevice = await resolveCharacterFromDevice(deviceId);
+      if (fromDevice?.registered !== false) { registered = true; charConfig = fromDevice; }
+    }
+    {
+      const gate = registered ? null : deviceGate(null);
+      if (gate) {
+        trace.set({ status: gate.statusCode, reason: gate.error });
+        return { statusCode: gate.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: gate.error }) };
+      }
     }
     if (!charConfig && characterId) {
       charConfig = await resolveCharacter(characterId);
