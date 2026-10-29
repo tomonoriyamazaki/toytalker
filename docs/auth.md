@@ -4,7 +4,9 @@
 
 ## いまの状態（2026-10-29）
 
-- **コードは書けた（登録前トリガーによる同一人物のリンク込み）。RnD への deploy とアプリの実機確認が未**。Cognito のユーザープールは deploy で作られる。Google / Apple の IdP は各社側の設定（下の「各社側の設定」）が済んでから `stages.ts` に ID を書いて deploy する。それまでは Cognito の試験用利用者（メール + パスワード、`admin-create-user`）でログインの経路を確かめられる。
+- **RnD へ deploy 済（2026-10-29）。CLI で本物のトークンの経路まで確認済。残りはアプリの実機確認と Google / Apple の設定。** プール `ap-northeast-1_eTtAWro8f`（`toytalker-auth-rnd`）、アプリ用クライアント `j7mibe6i3eop4r2sakbgs52e5`、ログイン画面 `toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com`。Google / Apple の IdP は各社側の設定（下の「各社側の設定」）が済んでから `stages.ts` に ID を書いて deploy する。
+- 確認済（curl、固定ドメイン経由）: トークン無しは 200 で `auth: "none"`。不正トークンは `/me` `/stt-token` `/chat-app` `/read-aloud-app` すべて 401 `invalid_token`（LLM は走らない）。試験用利用者（`exodjp@gmail.com`、Cognito 利用者）のトークンで `GET /me` が users の行を作り（`created: true`、2回目は false）、`/characters` はクエリの `owner_id` を無視して本人分だけ、会話（`/chat-app`）がログイン中に通り（ログ `auth: "user"`、`owner_id` は users の値）、他人のデバイスへの `PUT` は 403 `not_owner`、鍵発行は 200。
+- 注意: `GET /me?owner_id=` で結び付けるのは `u_<uuid>` 形式だけ（curl の `u_authtest` は新しい ID が発行された。アプリの ID は常にこの形式）。アプリ用クライアントは CLI 確認用に `ADMIN_USER_PASSWORD_AUTH`（AWS 資格情報が要る管理者用）も許可している。
 - RnD は `auth.required: false`（トークン無しも通す）。本番は `true`。
 - 小物2つ（脅威モデル#1・#2）: `DELETE /devices/{id}` の `owner_id` 必須化は**済**（トークン無しのときは本文の `owner_id` が無いと 400、違えば 403）。Soniox 一時鍵の寿命短縮は、ロードマップ11の試用（寿命3分・閾値2分）の結果で本番値を決めてから（Lambda の `DEFAULT_KEY_TTL_SEC` は 1時間のまま。短縮は古いファーム・アプリが消えてから）。
 

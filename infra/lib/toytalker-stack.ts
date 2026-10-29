@@ -904,7 +904,8 @@ export class ToyTalkerStack extends cdk.Stack {
     const client = userPool.addClient("AppClient", {
       userPoolClientName: `toytalker-app-${config.stage}`,
       generateSecret: false, // アプリに秘密は置けない。PKCE で守る
-      authFlows: { userSrp: true }, // 試験用の Cognito 利用者を CLI/SDK から試すため。本番の経路は OAuth（下）
+      // 試験用の Cognito 利用者を CLI から試すため（admin-initiate-auth。AWS の資格情報が無いと呼べない）。本番の経路は OAuth（下）
+      authFlows: { userSrp: true, adminUserPassword: true },
       oAuth: {
         flows: { authorizationCodeGrant: true },
         scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],

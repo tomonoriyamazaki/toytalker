@@ -338,6 +338,7 @@ export const handler = async (event, context) => {
     if (body.warmup) return { statusCode: 200, body: "warm" };  // EventBridgeウォームアップping
     trace = startTrace("backchannel", { event, context, t0: start });
     trace.mark("secrets");
+    trace.set(describeClient(event, body)); // 拒否するときもログに出どころを残す
     // 本人確認（backend/shared/auth.mjs、docs/auth.md）。本番はトークン必須、RnD はトークン無しも通す。相槌は本人の owner_id を使わない
     const identity = await authenticate(event);
     trace.set(describeAuth(identity));

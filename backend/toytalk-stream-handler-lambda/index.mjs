@@ -689,6 +689,7 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
     // 切り分け用のログ。1リクエスト1行のJSONで、会話の文章は書かない（backend/shared/trace.mjs）
     const trace = startTrace("turn", { event, context, t0: requestAt });
     trace.mark("secrets");
+    trace.set(describeClient(event, body)); // 拒否するときもログに出どころ（edge / ua / app_version）を残す
     // 拒否応答（401/403）。ストリームを開く前に JSON 1つで返す。LLM も TTS も走らない
     const reject = (gate) => {
       trace.set({ status: gate.statusCode, reason: gate.error });

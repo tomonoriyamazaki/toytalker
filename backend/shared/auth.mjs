@@ -65,9 +65,8 @@ export async function authenticate(event) {
     const payload = await verifier.verify(String(token));
     return { auth: "user", sub: payload.sub, email: typeof payload.email === "string" ? payload.email : null, provider: providerOf(payload), reason: null };
   } catch (e) {
-    // 期限切れ・署名不一致・別プールのトークンなど。メッセージに個人情報は無いが短く切る
-    const msg = String(e?.message ?? e ?? "").slice(0, 80);
-    return { ...none, auth: "invalid", reason: msg || "invalid_token" };
+    // 期限切れ・署名不一致・別プールのトークンなど。ログにはエラー名だけ（JwtExpiredError / JwtInvalidSignatureError / JwtParseError …）
+    return { ...none, auth: "invalid", reason: e?.name || "invalid_token" };
   }
 }
 
