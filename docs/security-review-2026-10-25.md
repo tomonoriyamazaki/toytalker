@@ -92,6 +92,8 @@ aws backup describe-restore-job --restore-job-id <RestoreJobId>                 
 
 訓練の記録:
 - 2026-10-28 PITR: `toytalker-llms` → `toytalker-llms-restore-test`（最新時点）。CREATING から ACTIVE まで約5分、件数5=5、`llm_id` の一覧が一致。削除保護は付かない（`DeletionProtectionEnabled: False`）ことを確認し、削除。
+- 2026-10-29 初回の日次バックアップ: 03:00 JST 開始の11本（DynamoDB 8、S3 3）がすべて COMPLETED（DynamoDB は03:15〜03:27、S3 は03:42〜04:02 に完了）。復旧点12個、期限 12/03。**S3 の復旧点は `BackupSizeInBytes` が 0 と出るが、`describe-backup-job` の `BytesTransferred` はバケットの実サイズと一致する（firmware 4.48MB、speakers 1.75MB、CloudTrail 15.2MB）ので表示上の癖**。
+- 2026-10-29 S3 保管庫から: `toytalker-firmware` の日次復旧点を `start-restore-job --resource-type S3 --metadata DestinationBucketName=toytalker-firmware-restore-test,NewBucket=true,Encrypted=true,EncryptionType=original,CreationToken=<一意な文字列>` で新規バケットへ復元（約4分）。4オブジェクトの ETag・サイズが本番と一致。復元先は公開ブロック・バージョニング・SSE-S3 が付く。本番で本当に消されたときは `DestinationBucketName=toytalker-firmware,NewBucket=true` で同名に戻す（バケットポリシー `FirmwareBucketPolicy` は次の `cdk deploy` で付け直す）。テスト用バケットは確認後に削除。
 - 2026-10-28 保管庫から: `start-backup-job` で `toytalker-llms` をオンデマンドで取り（約3分、447バイト、復旧点は `arn:aws:backup:...`）、`start-restore-job` で `toytalker-llms-restore-test` へ復元（約10分）。件数5=5、`llm_id` 一致。削除。復旧点の削除は Vault Lock で拒否されることになっているが、Claude Code 側の権限で試せなかったので、確認するなら手で `aws backup delete-recovery-point` を打つ（AccessDenied になるのが正常）。
 
 ### (c) URL の固定
