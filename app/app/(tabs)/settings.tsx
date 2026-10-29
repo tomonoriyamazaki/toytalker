@@ -18,7 +18,8 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useEffect, useRef, useState } from "react";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { apiFetch } from "../../lib/api";
-import { authConfigured, signIn, signOut, useAuthSession, type Provider } from "../../lib/auth";
+import { signOut, useAuthSession } from "../../lib/auth";
+import { LoginButtons } from "../../components/LoginButtons";
 import AudioRecord from "react-native-audio-record";
 import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
@@ -1379,17 +1380,6 @@ export default function Settings() {
   // ---- アカウント画面（ログイン / ログアウト。docs/auth.md） ----
   if (screen === "account") {
     const providerLabel = (p: string | null) => (p === "Google" ? "Google" : p === "SignInWithApple" ? "Apple" : p ?? "");
-    const doSignIn = async (provider?: Provider) => {
-      setAuthBusy(true);
-      try {
-        const s = await signIn(provider);
-        if (s) Alert.alert("ログインしました", s.email ?? "");
-      } catch (e: any) {
-        Alert.alert("ログインできませんでした", e?.message ?? String(e));
-      } finally {
-        setAuthBusy(false);
-      }
-    };
     const doSignOut = () => {
       Alert.alert("ログアウトしますか？", "この端末のキャラクター・ログ・デバイスはアカウントに残ります。", [
         { text: "キャンセル", style: "cancel" },
@@ -1423,21 +1413,9 @@ export default function Settings() {
                 <Text style={s.sectionTitle}>未ログイン</Text>
                 <Text style={s.accountSub}>ログインすると、キャラクター・会話ログ・おもちゃの設定が自分のアカウントに結び付き、他の人から見えなくなります。</Text>
                 <Text style={s.accountSub}>ID: {ownerId}</Text>
-                {authConfigured() ? (
-                  <>
-                    <TouchableOpacity style={[s.button, { marginTop: 24 }]} onPress={() => doSignIn("Google")}>
-                      <Text style={s.buttonText}>Google でログイン</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={[s.button, s.buttonDark]} onPress={() => doSignIn("SignInWithApple")}>
-                      <Text style={s.buttonText}>Apple でログイン</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity style={s.linkButton} onPress={() => doSignIn()}>
-                      <Text style={s.linkText}>メールアドレスでログイン（試験用）</Text>
-                    </TouchableOpacity>
-                  </>
-                ) : (
-                  <Text style={[s.accountSub, { marginTop: 24 }]}>このビルドにはログインの設定がありません。</Text>
-                )}
+                <View style={{ marginTop: 24 }}>
+                  <LoginButtons onSignedIn={(sess) => Alert.alert("ログインしました", sess.email ?? "")} />
+                </View>
               </>
             )}
           </ScrollView>
@@ -1525,9 +1503,6 @@ const s = StyleSheet.create({
   // アカウント
   accountLine:             { fontSize: 16, color: "#333" },
   accountSub:              { fontSize: 13, color: "#888", marginTop: 4 },
-  buttonDark:              { backgroundColor: "#111" },
-  linkButton:              { paddingVertical: 10, alignItems: "center" },
-  linkText:                { fontSize: 14, color: "#007AFF" },
   chevron:                 { fontSize: 20, color: "#999" },
   // ヘッダー
   header:                  { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingVertical: 8, gap: 12, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: "#e0e0e0" },

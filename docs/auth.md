@@ -65,6 +65,12 @@
 - 設定タブ「アカウント情報」でログイン / ログアウト。値は `EXPO_PUBLIC_COGNITO_DOMAIN` / `EXPO_PUBLIC_COGNITO_CLIENT_ID`（既定は RnD。クライアント ID は deploy 後に `app/lib/auth.ts` の既定値へ書く）。
 - 未ログインでも RnD では今までどおり使える。本番向けビルドでは 401 になるので、ログイン必須の導線（起動時にアカウント画面へ）は本番の前に足す。
 
+### アプリの実機確認で分かったこと（2026-10-29）
+
+- 試験用利用者でのログインは通った。ただし CLI の確認で先に同じ利用者へ別の `owner_id` を結び付けていたため、アプリの端末 ID がそれに差し替わり、選択中だったキャラクターが「他人のもの」になって本文が 403（相槌だけ鳴った）。users の行は手で元の `owner_id` に戻した。
+- 直したこと: (a) 起動時にログイン済みなら `GET /me` で `owner_id` を揃える（`syncAccount`）、(b) 選択中のキャラクターが一覧に無ければ既定に戻す（他人のキャラクターを見せない）、(c) 本文が 401/403 のとき画面に理由を出す、(d) 相槌Lambdaも所有者確認（users を読むだけ）、(e) 最初の画面にログインボタン（`components/LoginButtons.tsx`。RnD は「ログインせずに使う」も出す。本番は `/me` の `auth_required` が true なので出ない）。
+- 本番でも「別の端末で先にログインしていた人」は同じ経路を通る（端末の ID はサーバーの値に揃い、ログイン前にその端末で作ったデータは引き継がれない）。
+
 ## 各社側の設定（ユーザーの操作）
 
 リダイレクト先はどちらも `https://<AuthDomain>/oauth2/idpresponse`（`cdk deploy` の出力 `AuthDomain`。RnD は `https://toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com/oauth2/idpresponse`）。

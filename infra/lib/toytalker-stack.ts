@@ -246,7 +246,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/backchannel-app" },
     warm: true,
     selfWarm: true,
-    readTables: ["characters", "voices"],
+    readTables: ["characters", "voices", "users"], // users は他人のキャラクターを使わせないための所有者確認（読むだけ）
     readWriteTables: [],
   },
   {

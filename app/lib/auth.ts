@@ -182,6 +182,7 @@ async function linkAccount(idToken: string): Promise<void> {
     const local = await getStoredOwnerId();
     const res = await fetch(`${API_BASE_URL}/me?owner_id=${encodeURIComponent(local ?? "")}`, { headers: { [TOKEN_HEADER]: idToken } });
     const me = await res.json();
+    if (typeof me?.auth_required === "boolean") authRequired = me.auth_required;
     if (res.ok && typeof me?.owner_id === "string" && me.owner_id !== local) {
       console.log("[auth] owner_id replaced by server:", me.owner_id);
       await setOwnerId(me.owner_id);
@@ -189,6 +190,29 @@ async function linkAccount(idToken: string): Promise<void> {
   } catch (e) {
     console.warn("[auth] link failed:", (e as Error)?.message);
   }
+}
+
+/**
+ * 起動時に呼ぶ。ログイン済みなら GET /me で owner_id をサーバーと揃える（別の端末で先にログインしていた、運用で付け替えた、など）。
+ * 未ログインなら何もしない
+ */
+export async function syncAccount(): Promise<void> {
+  const token = await getIdToken();
+  if (token) await linkAccount(token);
+}
+
+let authRequired: boolean | null = null;
+/** この環境がログイン必須か（/me の auth_required。本番 true、RnD false）。取れなければ false 扱い（RnD と同じ振る舞い） */
+export async function getAuthRequired(): Promise<boolean> {
+  if (authRequired !== null) return authRequired;
+  try {
+    const res = await fetch(`${API_BASE_URL}/me`);
+    const me = await res.json();
+    authRequired = typeof me?.auth_required === "boolean" ? me.auth_required : res.status === 401;
+  } catch {
+    authRequired = false;
+  }
+  return authRequired ?? false;
 }
 
 /** ログアウト。リフレッシュトークンを失効させ、端末のセッションを消す。Cognito 側のログイン状態（ブラウザの cookie）も消す */

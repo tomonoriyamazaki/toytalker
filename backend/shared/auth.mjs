@@ -144,6 +144,22 @@ export async function resolveOwner(identity, claimedOwnerId) {
   }
 }
 
+/**
+ * 読むだけの版（相槌Lambdaが使う。users テーブルに行を作らない）。auth "user" で行が無ければ ownerId は null
+ */
+export async function lookupOwner(identity, claimedOwnerId) {
+  const claimed = typeof claimedOwnerId === "string" && claimedOwnerId ? claimedOwnerId : null;
+  if (identity.auth !== "user") return { ownerId: claimed, user: null };
+  const row = await findBySub(identity.sub);
+  return { ownerId: row?.owner_id ?? null, user: row };
+}
+
+/** 行の所有者が本人か system か（キャラクター・ボイスを使ってよいか）。トークン無しのときは見ない */
+export function canUse(identity, ownerId, rowOwnerId) {
+  if (identity.auth !== "user") return true;
+  return !rowOwnerId || rowOwnerId === "system" || rowOwnerId === ownerId;
+}
+
 /** ログイン時刻を記す（設定Lambdaの GET /me だけが呼ぶ。失敗しても要求は通す） */
 export async function touchLogin(sub) {
   try {

@@ -8,7 +8,7 @@ import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
-import { authenticate, authGate, describeAuth } from "../shared/auth.mjs";
+import { authenticate, authGate, describeAuth, lookupOwner, canUse } from "../shared/auth.mjs";
 
 // ---- 予備インスタンスの事前ウォームアップ ----
 // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -77,6 +77,7 @@ async function resolveCharacter(characterId) {
       provider: voiceRes.Item.provider,
       vendorId: voiceRes.Item.vendor_id,
       personalityPrompt,
+      ownerId: charRes.Item.owner_id ?? null,
     };
   } catch (e) {
     console.error("[resolveCharacter] error:", e);
@@ -339,7 +340,7 @@ export const handler = async (event, context) => {
     trace = startTrace("backchannel", { event, context, t0: start });
     trace.mark("secrets");
     trace.set(describeClient(event, body)); // 拒否するときもログに出どころを残す
-    // 本人確認（backend/shared/auth.mjs、docs/auth.md）。本番はトークン必須、RnD はトークン無しも通す。相槌は本人の owner_id を使わない
+    // 本人確認（backend/shared/auth.mjs、docs/auth.md）。本番はトークン必須、RnD はトークン無しも通す
     const identity = await authenticate(event);
     trace.set(describeAuth(identity));
     const denied = authGate(identity);
@@ -366,6 +367,13 @@ export const handler = async (event, context) => {
     if (characterId) {
       const charConfig = await resolveCharacter(characterId);
       if (charConfig) {
+        // 他人のキャラクター（声・人格）は使えない。本文Lambdaと同じ判定（system 製は誰でも）
+        const who = await lookupOwner(identity, undefined);
+        trace.set({ owner_id: who.ownerId });
+        if (!canUse(identity, who.ownerId, charConfig.ownerId)) {
+          trace.set({ status: 403, reason: "not_owner" });
+          return { statusCode: 403, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: "not_owner" }) };
+        }
         const ttsKey = normalizeModelKey(charConfig.provider) ?? TTS_DEFAULT;
         const cfg = TTS_TABLE[ttsKey] ?? TTS_TABLE[TTS_DEFAULT];
         ttsVendor = cfg.ttsVendor;

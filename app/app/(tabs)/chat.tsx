@@ -213,7 +213,17 @@ export default function Chat() {
         try {
           const res = await apiFetch(`/characters?owner_id=${encodeURIComponent(ownerId)}`);
           const data = await res.json();
-          setCharacters(data.characters ?? []);
+          const list: CharacterItem[] = data.characters ?? [];
+          setCharacters(list);
+          // 選択中のキャラクターが一覧に無い（ログインで owner_id が変わった、消された等）なら既定に戻す。
+          // 他人のキャラクターを使い続けさせない（本文Lambdaは 403 で拒むが、名前と声が画面に残るのを防ぐ。docs/auth.md）
+          const cur = selectedCharacterRef.current;
+          if (cur.character_id !== "default" && !list.some((c) => c.character_id === cur.character_id)) {
+            const def: CharacterItem = { character_id: "default", name: "トイトーカー", owner_id: "system" };
+            setSelectedCharacter(def);
+            selectedCharacterRef.current = def;
+            AsyncStorage.removeItem("selectedCharacter");
+          }
         } catch {}
       })();
     }, [ownerId])
@@ -1201,6 +1211,18 @@ export default function Chat() {
       };
 
       xhr.onload = () => {
+        if (xhr.status >= 400) {
+          // 認証・所有者確認で拒まれた（docs/auth.md）。無言にせず理由を出す
+          let reason = "";
+          try { reason = JSON.parse(xhr.responseText || "{}").error ?? ""; } catch {}
+          const msg = reason === "login_required" ? "ログインが必要です。設定のアカウント情報からログインしてください。"
+            : reason === "invalid_token" ? "ログインの期限が切れました。設定のアカウント情報からログインし直してください。"
+            : reason === "not_owner" ? "このキャラクターは使えません（別のアカウントのものです）。キャラクターを選び直してください。"
+            : `会話を始められませんでした（${xhr.status}${reason ? " " + reason : ""}）。`;
+          setLog((L) => [...L, msg]);
+          sendingRef.current = false;
+          return;
+        }
         const text = xhr.responseText || "";
         const tail = text.slice(lastIndex);
         if (tail) processChunk(tail);
