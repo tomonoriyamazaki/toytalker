@@ -26,7 +26,10 @@
   - eas.jsonの修正               ：ビルドのprofileを設定する。development = 実機検証1、preview = 実機検証2、testflight = TestFlight用で今回は設定。3つ作ったが、正直、preview = testflight用でよかった
 - 実機検証1      ：これがメイン。マイクなどのiPhoneの機能を使うために必要。PC側でのサービス起動が必要だが、毎回buildしないで済むので素早く検証できる
   - eas build --platform ios --profile development    ：ビルド。10分以上かかる。ネイティブ系やapp.jsonの変更がある場合は都度buildする。jsコードなどの場合は不要。QRコードが発行されるのでそこからダウンロードする。
-  - npx expo start --dev-client --host tunnel  ：このコマンドでサービスが立ち上がる。起動中の間だけアプリを利用できる。QRを読み込んでアプリを利用する
+  - npx expo start --dev-client --tunnel  ：このコマンドでサービスが立ち上がる。起動中の間だけアプリを利用できる。初回だけQRを読み込む
+    - 必ず --tunnel 付きで起動する。tunnel なしだと URL が 192.168.x.x の LAN アドレスになり、自宅Wi-Fi以外から繋がらない。tunnel だと Expo 管理の *.exp.direct の公開URLになるので、キャリア回線や出先からも同じ dev client で繋がる（PCはスリープ無効のまま起動しっぱなしにする）
+    - tunnel の URL はプロジェクトの場所と Expo アカウント名から決まるので、expo start を再起動しても同じ。2回目以降は dev client の「Recently opened」から繋がり、QRの再読み込みは不要。読み直すのは dev client をビルドし直したとき（新しいアプリにURLの記憶が無い）だけ
+    - ここで使う ngrok は Expo 社が用意した専用経路で、自分の ngrok アカウントや TTS 配信（Cloudflare）とは無関係
 - 実機検証2       ：実質不要。PC側でサービス起動（expo start）しなくてもアプリ検証できる。でもjsコードを修正したら毎回buildしないといけないのでほぼ使わない。ここで検証せずにtestflightへ登録でok
   - eas build --platform ios --profile preview    ：ビルド。10分以上かかる。QRコードが発行されるので、ダウンロードすれば利用可能
 - TestFlight    ：iOSアプリとして登録する前段階の検証サイト。ここにアップしたら、URLが発行できるようになる。これも初回手続きが面倒
