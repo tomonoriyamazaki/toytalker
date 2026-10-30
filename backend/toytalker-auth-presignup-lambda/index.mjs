@@ -23,20 +23,25 @@ export const handler = async (event) => {
     if (event.triggerSource !== "PreSignUp_ExternalProvider") return event; // 試験用の Cognito 利用者（admin-create-user）は対象外
 
     const email = event.request?.userAttributes?.email;
+    // IdP が検証したと言うメールだけで結ぶ（lib/toytalker-stack.ts の attributeMapping で email_verified を写している）
+    const verified = String(event.request?.userAttributes?.email_verified) === "true";
     const sep = String(event.userName ?? "").indexOf("_");
     const providerKey = sep > 0 ? event.userName.slice(0, sep).toLowerCase() : "";
     const providerUserId = sep > 0 ? event.userName.slice(sep + 1) : "";
     const providerName = PROVIDER_NAMES[providerKey];
     log.provider = providerName ?? providerKey;
     if (!email || !providerName || !providerUserId) { log.skip = "no_email_or_provider"; return event; }
+    if (!verified) { log.skip = "email_not_verified"; return event; }
 
     const res = await cognito.send(new ListUsersCommand({
       UserPoolId: event.userPoolId,
       Filter: `email = "${email.replace(/"/g, '\\"')}"`,
       Limit: 10,
     }));
-    // 自分自身（まだ作られていない）は出ない。複数いれば一番古い利用者へ
-    const candidates = (res.Users ?? []).filter((u) => u.Username !== event.userName)
+    // 自分自身（まだ作られていない）は出ない。複数いれば一番古い利用者へ。
+    // 結び付け先も検証済みのメールの利用者だけ（未検証のメールで先に作られた利用者に、本人が後から吸い込まれないように）
+    const isVerified = (u) => u.Attributes?.find((a) => a.Name === "email_verified")?.Value === "true";
+    const candidates = (res.Users ?? []).filter((u) => u.Username !== event.userName && isVerified(u))
       .sort((a, b) => new Date(a.UserCreateDate) - new Date(b.UserCreateDate));
     const existing = candidates[0];
     if (!existing) { log.skip = "no_existing_user"; return event; }

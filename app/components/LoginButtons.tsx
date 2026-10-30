@@ -1,11 +1,14 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ActivityIndicator, Alert, StyleSheet, Text, TouchableOpacity, View } from "react-native";
-import { authConfigured, signIn, type Provider, type Session } from "../lib/auth";
+import { authConfigured, getLastProvider, signIn, type Provider, type Session } from "../lib/auth";
+
+const PROVIDER_LABELS: Record<string, string> = { Google: "Google", SignInWithApple: "Apple", Cognito: "メールアドレス" };
 
 /**
  * ログインのボタン一式（docs/auth.md）。最初の画面（app/index.tsx）と設定タブのアカウント画面で共用する。
  * Google / Apple の IdP が未設定の間は、ボタンを押しても Cognito の画面でエラーになるので、試験用のメールログインも並べる。
  * showSkip は「ログインせずに使う」（トークン無しを通す環境 = RnD だけ。本番は出さない）
+ * 前回ログインに使った方法を上に出す（Google と Apple はメールが違うと別人になるので、違うほうで入らないように）
  */
 export function LoginButtons({ onSignedIn, onSkip, showSkip }: {
   onSignedIn?: (s: Session) => void;
@@ -13,6 +16,8 @@ export function LoginButtons({ onSignedIn, onSkip, showSkip }: {
   showSkip?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
+  const [last, setLast] = useState<string | null>(null);
+  useEffect(() => { getLastProvider().then(setLast); }, []);
   const doSignIn = async (provider?: Provider) => {
     setBusy(true);
     try {
@@ -28,6 +33,7 @@ export function LoginButtons({ onSignedIn, onSkip, showSkip }: {
   if (!authConfigured()) return <Text style={s.note}>このビルドにはログインの設定がありません。</Text>;
   return (
     <View style={s.wrap}>
+      {last && PROVIDER_LABELS[last] ? <Text style={s.last}>前回は {PROVIDER_LABELS[last]} でログインしました</Text> : null}
       <TouchableOpacity style={[s.button, s.google]} onPress={() => doSignIn("Google")}>
         <Text style={s.buttonText}>Google でログイン</Text>
       </TouchableOpacity>
@@ -55,4 +61,5 @@ const s = StyleSheet.create({
   link:       { paddingVertical: 10, alignItems: "center" },
   linkText:   { fontSize: 14, color: "#007AFF" },
   note:       { fontSize: 13, color: "#888", textAlign: "center" },
+  last:       { fontSize: 14, color: "#333", textAlign: "center" },
 });

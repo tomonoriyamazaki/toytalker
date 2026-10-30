@@ -895,6 +895,7 @@ export class ToyTalkerStack extends cdk.Stack {
         scopes: ["email", "name"],
         attributeMapping: {
           email: cognito.ProviderAttribute.APPLE_EMAIL,
+          emailVerified: cognito.ProviderAttribute.APPLE_EMAIL_VERIFIED, // 登録前トリガーが見る（未検証のメールでは結ばない）
           fullname: cognito.ProviderAttribute.APPLE_NAME,
         },
       }));

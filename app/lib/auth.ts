@@ -1,3 +1,4 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as AuthSession from "expo-auth-session";
 import * as SecureStore from "expo-secure-store";
 import { useEffect, useState } from "react";
@@ -19,6 +20,8 @@ export const COGNITO_CLIENT_ID = process.env.EXPO_PUBLIC_COGNITO_CLIENT_ID ?? "j
 export const TOKEN_HEADER = "x-toytalker-token";
 const REDIRECT_URI = "toytalk://auth/callback"; // app.json の scheme。CDK の callbackUrls と同じ
 const SESSION_KEY = "auth_session";
+/** 前回ログインに使った方法。ログアウトしても消さない（Google と Apple で別人になるのを防ぐ案内用。docs/auth.md） */
+const LAST_PROVIDER_KEY = "auth_last_provider";
 const REFRESH_MARGIN_MS = 60 * 1000;
 
 const discovery: AuthSession.DiscoveryDocument = {
@@ -176,8 +179,14 @@ export async function signIn(provider?: Provider): Promise<Session | null> {
   const next = toSession(token);
   if (!next) throw new Error("トークンを受け取れませんでした");
   await save(next);
+  await AsyncStorage.setItem(LAST_PROVIDER_KEY, provider ?? "Cognito").catch(() => {});
   await linkAccount(next.idToken);
   return next;
+}
+
+/** 前回ログインに使った方法（"Google" / "SignInWithApple" / "Cognito"）。まだ一度もログインしていなければ null */
+export async function getLastProvider(): Promise<string | null> {
+  return AsyncStorage.getItem(LAST_PROVIDER_KEY).catch(() => null);
 }
 
 /** GET /me でアカウントの owner_id を受け取り、セッションに持つ（初回は Lambda が users の行を作る）。失敗しても例外にしない */
