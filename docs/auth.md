@@ -4,7 +4,7 @@
 
 ## いまの状態（2026-10-30）
 
-- **RnD へ deploy 済（2026-10-29）。CLI で本物のトークンの経路まで確認済。残りはアプリの実機確認と Google / Apple の設定。** プール `ap-northeast-1_eTtAWro8f`（`toytalker-auth-rnd`）、アプリ用クライアント `j7mibe6i3eop4r2sakbgs52e5`、ログイン画面 `toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com`。**Google と Apple の IdP も RnD に deploy 済（2026-10-30）。** Apple は Cognito の転送先（`appleid.apple.com/auth/authorize`）が Apple のサインイン画面を返すところまで curl で確認。実機での Google / Apple のログインは未確認。
+- **RnD へ deploy 済（2026-10-29）。CLI で本物のトークンの経路まで確認済。残りはアプリの実機確認と Google / Apple の設定。** プール `ap-northeast-1_eTtAWro8f`（`toytalker-auth-rnd`）、アプリ用クライアント `j7mibe6i3eop4r2sakbgs52e5`、ログイン画面 `toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com`。**Google と Apple の IdP も RnD に deploy 済（2026-10-30）。** Apple は Cognito の転送先（`appleid.apple.com/auth/authorize`）が Apple のサインイン画面を返すところまで curl で確認。実機で Google / Apple のログインと、同じメールでの結び付き（Apple → 既存の Google 利用者、リンク直後の自動再試行込み）を確認済み（2026-10-30）。
 - 確認済（curl、固定ドメイン経由）: トークン無しは 200 で `auth: "none"`。不正トークンは `/me` `/stt-token` `/chat-app` `/read-aloud-app` すべて 401 `invalid_token`（LLM は走らない）。試験用利用者（`exodjp@gmail.com`、Cognito 利用者）のトークンで `GET /me` が users の行を作り（`created: true`、2回目は false）、`/characters` はクエリの `owner_id` を無視して本人分だけ、会話（`/chat-app`）がログイン中に通り（ログ `auth: "user"`、`owner_id` は users の値）、他人のデバイスへの `PUT` は 403 `not_owner`、鍵発行は 200。
 - アプリ用クライアントは CLI 確認用に `ADMIN_USER_PASSWORD_AUTH`（AWS 資格情報が要る管理者用）も許可している。
 - RnD は `auth.required: false`（トークン無しも通す）。本番は `true`。
@@ -117,7 +117,6 @@ RnD の Apple は 2026-10-30 に設定済み: App ID `com.zakicorp.toytalk`（De
 
 ## 残り
 
-- 実機で Google / Apple のログイン（両方とも IdP は deploy 済、2026-10-30）。同じメールで両方に入って Cognito 上で1人になること（登録前トリガーのリンクと、リンク直後のアプリの自動再試行）も見る。
 - 別人になった人の救済（前払いポイント制の前に決める。2026-10-30）: 最初は運用で手作業で結ぶ（`AdminLinkProviderForUser`。吸収される側の利用者は先に消す必要がある）。利用者が増えたら設定画面に「ログイン方法を追加」（ログイン中にもう一方へログインして結ぶ。メールに頼らないので非公開メールや LINE も救える）。決めること: (a) 自分でまとめられるのは吸収される側が空（ポイント0・購入履歴なし）のときだけ、両方に残高があれば問い合わせで手作業、(b) 登録特典を配るなら移せない、(c) 手作業でも**メールを根拠にしない**（本人に両方のアカウントでログインしてもらって確かめる。未検証のメールを名乗った問い合わせで他人のアカウントとまとめないため）。ポイントは `owner_id` に付ける。
 - **アカウント整理はあとで設計し直す**（2026-10-30、ユーザーの希望）。決めること: 利用者がどう操作してアカウントとポイントをまとめるか（画面の流れ）、両方にポイントがあるときどうなるか（合算するか、問い合わせか）。材料: (1) 自動でまとまるのは「2つ目のログイン方法で初めて入った瞬間」だけで、両方のアカウントが一度できると後からメールが一致してもまとまらない（2026-10-30の実機。Apple を非公開で作ったあと共有に変えて入り直しても、Apple は同じ sub で戻るので登録前トリガーが動かない。手作業で空の Apple 利用者と users の行を消してから入り直してまとめた）、(2) 安い追加案: ログイン時の `/me` で同じ確認済みメールの別アカウントがあれば「このメールで Google のアカウントもあります」と案内する。
 - アプリの新ビルド（`expo-auth-session` は JS だけなので開発クライアントはそのままでよいが、`app.json` の `scheme` によるコールバックは既存ビルドにある）。
