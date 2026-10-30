@@ -113,7 +113,13 @@ export const stages: Record<StageName, StageConfig> = {
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
     apiDomain: "api-rnd.zakicorp.com",
     directFunctionUrls: true, // 配布機（OTA非対応の旧ファーム）と旧アプリが Function URL を直接呼ぶ間は true。ロードマップ6の書き換え後に false
-    auth: { required: false, domainPrefix: "toytalker-auth-rnd" }, // google / apple は各社側の設定後に足す（docs/auth.md）
+    auth: {
+      required: false,
+      domainPrefix: "toytalker-auth-rnd",
+      // Google Cloud の OAuth クライアント（ウェブ アプリケーション、2026-10-30）。シークレットは Secrets Manager（lib/secrets.ts）
+      google: { clientId: "520949921857-mr4fv64ejd5rad8n7mg346466b96impe.apps.googleusercontent.com" },
+      // apple は各社側の設定後に足す（docs/auth.md）
+    },
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {

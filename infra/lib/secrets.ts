@@ -29,6 +29,9 @@ export const OPTIONAL_SECRETS = {
  * Cognito の IdP は deploy 時に値が要り、SSM の ssm-secure は CloudFormation が Cognito に対応していないため、
  * `{{resolve:secretsmanager:…}}`（全資源で使える。値はテンプレートに残らない）で渡す。登録は docs/auth.md。
  * 該当環境の stages.ts に google / apple が無ければ参照しない（無くても deploy できる）。
+ * 中身は JSON 1キー（Google は `{"client_secret":"GOCSPX-…"}`、Apple は `{"private_key":"-----BEGIN PRIVATE KEY-----
+…"}`）。
+ * スマホのコンソールでは平文エディタに貼り付けられず Key/value 入力欄なら貼れるため、この形にそろえた（2026-10-30）。
  */
 export const IDP_SECRETS = {
   GOOGLE_OAUTH_CLIENT_SECRET: "toytalker/google-oauth-client-secret",

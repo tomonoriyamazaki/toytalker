@@ -78,19 +78,22 @@
 **Google**（Google Cloud コンソール → APIs & Services → Credentials → OAuth client ID、種類は「ウェブ アプリケーション」）:
 
 1. 承認済みの JavaScript 生成元に `https://<AuthDomain>`、承認済みのリダイレクト URI に上の `/oauth2/idpresponse` を足す。OAuth 同意画面は外部・公開（審査は scope が `email profile openid` だけなら不要）。
-2. クライアント ID を `stages.ts` の `auth.google.clientId` に書く。クライアントシークレットは Secrets Manager へ:
+2. クライアント ID を `stages.ts` の `auth.google.clientId` に書く。クライアントシークレットは Secrets Manager（東京）へ、JSON 1キーで:
    ```bash
-   aws secretsmanager create-secret --name toytalker/google-oauth-client-secret --secret-string "<値>"   # 2回目以降は put-secret-value
+   aws secretsmanager create-secret --region ap-northeast-1 --name toytalker/google-oauth-client-secret --secret-string '{"client_secret":"<値>"}'   # 2回目以降は put-secret-value
    ```
+   スマホのコンソールで入れるときは、器を作ってから「Edit」→ **Key/value** タブで Key `client_secret`、Value に貼る（平文エディタは iPhone で貼れない）。
+   RnD は 2026-10-30 に設定済み（OAuth 同意画面は Testing、テストユーザー `exodjp@gmail.com`。本番前に Publish）。
 
 **Apple**（Apple Developer → Certificates, Identifiers & Profiles）:
 
 1. App ID（`com.zakicorp.toytalk`）で Sign in with Apple を有効にする。
 2. Services ID（例 `com.zakicorp.toytalk.signin`）を作り、Sign in with Apple を構成: ドメイン `<AuthDomain>`、Return URL は上の `/oauth2/idpresponse`。
 3. Key を作り（Sign in with Apple）、`.p8` を1回だけダウンロードする。Key ID と Team ID を控える。
-4. `stages.ts` の `auth.apple` に `servicesId` / `teamId` / `keyId` を書く。秘密鍵は Secrets Manager へ:
+4. `stages.ts` の `auth.apple` に `servicesId` / `teamId` / `keyId` を書く。秘密鍵（`.p8` の中身全部、改行込み）は Secrets Manager（東京）へ、JSON 1キー（`private_key`）で:
    ```bash
-   aws secretsmanager create-secret --name toytalker/apple-signin-private-key --secret-string file://AuthKey_XXXXXXXXXX.p8
+   python -c "import json,sys; print(json.dumps({'private_key': open(sys.argv[1]).read()}))" AuthKey_XXXXXXXXXX.p8 > key.json
+   aws secretsmanager create-secret --region ap-northeast-1 --name toytalker/apple-signin-private-key --secret-string file://key.json && rm key.json
    ```
 5. App Store の審査基準 4.8: 第三者ログインを置くなら Sign in with Apple も要る。Cognito 経由のウェブ方式でよい。
 

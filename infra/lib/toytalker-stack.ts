@@ -875,7 +875,7 @@ export class ToyTalkerStack extends cdk.Stack {
       idps.push(new cognito.UserPoolIdentityProviderGoogle(this, "GoogleIdp", {
         userPool,
         clientId: config.auth.google.clientId,
-        clientSecretValue: cdk.SecretValue.secretsManager(IDP_SECRETS.GOOGLE_OAUTH_CLIENT_SECRET),
+        clientSecretValue: cdk.SecretValue.secretsManager(IDP_SECRETS.GOOGLE_OAUTH_CLIENT_SECRET, { jsonField: "client_secret" }),
         scopes: ["openid", "email", "profile"],
         attributeMapping: {
           email: cognito.ProviderAttribute.GOOGLE_EMAIL,
@@ -891,7 +891,7 @@ export class ToyTalkerStack extends cdk.Stack {
         clientId: config.auth.apple.servicesId,
         teamId: config.auth.apple.teamId,
         keyId: config.auth.apple.keyId,
-        privateKeyValue: cdk.SecretValue.secretsManager(IDP_SECRETS.APPLE_SIGNIN_PRIVATE_KEY),
+        privateKeyValue: cdk.SecretValue.secretsManager(IDP_SECRETS.APPLE_SIGNIN_PRIVATE_KEY, { jsonField: "private_key" }),
         scopes: ["email", "name"],
         attributeMapping: {
           email: cognito.ProviderAttribute.APPLE_EMAIL,
