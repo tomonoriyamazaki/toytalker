@@ -116,7 +116,9 @@ export async function resolveOwner(identity, claimedOwnerId) {
 
   const ownerId = `u_${randomUUID()}`;
   const now = new Date().toISOString();
-  const item = { sub: identity.sub, owner_id: ownerId, email: identity.email, provider: identity.provider, created_at: now, last_login_at: now };
+  // 持つのは対応と時刻だけ。メールアドレスと「どの会社で入れるか」は Cognito が正本（利用者の email / identities）。
+  // 写しを作ると古くなり（リンクで会社が増える）、個人情報の置き場所も増える（2026-10-30決定）
+  const item = { sub: identity.sub, owner_id: ownerId, created_at: now, last_login_at: now };
   try {
     await ddb.send(new PutCommand({ TableName: USERS_TABLE, Item: item, ConditionExpression: "attribute_not_exists(#s)", ExpressionAttributeNames: { "#s": "sub" } }));
     return { ownerId, user: item, created: true };

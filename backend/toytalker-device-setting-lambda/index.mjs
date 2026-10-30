@@ -173,7 +173,7 @@ async function route(method, path, event, body, identity, who, trace) {
       }
       await touchLogin(identity.sub);
       return response(200, {
-        auth: "user", owner_id: ownerId, email: who.user?.email ?? identity.email, provider: who.user?.provider ?? identity.provider,
+        auth: "user", owner_id: ownerId, email: identity.email, provider: identity.provider, // トークンの値（users には持たない）
         created: who.created, auth_required: AUTH_REQUIRED,
       });
     }

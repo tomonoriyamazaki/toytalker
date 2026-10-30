@@ -28,6 +28,10 @@ export default function Home() {
           <View style={s.wrap}>
             <Image source={require("../assets/images/mascot.png")} style={s.logo} resizeMode="contain" />
             <Text style={s.hint}>タップで会話へ</Text>
+            <Text style={s.account}>
+              {session.email ?? "ログイン中"}
+              {session.provider === "Google" ? "（Google）" : session.provider === "SignInWithApple" ? "（Apple）" : ""}
+            </Text>
           </View>
         </Pressable>
       ) : (
@@ -51,4 +55,5 @@ const s = StyleSheet.create({
   wrap: { width: "100%", alignItems: "center", gap: 16 },
   logo: { width: 280, height: 280 },
   hint: { color: "#888", fontSize: 16 },
+  account: { color: "#aaa", fontSize: 12 },
 });
