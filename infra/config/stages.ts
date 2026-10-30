@@ -118,7 +118,8 @@ export const stages: Record<StageName, StageConfig> = {
       domainPrefix: "toytalker-auth-rnd",
       // Google Cloud の OAuth クライアント（ウェブ アプリケーション、2026-10-30）。シークレットは Secrets Manager（lib/secrets.ts）
       google: { clientId: "520949921857-mr4fv64ejd5rad8n7mg346466b96impe.apps.googleusercontent.com" },
-      // apple は各社側の設定後に足す（docs/auth.md）
+      // Apple Developer の Services ID（Primary App ID は com.zakicorp.toytalk、2026-10-30）。秘密鍵は Secrets Manager（lib/secrets.ts）
+      apple: { servicesId: "com.zakicorp.toytalker.signin", teamId: "89J44WY33V", keyId: "WADH8C78NZ" },
     },
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
