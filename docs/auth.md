@@ -116,5 +116,5 @@
 
 - Google / Apple の設定（上）→ `stages.ts` → deploy → 実機で両方のログイン。
 - アプリの新ビルド（`expo-auth-session` は JS だけなので開発クライアントはそのままでよいが、`app.json` の `scheme` によるコールバックは既存ビルドにある）。
-- 本番向け: トークン盗難の被害を小さくする2つ（「すべての端末からログアウト」= Cognito の `admin-user-global-sign-out` を設定画面か運用手順に、リフレッシュトークンの期限 180日の見直し）。ログイン必須の導線は済（最初の画面、2026-10-29）。ESP32 の登録フロー（ログイン後にしか登録できないことの案内）、製造時のデバイス鍵（[セキュリティ見直し](security-review-2026-10-25.md) の「ファーム側の認証の方針」）。
+- 本番向け: トークン盗難の被害を小さくする2つ（「すべての端末からログアウト」= Cognito の `admin-user-global-sign-out` を設定画面か運用手順に、リフレッシュトークンの期限 180日の見直し）。ログイン画面の独自ドメイン（今は Cognito の `toytalker-auth-<環境>.auth.ap-northeast-1.amazoncognito.com` で、Google / Apple の画面にこのドメインが出る。案は API と同じ形の `auth-<環境>.zakicorp.com`。ACM 証明書（us-east-1）・Cloudflare の CNAME・Cognito の独自ドメインはどれも無料。後から変えても sub は変わらず、Google / Apple のリダイレクト先を書き換えるだけ。2026-10-30、本番で決める）。ログイン必須の導線は済（最初の画面、2026-10-29）。ESP32 の登録フロー（ログイン後にしか登録できないことの案内）、製造時のデバイス鍵（[セキュリティ見直し](security-review-2026-10-25.md) の「ファーム側の認証の方針」）。
 - 前払いポイント制（[原価と課金](pricing-and-cost-model.md) 第11節）は認証の実機確認の後。
