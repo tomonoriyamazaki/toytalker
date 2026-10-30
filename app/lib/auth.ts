@@ -73,7 +73,11 @@ function providerOf(payload: Record<string, unknown>): string | null {
   return "cognito";
 }
 
-function toSession(t: AuthSession.TokenResponse, previous?: Session | null): Session | null {
+/**
+ * used はこのログインで使った方法。結び付いた利用者の ID トークンの identities には Google も Apple も並び、
+ * どちらで入ったかは分からないので、ログインのときに押したボタンを持ち、リフレッシュでは前の値を引き継ぐ
+ */
+function toSession(t: AuthSession.TokenResponse, previous?: Session | null, used?: string): Session | null {
   if (!t.idToken || !t.accessToken) return null;
   const payload = decodePayload(t.idToken);
   const exp = typeof payload.exp === "number" ? payload.exp * 1000 : Date.now() + (t.expiresIn ?? 3600) * 1000;
@@ -83,7 +87,7 @@ function toSession(t: AuthSession.TokenResponse, previous?: Session | null): Ses
     refreshToken: t.refreshToken ?? previous?.refreshToken ?? null,
     expiresAt: exp,
     email: typeof payload.email === "string" ? payload.email : previous?.email ?? null,
-    provider: providerOf(payload),
+    provider: used ?? previous?.provider ?? providerOf(payload),
     ownerId: previous?.ownerId ?? null,
   };
 }
@@ -176,7 +180,7 @@ export async function signIn(provider?: Provider): Promise<Session | null> {
     { clientId: COGNITO_CLIENT_ID, code: result.params.code, redirectUri: REDIRECT_URI, extraParams: { code_verifier: request.codeVerifier ?? "" } },
     discovery,
   );
-  const next = toSession(token);
+  const next = toSession(token, null, provider ?? "cognito");
   if (!next) throw new Error("トークンを受け取れませんでした");
   await save(next);
   await AsyncStorage.setItem(LAST_PROVIDER_KEY, provider ?? "Cognito").catch(() => {});
