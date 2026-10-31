@@ -2,9 +2,9 @@
 
 ロードマップ4の入口。認証の「いまの状態」「仕組み」「各社側の設定手順」「確認の仕方」を持つ。状態が変わったらこの文書を上書きする。設計の経緯は [先送り項目](deferred-items.md) の「ユーザー認証」（2026-09 の設計メモ）と [ロードマップ](roadmap.md) の4（2026-10-29 の方針）。前払いポイント制は認証の後（[原価と課金](pricing-and-cost-model.md) 第11節）。
 
-## いまの状態（2026-10-30）
+## いまの状態（2026-10-31）
 
-- **RnD へ deploy 済（2026-10-29）。CLI で本物のトークンの経路まで確認済。残りはアプリの実機確認と Google / Apple の設定。** プール `ap-northeast-1_eTtAWro8f`（`toytalker-auth-rnd`）、アプリ用クライアント `j7mibe6i3eop4r2sakbgs52e5`、ログイン画面 `toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com`。**Google と Apple の IdP も RnD に deploy 済（2026-10-30）。** Apple は Cognito の転送先（`appleid.apple.com/auth/authorize`）が Apple のサインイン画面を返すところまで curl で確認。実機で Google / Apple のログインと、同じメールでの結び付き（Apple → 既存の Google 利用者、リンク直後の自動再試行込み）を確認済み（2026-10-30）。
+- **RnD へ deploy 済（2026-10-29）。CLI で本物のトークンの経路まで確認済。実機で Google / Apple のログインと結び付きも確認済（2026-10-30）。Google の同意画面は本番へ公開済（2026-10-31）。アプリは TestFlight 0.8.7 で配布済（2026-10-31）。** プール `ap-northeast-1_eTtAWro8f`（`toytalker-auth-rnd`）、アプリ用クライアント `j7mibe6i3eop4r2sakbgs52e5`、ログイン画面 `toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com`。**Google と Apple の IdP も RnD に deploy 済（2026-10-30）。** Apple は Cognito の転送先（`appleid.apple.com/auth/authorize`）が Apple のサインイン画面を返すところまで curl で確認。実機で Google / Apple のログインと、同じメールでの結び付き（Apple → 既存の Google 利用者、リンク直後の自動再試行込み）を確認済み（2026-10-30）。
 - 確認済（curl、固定ドメイン経由）: トークン無しは 200 で `auth: "none"`。不正トークンは `/me` `/stt-token` `/chat-app` `/read-aloud-app` すべて 401 `invalid_token`（LLM は走らない）。試験用利用者（`exodjp@gmail.com`、Cognito 利用者）のトークンで `GET /me` が users の行を作り（`created: true`、2回目は false）、`/characters` はクエリの `owner_id` を無視して本人分だけ、会話（`/chat-app`）がログイン中に通り（ログ `auth: "user"`、`owner_id` は users の値）、他人のデバイスへの `PUT` は 403 `not_owner`、鍵発行は 200。
 - アプリ用クライアントは CLI 確認用に `ADMIN_USER_PASSWORD_AUTH`（AWS 資格情報が要る管理者用）も許可している。
 - RnD は `auth.required: false`（トークン無しも通す）。本番は `true`。
@@ -77,7 +77,7 @@
 
 **Google**（Google Cloud コンソール → APIs & Services → Credentials → OAuth client ID、種類は「ウェブ アプリケーション」）:
 
-1. 承認済みの JavaScript 生成元に `https://<AuthDomain>`、承認済みのリダイレクト URI に上の `/oauth2/idpresponse` を足す。OAuth 同意画面は外部。公開（Publish）には Branding ページの入力が要り、アプリのホームページとプライバシーポリシーの URL（承認済みドメイン上。zakicorp.com を Search Console で所有確認＝Cloudflare に TXT を1本）が必須。scope が `email profile openid` だけなら審査は不要、ロゴを入れるとブランド確認に数日かかることがある。戻り先が amazoncognito.com のままで公開できるかは未確認（だめならログイン画面の独自ドメインで解決）。
+1. 承認済みの JavaScript 生成元に `https://<AuthDomain>`、承認済みのリダイレクト URI に上の `/oauth2/idpresponse` を足す。OAuth 同意画面は外部。公開（Publish）には Branding ページの入力が要り、アプリのホームページとプライバシーポリシーの URL（承認済みドメイン上。zakicorp.com を Search Console で所有確認＝Cloudflare に TXT を1本）が必須。scope が `email profile openid` だけなら審査は不要、ロゴを入れるとブランド確認に数日かかることがある。戻り先が amazoncognito.com のままでも公開できた（2026-10-31）。
 2. クライアント ID を `stages.ts` の `auth.google.clientId` に書く。クライアントシークレットは Secrets Manager（東京）へ、JSON 1キーで:
    ```bash
    aws secretsmanager create-secret --region ap-northeast-1 --name toytalker/google-oauth-client-secret --secret-string '{"client_secret":"<値>"}'   # 2回目以降は put-secret-value
@@ -119,6 +119,5 @@ RnD の Apple は 2026-10-30 に設定済み: App ID `com.zakicorp.toytalk`（De
 
 - 別人になった人の救済（前払いポイント制の前に決める。2026-10-30）: 最初は運用で手作業で結ぶ（`AdminLinkProviderForUser`。吸収される側の利用者は先に消す必要がある）。利用者が増えたら設定画面に「ログイン方法を追加」（ログイン中にもう一方へログインして結ぶ。メールに頼らないので非公開メールや LINE も救える）。決めること: (a) 自分でまとめられるのは吸収される側が空（ポイント0・購入履歴なし）のときだけ、両方に残高があれば問い合わせで手作業、(b) 登録特典を配るなら移せない、(c) 手作業でも**メールを根拠にしない**（本人に両方のアカウントでログインしてもらって確かめる。未検証のメールを名乗った問い合わせで他人のアカウントとまとめないため）。ポイントは `owner_id` に付ける。
 - **アカウント整理はあとで設計し直す**（2026-10-30、ユーザーの希望）。決めること: 利用者がどう操作してアカウントとポイントをまとめるか（画面の流れ）、両方にポイントがあるときどうなるか（合算するか、問い合わせか）。材料: (1) 自動でまとまるのは「2つ目のログイン方法で初めて入った瞬間」だけで、両方のアカウントが一度できると後からメールが一致してもまとまらない（2026-10-30の実機。Apple を非公開で作ったあと共有に変えて入り直しても、Apple は同じ sub で戻るので登録前トリガーが動かない。手作業で空の Apple 利用者と users の行を消してから入り直してまとめた）、(2) 安い追加案: ログイン時の `/me` で同じ確認済みメールの別アカウントがあれば「このメールで Google のアカウントもあります」と案内する。
-- アプリの新ビルド（`expo-auth-session` は JS だけなので開発クライアントはそのままでよいが、`app.json` の `scheme` によるコールバックは既存ビルドにある）。
 - 本番向け: トークン盗難の被害を小さくする2つ（「すべての端末からログアウト」= Cognito の `admin-user-global-sign-out` を設定画面か運用手順に、リフレッシュトークンの期限 180日の見直し）。ログイン画面の独自ドメイン（今は Cognito の `toytalker-auth-<環境>.auth.ap-northeast-1.amazoncognito.com` で、Google / Apple の画面にこのドメインが出る。案は API と同じ形の `auth-<環境>.zakicorp.com`。ACM 証明書（us-east-1）・Cloudflare の CNAME・Cognito の独自ドメインはどれも無料。後から変えても sub は変わらず、Google / Apple のリダイレクト先を書き換えるだけ。2026-10-30、本番で決める）。ログイン必須の導線は済（最初の画面、2026-10-29）。ESP32 の登録フロー（ログイン後にしか登録できないことの案内）、製造時のデバイス鍵（[セキュリティ見直し](security-review-2026-10-25.md) の「ファーム側の認証の方針」）。
 - 前払いポイント制（[原価と課金](pricing-and-cost-model.md) 第11節）は認証の実機確認の後。
