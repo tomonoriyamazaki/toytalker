@@ -77,13 +77,13 @@
 
 **Google**（Google Cloud コンソール → APIs & Services → Credentials → OAuth client ID、種類は「ウェブ アプリケーション」）:
 
-1. 承認済みの JavaScript 生成元に `https://<AuthDomain>`、承認済みのリダイレクト URI に上の `/oauth2/idpresponse` を足す。OAuth 同意画面は外部・公開（審査は scope が `email profile openid` だけなら不要）。
+1. 承認済みの JavaScript 生成元に `https://<AuthDomain>`、承認済みのリダイレクト URI に上の `/oauth2/idpresponse` を足す。OAuth 同意画面は外部。公開（Publish）には Branding ページの入力が要り、アプリのホームページとプライバシーポリシーの URL（承認済みドメイン上。zakicorp.com を Search Console で所有確認＝Cloudflare に TXT を1本）が必須。scope が `email profile openid` だけなら審査は不要、ロゴを入れるとブランド確認に数日かかることがある。戻り先が amazoncognito.com のままで公開できるかは未確認（だめならログイン画面の独自ドメインで解決）。
 2. クライアント ID を `stages.ts` の `auth.google.clientId` に書く。クライアントシークレットは Secrets Manager（東京）へ、JSON 1キーで:
    ```bash
    aws secretsmanager create-secret --region ap-northeast-1 --name toytalker/google-oauth-client-secret --secret-string '{"client_secret":"<値>"}'   # 2回目以降は put-secret-value
    ```
    スマホのコンソールで入れるときは、器を作ってから「Edit」→ **Key/value** タブで Key `client_secret`、Value に貼る（平文エディタは iPhone で貼れない）。
-   RnD は 2026-10-30 に設定済み（OAuth 同意画面は Testing、テストユーザー `exodjp@gmail.com`。本番前に Publish）。
+   RnD は 2026-10-30 に設定済み（OAuth 同意画面は Testing、テストユーザー `exodjp@gmail.com`）。Testing のあいだは、Google でログインするテスターの Gmail を Audience の Test users に足す（上限100人。足していない人には「アクセスがブロックされました」と出る）。Publish はホームページとプライバシーポリシーを作ってから（置き場所は旧デモサイト `toytalk.zakicorp.com` の S3 + CloudFront を作り替え、`toytalker.zakicorp.com` を正にして旧名は転送する方針。旧サイトの中身はバックアップしてから。CDK 管理に入れるか・どのアカウントに置くかは着手時に決める。2026-10-31）。プライバシーポリシーは App Store の申請でも必須なので共用する。
 
 RnD の Apple は 2026-10-30 に設定済み: App ID `com.zakicorp.toytalk`（Description は ToyTalker）で有効化、Services ID `com.zakicorp.toytalker.signin`（Primary App ID は `com.zakicorp.toytalk`）、Key `ToyTalker Sign in`（Key ID `WADH8C78NZ`）、Team ID `89J44WY33V`。Services ID の名前はバンドルIDと揃えなくてよい（アプリとの結び付きは Primary App ID。利用者の sub はチーム単位）。バンドルIDを後で変えるときも古い App ID は消さない。
 
