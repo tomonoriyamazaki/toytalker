@@ -1049,6 +1049,7 @@ export default function Settings() {
         </View>
         <ScrollView contentContainerStyle={s.wrap}>
           {[
+            { ver: "0.8.7", date: "20261031", desc: "ログイン機能を追加（Google / Apple）、アプリ名をToyTalkerに変更、音声認識の準備が時間切れで会話が始まらない問題を修正" },
             { ver: "0.8.6", date: "20260913", desc: "料金にTools項目を追加、Cartesiaのクローンボイス作成に対応" },
             { ver: "0.8.5", date: "20260828", desc: "通信が不安定な環境向けに自動リトライ処理を追加" },
             { ver: "0.8.4", date: "20260811", desc: "デフォルトのボイス/LLMをずんだもん/Geminiに設定" },
