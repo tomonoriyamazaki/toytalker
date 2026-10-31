@@ -834,9 +834,17 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
     let llmStream = createLLMStream(messagesWithSystem);
 
     // segment を送る唯一の経路
+    // 読める文字が無い文（「……！」など）は単独で合成しない。Cartesia は30秒黙って500を返し、再試行込みで約90秒止まる
+    // （2026-10-31再現。「……！どうされましたか。」のように後ろに文があれば通る）。次の文の頭に付けて送り、返答の最後なら捨てる
+    let unspokenCarry = "";
     async function emitSegment(text, { final=false } = {}) {
-      const t = String(text ?? "").trim().replace(/(?<=[\u3000-\u9fff])\s+(?=[\u3000-\u9fff])/g, "");
+      const t = (unspokenCarry + String(text ?? "").trim()).replace(/(?<=[\u3000-\u9fff])\s+(?=[\u3000-\u9fff])/g, "");
+      unspokenCarry = "";
       if (!t) return;
+      if (!/[\p{L}\p{N}]/u.test(t)) {
+        if (!final) unspokenCarry = t;
+        return;
+      }
       const h = sha1(t);
       if (h === lastSegHash) return;     // 同一文は再送しない
       lastSegHash = h;
