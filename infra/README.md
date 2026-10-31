@@ -129,7 +129,7 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 
 ## バックアップと復元（AWS Backup、ロードマップ10）
 
-`config/stages.ts` の `backup: { retentionDays }` がある環境に、保管庫 `toytalker-backup-<環境>`（Vault Lock コンプライアンスモード。確定後は誰にも消せない）と日次計画・ロールを作る（`lib/toytalker-stack.ts` の `createImmutableBackup`）。初回 deploy から3日が猶予で、その間にバックアップの成功と復元を確かめる。復元の手順と鍵の再発行手順は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md) の「消されても戻せる仕組み」。
+`config/stages.ts` の `backup: { retentionDays }` がある環境に、保管庫 `toytalker-backup-<環境>`（Vault Lock コンプライアンスモード。確定後は誰にも消せない）と日次計画・ロールを作る（`lib/toytalker-stack.ts` の `createImmutableBackup`）。初回 deploy から3日が猶予で、その間にバックアップの成功と復元を確かめる。異常（ジョブの失敗、計画の削除・変更、30時間完了ジョブが無い）は月次レポートと同じ SNS トピックへメールが来る（`createBackupAlerts`、ロードマップ12）。復元の手順と鍵の再発行手順は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md) の「消されても戻せる仕組み」。
 
 ```bash
 aws backup list-backup-jobs --by-backup-vault-name toytalker-backup-rnd --query "BackupJobs[].[CreationDate,ResourceType,ResourceName,State]" --output table

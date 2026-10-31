@@ -56,7 +56,9 @@ CDK `infra/lib/toytalker-stack.ts` の `createImmutableBackup`。有効化は `c
 | 前提 | AWS Backup のアカウント設定で DynamoDB の「高度な機能」が有効（2026-10-28確認、`describe-region-settings` の `ResourceTypeManagementPreference.DynamoDB = true`）。無効だとバックアップが DynamoDB 側の管理になり保管庫のロックが効かない |
 | 費用 | データ合計約6MB（chat-logs 5.7MB、S3 4.6MB）。DynamoDB は毎日全量、S3 は差分で、35日分でも数百MB。月数十円 |
 
-効かないもの: バックアップ計画そのものは消せる（消されると翌日から新しい復旧点が増えなくなる。既存の復旧点は35日残る）。計画の有無は月次の点検か AWS Backup のジョブ通知で気づく。アカウント閉鎖は90日の猶予後に保管庫ごと消える。
+効かないもの: バックアップ計画そのものは消せる（消されると翌日から新しい復旧点が増えなくなる。既存の復旧点は35日残る）。計画・選択の削除や変更、ジョブの失敗、30時間完了ジョブが無いことは、すぐメールで知らせる（下の「異常の通知」、ロードマップ12）。アカウント閉鎖は90日の猶予後に保管庫ごと消える。
+
+**異常の通知**（ロードマップ12、`lib/toytalker-stack.ts` の `createBackupAlerts`）: 月次レポートと同じ SNS トピックへメールする。EventBridge ルール5本（ジョブの失敗・中止・期限切れ／復元の失敗／計画・保管庫の変更と削除／計画・選択・保管庫・復旧点を消す／変える API 呼び出し（CloudTrail 経由で、誰がやったかが分かる）／通知の経路のルール・アラームを消す／止める API 呼び出し）と、アラーム `toytalker-backup-missing-<環境>`（保管庫の完了ジョブが30時間0件）。費用はアラームの月 $0.10 だけ。同じアカウントの管理者なら SNS トピックごと消して黙らせられるので、通知は早く気づくための補助で、守りの本体は Vault Lock。
 
 **ロック確定前の3日間にやること**: 初回バックアップの成功を `aws backup list-backup-jobs --by-backup-vault-name toytalker-backup-rnd` で確認し、下の復元訓練（保管庫から）を1回通す。失敗していれば `aws backup delete-backup-vault-lock-configuration --backup-vault-name toytalker-backup-rnd` でロックを外して直す。
 

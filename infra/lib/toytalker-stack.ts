@@ -10,6 +10,7 @@ import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
 import * as events from "aws-cdk-lib/aws-events";
+import * as eventsTargets from "aws-cdk-lib/aws-events-targets";
 import * as scheduler from "aws-cdk-lib/aws-scheduler";
 import * as schedulerTargets from "aws-cdk-lib/aws-scheduler-targets";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
@@ -536,7 +537,7 @@ export class ToyTalkerStack extends cdk.Stack {
       const cloudTrailBucket = config.organizationId
         ? [s3.Bucket.fromBucketName(this, "CloudTrailBucketRef", CLOUDTRAIL_BUCKET_NAME)]
         : [];
-      this.createImmutableBackup(config, Object.values(tables), [speakersBucket, firmwareBucket, ...cloudTrailBucket]);
+      this.createImmutableBackup(config, Object.values(tables), [speakersBucket, firmwareBucket, ...cloudTrailBucket], opsTopic);
     }
 
     // ---- 温めルール（5分ごと、5本へ {"warmup":true}） ----
@@ -723,7 +724,12 @@ export class ToyTalkerStack extends cdk.Stack {
    * - DynamoDB はアカウント設定「高度な機能」が有効（2026-10-28確認）。無効だとバックアップが DynamoDB 側の管理になり保管庫のロックが効かない
    * - 暗号化は AWS 管理キー（aws/backup）。CMK は本番で
    */
-  private createImmutableBackup(config: StageConfig, tables: readonly dynamodb.ITable[], buckets: readonly s3.IBucket[]): void {
+  private createImmutableBackup(
+    config: StageConfig,
+    tables: readonly dynamodb.ITable[],
+    buckets: readonly s3.IBucket[],
+    topic: sns.ITopic,
+  ): void {
     const retention = cdk.Duration.days(config.backup!.retentionDays);
     const vault = new backup.BackupVault(this, "BackupVault", {
       backupVaultName: `toytalker-backup-${config.stage}`,
@@ -767,6 +773,84 @@ export class ToyTalkerStack extends cdk.Stack {
       ],
     });
     new cdk.CfnOutput(this, "BackupRoleArn", { value: role.roleArn, description: "IAM role for restore jobs (pass to start-restore-job --iam-role-arn)" });
+    this.createBackupAlerts(config, vault.backupVaultName, topic);
+  }
+
+  /**
+   * バックアップの異常に気づく通知（ロードマップ12、2026-10-31）。計画・選択は Vault Lock の外なので消せる。消されると翌日から
+   * 復旧点が増えず、既存分は retentionDays で順に消えるので、それまでに気づく必要がある。月次レポートと同じ SNS トピックへメールする。
+   *   - backup-job-failed: バックアップの失敗・中止・期限切れ、復元の失敗（AWS Backup が EventBridge へ出すイベント）
+   *   - backup-changed: 計画・保管庫の変更と削除（同上）
+   *   - backup-api: 計画・選択・保管庫・復旧点を消す／変える API 呼び出し（CloudTrail 経由。誰がやったかが分かる）
+   *   - alert-tampered: 通知の経路（EventBridge ルール・アラーム）を消す／止める API 呼び出し。同じアカウントの管理者なら
+   *     SNS トピックごと消して黙らせられるので、完全ではない（守りの本体は Vault Lock）
+   *   - backup-missing（アラーム）: 保管庫の完了ジョブが30時間0件。計画を消された・止まった・スケジュールが壊れたのを拾う。
+   *     日次 03:00 JST 開始・完了まで最大 startWindow + completionWindow なので、24時間ちょうどだと完了時刻のずれで誤報が出る
+   * EventBridge の AWS イベントのルールは無料、アラームは月 $0.10。CloudTrail 経由のイベントは証跡（toytalker-org、組織全体）が要る。
+   * Vault Lock は通知の設定（ルール・アラーム）を縛らない。
+   */
+  private createBackupAlerts(config: StageConfig, vaultName: string, topic: sns.ITopic): void {
+    const prefix = `ToyTalker ${config.stage}`;
+    const f = (path: string) => events.EventField.fromPath(path);
+    const rule = (id: string, name: string, description: string, eventPattern: events.EventPattern, message: string) =>
+      new events.Rule(this, id, {
+        ruleName: `toytalker-${name}-${config.stage}`,
+        description,
+        eventPattern,
+        targets: [new eventsTargets.SnsTopic(topic, { message: events.RuleTargetInput.fromText(message) })],
+      });
+
+    rule("BackupJobFailedRule", "backup-job-failed", "AWS Backup: backup job failed/aborted/expired", {
+      source: ["aws.backup"],
+      detailType: ["Backup Job State Change"],
+      detail: { state: ["FAILED", "ABORTED", "EXPIRED"] },
+    }, `${prefix}: backup job ${f("$.detail.state")} (${f("$.detail.resourceType")} ${f("$.detail.resourceArn")}): ${f("$.detail.statusMessage")}`);
+    rule("RestoreJobFailedRule", "restore-job-failed", "AWS Backup: restore job failed", {
+      source: ["aws.backup"],
+      detailType: ["Restore Job State Change"],
+      detail: { status: ["FAILED"] },
+    }, `${prefix}: restore job FAILED (${f("$.detail.resourceType")} ${f("$.detail.restoreJobId")}): ${f("$.detail.statusMessage")}`);
+    rule("BackupChangedRule", "backup-changed", "AWS Backup: backup plan or vault modified/deleted", {
+      source: ["aws.backup"],
+      detailType: ["Backup Plan State Change", "Backup Vault State Change"],
+      detail: { state: ["MODIFIED", "DELETED"] },
+    }, `${prefix}: ${f("$.detail-type")} ${f("$.detail.state")} ${f("$.resources[0]")}. If unexpected, run: aws backup list-backup-plans / list-backup-selections`);
+    const apiMessage = `${prefix}: ${f("$.detail.eventName")} by ${f("$.detail.userIdentity.arn")} at ${f("$.detail.eventTime")} (error: ${f("$.detail.errorCode")})`;
+    rule("BackupApiRule", "backup-api", "AWS Backup: API calls that delete or change backup plans, selections, vaults or recovery points", {
+      source: ["aws.backup"],
+      detailType: ["AWS API Call via CloudTrail"],
+      detail: {
+        eventSource: ["backup.amazonaws.com"],
+        eventName: [
+          "DeleteBackupPlan", "UpdateBackupPlan", "DeleteBackupSelection",
+          "DeleteBackupVault", "DeleteBackupVaultLockConfiguration", "PutBackupVaultAccessPolicy", "DeleteBackupVaultAccessPolicy",
+          "DeleteBackupVaultNotifications", "DeleteRecoveryPoint", "UpdateRecoveryPointLifecycle", "DisassociateRecoveryPoint",
+          "StopBackupJob", "UpdateRegionSettings",
+        ],
+      },
+    }, apiMessage);
+    rule("AlertTamperedRule", "alert-tampered", "Rules or alarms deleted/disabled (the backup alert path)", {
+      source: ["aws.events", "aws.monitoring"],
+      detailType: ["AWS API Call via CloudTrail"],
+      detail: { eventName: ["DeleteRule", "DisableRule", "RemoveTargets", "DeleteAlarms", "DisableAlarmActions"] },
+    }, apiMessage);
+
+    new cw.Alarm(this, "BackupMissingAlarm", {
+      alarmName: `toytalker-backup-missing-${config.stage}`,
+      alarmDescription: `${prefix}: no completed backup job in vault ${vaultName} for 30 hours. Check: aws backup list-backup-plans / list-backup-jobs --by-backup-vault-name ${vaultName}`,
+      metric: new cw.Metric({
+        namespace: "AWS/Backup",
+        metricName: "NumberOfBackupJobsCompleted",
+        dimensionsMap: { BackupVaultName: vaultName },
+        statistic: "Sum",
+        period: cdk.Duration.hours(1),
+      }),
+      threshold: 1,
+      evaluationPeriods: 30,
+      datapointsToAlarm: 30,
+      comparisonOperator: cw.ComparisonOperator.LESS_THAN_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.BREACHING, // 完了の無い時間はデータ自体が出ない
+    }).addAlarmAction(new cwActions.SnsAction(topic));
   }
 
   private createTables(tableSuffix: string): Record<TableKey, dynamodb.Table> {
