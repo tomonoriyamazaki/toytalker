@@ -10,6 +10,7 @@
   import { Agent, setGlobalDispatcher } from "undici";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
+  import { recordConsume } from "../shared/wallet.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
   import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { deviceGate } from "../shared/auth.mjs";
@@ -1014,6 +1015,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         // ツール（外部の有料APIを呼ぶものだけ回数課金で記録。無料ツールはLLMトークンに含まれる）
         const toolUsage = [];
         let toolCostTotal = 0;
+        let toolCostUsd = 0;
         for (const [toolName, count] of Object.entries(toolCalls)) {
           const paid = PAID_TOOLS[toolName];
           if (!paid || count <= 0) continue;
@@ -1022,6 +1024,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           await addUsage({ ownerId, deviceId, date, apiType: "tool", provider: paid.provider, model: paid.model, costJpy: c.costJpy, costUsd: c.costUsd, requestCount: count, usdJpyRate: c.usdJpyRate, unitPriceUsd: c.unitPriceUsd, margin: c.margin });
           toolUsage.push({ tool: toolName, provider: paid.provider, requests: count, cost: c.costJpy });
           toolCostTotal += c.costJpy;
+          toolCostUsd += c.costUsd;
         }
 
         await saveLog({
@@ -1031,19 +1034,27 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           role: "assistant", content: textAll.trim(),
           content_type: "text", timestamp: assistantTimestamp, session_id: sessionId,
           llm_provider: llmProvider, llm_model: llmModelId,
-          llm_tokens_in: llmUsage.in, llm_tokens_out: llmUsage.out,
-          tts_provider: cfg.ttsVendor, tts_input_units: ttsInputChars, tts_input_unit_type: "characters",
-          stt_provider: "soniox", stt_input_units: null, stt_input_unit_type: null,
-          tool_usage: toolUsage,
+          tts_provider: cfg.ttsVendor, stt_provider: "soniox",
           duration_ms: Date.now() - requestAt,
           character_id: characterId,
           voice_id: voice,
-          cost_stt: sttCost?.costJpy ?? 0,
-          cost_llm: llmCost?.costJpy ?? 0,
-          tts_fallback: ttsFallbackChars > 0 ? { from: cfg.ttsVendor, to: "sakura", chars: ttsFallbackChars } : null,
-          cost_tts: (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0),
-          cost_tool: toolCostTotal,
-          cost_total: (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0) + toolCostTotal,
+        });
+        // 1ターンの原価は台帳に書き、残高から引く（chat-logs には文章だけ。docs/pricing-and-cost-model.md 11.6）
+        const costTts = (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0);
+        const costTotal = (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + costTts + toolCostTotal;
+        await recordConsume({
+          ownerId, deviceId, timestamp: assistantTimestamp, source: "esp", amountJpy: costTotal,
+          detail: {
+            ref: `session_id#${sessionId}#timestamp#${assistantTimestamp}`, session_id: sessionId,
+            cost_usd: (sttCost?.costUsd ?? 0) + (llmCost?.costUsd ?? 0) + (ttsCostResult?.costUsd ?? 0) + (fallbackCostResult?.costUsd ?? 0) + toolCostUsd,
+            cost_stt: sttCost?.costJpy ?? 0, stt_chars: userMsgChars,
+            cost_llm: llmCost?.costJpy ?? 0, llm_provider: llmProvider, llm_model: llmModelId,
+            llm_tokens_in: llmUsage.in, llm_tokens_out: llmUsage.out,
+            cost_tts: costTts, tts_provider: cfg.ttsVendor, tts_chars: ttsInputChars,
+            tts_fallback: ttsFallbackChars > 0 ? { from: cfg.ttsVendor, to: "sakura", chars: ttsFallbackChars } : null,
+            cost_tool: toolCostTotal, tool_usage: toolUsage,
+            character_id: characterId ?? "default",
+          },
         });
         trace.mark("usage_saved");
       }

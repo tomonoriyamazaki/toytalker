@@ -6,6 +6,7 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanComm
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { getBalance, listLedgerByDate } from "../shared/wallet.mjs";
 import { startTrace, describeClient } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner, ownerGate, touchLogin, AUTH_REQUIRED } from "../shared/auth.mjs";
 
@@ -58,6 +59,18 @@ async function loadPricingCache() {
   } catch (e) {
     console.error("[Pricing] cache load error:", e);
   }
+}
+
+// 台帳の consume 行から日次詳細の内訳を作る（2026-10-31以降。それより前は chat-logs のコスト列）
+function costsFromLedger(row) {
+  const tool = Array.isArray(row.tool_usage) && row.tool_usage.length > 0 ? { cost: row.cost_tool ?? 0, items: row.tool_usage } : null;
+  return {
+    stt: { cost: row.cost_stt ?? 0, characters: row.stt_chars ?? 0 },
+    llm: { cost: row.cost_llm ?? 0, tokens_in: row.llm_tokens_in, tokens_out: row.llm_tokens_out, provider: row.llm_provider, model: row.llm_model },
+    tts: { cost: row.cost_tts ?? 0, characters: row.tts_chars, provider: row.tts_provider, model: row.tts_provider },
+    tool,
+    total: -(Number(row.amount_jpy) || 0),
+  };
 }
 
 function calcCostFromLog(assistantItem, userContent, usdJpyRate) {
@@ -527,9 +540,14 @@ async function route(method, path, event, body, identity, who, trace) {
         console.error("[ExchangeRate] error:", e);
       }
 
+      // 前払いポイントの残高（台帳の合計。段階1は引くだけで、0を下回っても止めない）
+      let balanceJpy = null;
+      try { balanceJpy = await getBalance(ownerId); } catch (e) { console.error("[Wallet] error:", e); }
+
       return response(200, {
         month,
         total_cost: Math.round(totalCost * 1000) / 1000,
+        balance_jpy: balanceJpy == null ? null : Math.round(balanceJpy * 1000) / 1000,
         by_api_type: byApiType,
         by_device: byDevice,
         exchange_rate: exchangeRate,
@@ -598,16 +616,29 @@ async function route(method, path, event, body, identity, who, trace) {
         usdJpyRate = Number(rateResult.Item?.rate) || 150;
       } catch (e) {}
 
-      // user→assistantペアで組み立て（chat-logに保存済みのコストを使用）
+      // 金額は台帳から（ref で chat-logs の返答の行と結ぶ）。台帳が無い古い行は chat-logs のコスト列、それも無ければ計算し直す
+      const ledgerByRef = new Map();
+      for (const row of await listLedgerByDate(ownerId, date)) {
+        if (row.type !== "consume" || !row.ref || (deviceId && row.device_id !== deviceId)) continue;
+        ledgerByRef.set(`${row.device_id}|${row.ref}`, row);
+      }
+
+      // user→assistantペアで組み立て
       const conversations = [];
       let lastUserContent = null;
       for (const item of dayItems) {
         if (item.role === "user") {
           lastUserContent = item.content;
         } else if (item.role === "assistant") {
+          const did = item._device_id ?? item.device_id ?? deviceId;
+          const ledgerKey = `${did}|${item["session_id#timestamp"]}`;
+          const ledgerRow = ledgerByRef.get(ledgerKey);
           const hasCost = item.cost_total != null;
           let stt, llm, tts, tool = null, total;
-          if (hasCost) {
+          if (ledgerRow) {
+            ({ stt, llm, tts, tool, total } = costsFromLedger(ledgerRow));
+            ledgerByRef.delete(ledgerKey);
+          } else if (hasCost) {
             stt = { cost: item.cost_stt ?? 0, characters: lastUserContent?.length ?? 0 };
             llm = { cost: item.cost_llm ?? 0, tokens_in: item.llm_tokens_in, tokens_out: item.llm_tokens_out, provider: item.llm_provider, model: item.llm_model };
             tts = { cost: item.cost_tts ?? 0, characters: item.tts_input_units, provider: item.tts_provider, model: item.tts_provider };
@@ -633,6 +664,21 @@ async function route(method, path, event, body, identity, who, trace) {
           lastUserContent = null;
         }
       }
+
+      // 台帳にあって chat-logs に無いターン（文章だけ消えた。本番の会話保護で保持期間を付けたとき）も金額は出す
+      for (const row of ledgerByRef.values()) {
+        conversations.push({
+          timestamp: row.timestamp,
+          session_id: row.session_id,
+          device_id: row.device_id,
+          device_name: deviceNameMap[row.device_id] ?? null,
+          user_message: null,
+          assistant_message: null,
+          character_id: row.character_id ?? "default",
+          ...costsFromLedger(row),
+        });
+      }
+      conversations.sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
 
       return response(200, { date, conversations });
     }

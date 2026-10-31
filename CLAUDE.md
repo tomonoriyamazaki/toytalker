@@ -34,7 +34,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **インフラ**: RnDアカウントのToyTalker資源はCDK（`infra/`）のスタック `ToyTalker-rnd` の管理下。APIキー類の正本はSSM `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い）。テーブル名はCDKが配る `TABLE_SUFFIX` から `backend/shared/tables.mjs` で組む。
 - **Lambdaログ**: 会話経路の各Lambdaが1リクエスト1行のJSONを出す（`backend/shared/trace.mjs`）。**会話の文章（発話・返答・検索語・相槌）はログに書かない**（正本は `chat-logs`）。新しいログを足すときも文章を入れない。項目と見方は [infra/README](infra/README.md) の「Lambdaログの見方」。
 - デバイス世代: v1 Raspberry Pi（廃止）、v2 スマホアプリ経由（現行）、v3 ESP32-S3スタンドアロン（現行、アプリ不要で直接AWS通信）。
-- **Lambda 8本**（ディレクトリは `backend/<Lambda名>`）: App用メイン `toytalk-stream-handler-lambda`、ESP32用メイン `toytalk-api-stream-for-esp32-lambda`、相槌 `toytalker-backchannel-for-app-lambda` / `-for-esp32-lambda`、Soniox一時キー発行（ESP32のOTA更新確認も同梱）`toytalk-soniox-stt-lambda`、本人（`/me`）・デバイス登録・ボイス設定・コスト管理・クローンボイス登録 `toytalker-device-setting-lambda`、App用読み上げ `toytalker-tts-only-lambda`、月次運用レポート `toytalker-ops-monthly-lambda`。ほかに Cognito の登録前トリガー `toytalker-auth-presignup-lambda`（同じメールの利用者を1人にする）。DynamoDB 9テーブルは `backend/shared/tables.mjs`（`users` は Cognito の sub → owner_id）。
+- **Lambda 8本**（ディレクトリは `backend/<Lambda名>`）: App用メイン `toytalk-stream-handler-lambda`、ESP32用メイン `toytalk-api-stream-for-esp32-lambda`、相槌 `toytalker-backchannel-for-app-lambda` / `-for-esp32-lambda`、Soniox一時キー発行（ESP32のOTA更新確認も同梱）`toytalk-soniox-stt-lambda`、本人（`/me`）・デバイス登録・ボイス設定・コスト管理・クローンボイス登録 `toytalker-device-setting-lambda`、App用読み上げ `toytalker-tts-only-lambda`、月次運用レポート `toytalker-ops-monthly-lambda`。ほかに Cognito の登録前トリガー `toytalker-auth-presignup-lambda`（同じメールの利用者を1人にする）。DynamoDB 11テーブルは `backend/shared/tables.mjs`（`users` は Cognito の sub → owner_id、`wallets` / `wallet-ledger` は前払いポイントの残高と台帳）。
 - **利用者認証**: Cognito の ID トークンを `x-toytalker-token` ヘッダーで送り、Lambda が `backend/shared/auth.mjs` で検証する。本番はトークン必須、RnD はトークン無しも通す（`infra/config/stages.ts` の `auth.required`）。ESP32 はログインせず、本番では登録済みの機器だけ通す。詳細は [利用者認証](docs/auth.md)。
 
 ### コスト記録の方針
@@ -50,7 +50,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **本番に影響する操作（Lambdaデプロイ・AWS設定変更・DynamoDB書き込み）と削除操作は、何をするかを説明してからユーザーの明示的なOKを得て実行する。** 説明と実行を同じターンでやらない。
 - **作業は原則worktreeで行う（1つの作業ツリーに1セッション）。** 依頼を受けたら `.claude/worktrees/<name>` にブランチを切って始め、聞かない。終わったらmainへfast-forwardし、了承を得てworktreeとブランチを消す。CLAUDE.mdなど共有ファイルの大規模整理は1セッションだけで行う。
 - 「コミットして」と言われたらコミットし、そのまま現在のブランチへpushする。PR作成・マージ・ブランチクリーンアップは明示的な指示があるまでやらない。
-- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk synth --context stage=rnd --context nag=true`（cdk-nagの静的点検。指摘ゼロ）→ `npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd`**（資格情報はSSO。CDKが環境変数を上書きするので、手作業で環境変数を変えても次のdeployで戻る）。
+- Lambda関数を修正したら、コミット前にデプロイして動作確認する。**デプロイは `cd infra && npx cdk synth --context stage=rnd --context nag=true`（cdk-nagの静的点検。指摘ゼロ）→ `npx cdk diff --context stage=rnd` で差分を見てから `npx cdk deploy --context stage=rnd ToyTalker-rnd`**（スタックが edge・本体・org の3つあり、名前を付けないと何もせず終わる。edge・org も変えたときは `--all`。資格情報はSSO。CDKが環境変数を上書きするので、手作業で環境変数を変えても次のdeployで戻る）。
 - **Lambdaのデプロイ元はmain。** デプロイ前に `git worktree list` と各ブランチの差分を確認し、本番に出ている版がどのブランチかを特定する（2026-09-13に別worktreeの変更を含まない作業ツリーからデプロイし、数分間本番からCartesiaが消えた）。`cdk diff` で差分が出るLambdaが意図したものだけか、Replaceが無いかを確認する。
 - PowerShellでgitコマンドを実行するとき、`Set-Location` を使わず `git` から直接実行する（パーミッション設定のパターンマッチが効かなくなるため）。
 - ビルド確認と実機確認を区別して報告する。通信・音声・メモリの安定性は、ユーザーによる実機の連続会話試験とログで確認する。

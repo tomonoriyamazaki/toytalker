@@ -12,6 +12,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { recordConsume } from "../shared/wallet.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
 
@@ -420,6 +421,11 @@ async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len }) {
         ownerId, deviceId: "app", date, provider: ttsVendor, model: ttsModel,
         costJpy: cost.costJpy, costUsd: cost.costUsd, ttsCharacters: chars,
         usdJpyRate: cost.usdJpyRate, unitPriceUsd: cost.unitPriceUsd, margin: cost.margin,
+      });
+      // 読み上げも残高から引く（会話ではないので ref は無し。docs/pricing-and-cost-model.md 11.1）
+      await recordConsume({
+        ownerId, deviceId: "app", timestamp: ts, source: "tts", amountJpy: cost.costJpy,
+        detail: { cost_usd: cost.costUsd, cost_tts: cost.costJpy, tts_provider: ttsVendor, tts_chars: chars },
       });
     }
   } catch (e) {

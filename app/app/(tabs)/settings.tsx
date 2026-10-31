@@ -945,6 +945,16 @@ export default function Settings() {
                   <Text style={s.usageTotalAmount}>{formatCost(usageData?.total_cost ?? 0)} 円</Text>
                 </View>
 
+                {/* 前払いポイントの残高（1ポイント=1円。まだ購入・付与が無いので使った分だけマイナスになる） */}
+                {typeof usageData?.balance_jpy === "number" && (
+                  <View style={s.usageBalanceRow}>
+                    <Text style={s.usageBalanceLabel}>ポイント残高</Text>
+                    <Text style={s.usageBalanceValue}>
+                      {usageData.balance_jpy < 0 ? `-${formatCost(-usageData.balance_jpy)}` : formatCost(usageData.balance_jpy)} 円分
+                    </Text>
+                  </View>
+                )}
+
                 {/* デバイス別 */}
                 {Object.keys(byDevice).length > 0 && (
                   <>
@@ -1584,6 +1594,9 @@ const s = StyleSheet.create({
   usageTotalCard:          { backgroundColor: "#f0f7ff", padding: 20, borderRadius: 12, alignItems: "center", borderWidth: 1, borderColor: "#007AFF" },
   usageTotalLabel:         { fontSize: 14, color: "#666" },
   usageTotalAmount:        { fontSize: 32, fontWeight: "800", color: "#007AFF", marginTop: 4 },
+  usageBalanceRow:         { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 12, paddingHorizontal: 4 },
+  usageBalanceLabel:       { fontSize: 14, color: "#666" },
+  usageBalanceValue:       { fontSize: 16, fontWeight: "700", color: "#333" },
   usageApiCard:            { backgroundColor: "#f9f9f9", padding: 14, borderRadius: 10, borderWidth: 1, borderColor: "#e0e0e0" },
   usageApiHeader:          { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   usageApiLabel:           { fontSize: 15, fontWeight: "600", color: "#333" },

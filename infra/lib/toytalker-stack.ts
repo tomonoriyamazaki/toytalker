@@ -127,7 +127,9 @@ type TableKey =
   | "usage"
   | "api-unit-prices"
   | "exchange-rates"
-  | "users";
+  | "users"
+  | "wallets"
+  | "wallet-ledger";
 
 interface FunctionSpec {
   /** 機能名（docs/naming-conventions.md）。新名は `toytalker-<key>-<環境>`、部品IDは PascalCase（chat-app → ChatApp） */
@@ -164,6 +166,10 @@ interface FunctionSpec {
   readonly readWriteTables: readonly TableKey[];
   /** 読み取りに加えて UpdateItem だけ許すテーブル（Put/Delete は許さない） */
   readonly updateTables?: readonly TableKey[];
+  /** PutItem だけ許すテーブル（読み取り・Update・Delete は許さない）。追記だけの台帳に使う */
+  readonly appendTables?: readonly TableKey[];
+  /** GetItem と Query だけ許すテーブル（grantReadData の Scan・ストリームまでは要らないもの） */
+  readonly lookupTables?: readonly TableKey[];
 }
 
 /** 認証トークンを載せるヘッダー（backend/shared/auth.mjs の TOKEN_HEADER、app/lib/api.ts）。Authorization は CloudFront の OAC が上書きするので別名 */
@@ -219,6 +225,9 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     selfWarm: true,
     readTables: ["devices", "characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
     readWriteTables: ["chat-logs", "usage"],
+    // 1ターンの原価を台帳に足し、残高から引く（backend/shared/wallet.mjs）
+    updateTables: ["wallets"],
+    appendTables: ["wallet-ledger"],
   },
   {
     key: "chat-app",
@@ -234,6 +243,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     selfWarm: true,
     readTables: ["characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
     readWriteTables: ["chat-logs", "usage", "users"], // users は初回ログインの行作成（backend/shared/auth.mjs の resolveOwner）
+    updateTables: ["wallets"],
+    appendTables: ["wallet-ledger"],
   },
   {
     key: "backchannel-app",
@@ -298,6 +309,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     // 単価・為替・LLM一覧・会話ログ・使用量は読むだけなので、IAMでも書けないようにする（2026-10-25）
     readTables: ["llms", "chat-logs", "usage", "api-unit-prices", "exchange-rates"],
     readWriteTables: ["devices", "characters", "voices", "users"],
+    lookupTables: ["wallets", "wallet-ledger"], // 利用状況の残高と日次詳細（backend/shared/wallet.mjs）
   },
   {
     key: "read-aloud-app",
@@ -322,6 +334,8 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     selfWarm: false,
     readTables: ["voices", "api-unit-prices", "exchange-rates"],
     readWriteTables: ["usage", "users"],
+    updateTables: ["wallets"],
+    appendTables: ["wallet-ledger"],
   },
   {
     key: "ops-monthly",
@@ -485,6 +499,8 @@ export class ToyTalkerStack extends cdk.Stack {
         for (const t of spec.readTables) tables[t].grantReadData(fn);
         for (const t of spec.readWriteTables) tables[t].grantReadWriteData(fn);
         for (const t of spec.updateTables ?? []) tables[t].grant(fn, "dynamodb:UpdateItem");
+        for (const t of spec.appendTables ?? []) tables[t].grant(fn, "dynamodb:PutItem");
+        for (const t of spec.lookupTables ?? []) tables[t].grant(fn, "dynamodb:GetItem", "dynamodb:Query");
         // 秘密の実行時取得。SecureStringの復号はAWS管理キー（aws/ssm）ならSSM経由で許可される
         fn.addToRolePolicy(new iam.PolicyStatement({
           actions: ["ssm:GetParameters"],
@@ -865,6 +881,9 @@ export class ToyTalkerStack extends cdk.Stack {
       "api-unit-prices": { pk: "provider#api_type", sk: "version" },
       "exchange-rates": { pk: "month", sk: "currency" },
       "users": { pk: "sub" }, // Cognito の sub → owner_id（ロードマップ4、docs/auth.md）
+      // 前払いポイント（ロードマップ4、docs/pricing-and-cost-model.md 第11節）。残高の要約と、追記だけの台帳
+      "wallets": { pk: "owner_id" },
+      "wallet-ledger": { pk: "owner_id", sk: "timestamp#type#id" },
     };
     const tables = {} as Record<TableKey, dynamodb.Table>;
     for (const [key, def] of Object.entries(defs) as [TableKey, { pk: string; sk?: string }][]) {
