@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import type { BottomTabNavigationProp } from "@react-navigation/bottom-tabs";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { apiFetch } from "../../lib/api";
 import {
@@ -352,6 +354,28 @@ export default function Toy() {
     setScreen("home");
     // registeredDevice と deviceId はAsyncStorageに保持（画面に残す）
   };
+
+  // 別のタブへ移ったら最初のページに戻す（戻ってきたときに途中のページが残らないように）。
+  // WiFi設定の途中はBLEでつないだままなので残す。
+  // 今いるタブのアイコンをもう一度押したときは最初に戻す。WiFi設定の途中ならページの「戻る」と同じく切断する
+  const navigation = useNavigation<BottomTabNavigationProp<any>>();
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+  const disconnectRef = useRef(disconnect);
+  disconnectRef.current = disconnect;
+  useFocusEffect(
+    useCallback(() => () => {
+      if (screenRef.current !== "wifi-setup") setScreen("home");
+    }, [])
+  );
+  useEffect(
+    () => navigation.addListener("tabPress", () => {
+      if (!navigation.isFocused()) return;
+      if (screenRef.current === "wifi-setup") disconnectRef.current();
+      else setScreen("home");
+    }),
+    [navigation]
+  );
 
   const openDeviceSettings = () => {
     setScreen("device-settings");

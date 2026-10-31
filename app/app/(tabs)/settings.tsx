@@ -15,7 +15,9 @@ import {
   Switch,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useFocusEffect, useNavigation } from "@react-navigation/native";
+import type { BottomTabNavigationProp } from "@react-navigation/bottom-tabs";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { apiFetch } from "../../lib/api";
 import { signOut, useAuthSession } from "../../lib/auth";
@@ -28,6 +30,7 @@ import * as FileSystem from "expo-file-system";
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
 type SettingsScreen = "main" | "account" | "stt-select" | "character-list" | "character-edit" | "voice-select" | "llm-select" | "version" | "usage" | "usage-detail" | "custom-voice-list" | "custom-voice-record";
+const KEEP_ON_TAB_LEAVE: SettingsScreen[] = ["character-edit", "voice-select", "llm-select", "custom-voice-record"];
 
 type CharacterItem = {
   character_id: string;
@@ -388,6 +391,36 @@ export default function Settings() {
     setCvRecording(false);
     await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
   };
+
+  // 別のタブへ移ったら最初のページに戻す（戻ってきたときに途中のページが残らないように）。
+  // キャラクター編集（とそこから開くボイス・LLMの選択）とクローンボイスの録音は、入力途中が消えないように残す（録音中なら録音だけ止める）。
+  // 今いるタブのアイコンをもう一度押したときは、どのページからでも最初に戻す（ページの「戻る」と同じく録音は止める）
+  const navigation = useNavigation<BottomTabNavigationProp<any>>();
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+  const cvRecordingRef = useRef(false);
+  cvRecordingRef.current = cvRecording;
+  const stopCvRecordingRef = useRef(stopCvRecording);
+  stopCvRecordingRef.current = stopCvRecording;
+  const resetToMain = useCallback(() => {
+    if (cvRecordingRef.current) stopCvRecordingRef.current();
+    setCvUploadedFile(null);
+    slideAnim.setValue(0);
+    setScreen("main");
+  }, [slideAnim]);
+  useFocusEffect(
+    useCallback(() => () => {
+      if (KEEP_ON_TAB_LEAVE.includes(screenRef.current)) {
+        if (cvRecordingRef.current) stopCvRecordingRef.current();
+        return;
+      }
+      resetToMain();
+    }, [resetToMain])
+  );
+  useEffect(
+    () => navigation.addListener("tabPress", () => { if (navigation.isFocused()) resetToMain(); }),
+    [navigation, resetToMain]
+  );
 
   const registerCustomVoice = async () => {
     if (!cvName.trim()) { Alert.alert("エラー", "ボイス名を入力してください"); return; }
