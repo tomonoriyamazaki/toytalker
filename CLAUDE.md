@@ -15,6 +15,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - 原価・課金・前払いポイント制: [原価と課金の考え方](docs/pricing-and-cost-model.md)
 - TTSフォールバックと通知（未実装）: [仕様](docs/tts-fallback-and-notifications.md)。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)
 - MacBookでの開発: [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md)
+- PCの再起動と、再起動後に外から戻る手順（Tailscale + Moonlight → Claude Code の `/rc`）: [Windows更新による再起動の制御](docs/windows-update-restart-control.md)
 
 ## システム構成
 

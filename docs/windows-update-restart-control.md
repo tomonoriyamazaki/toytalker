@@ -60,3 +60,23 @@ Microsoftの自動更新管理ポリシーの対応エディションにはPro�
 Proへの変更と手動更新化も検討したが、ユーザーが自動更新を受け入れる方針を選択したため採用しない。購入・OS変更は未実施。
 
 Windows Update由来以外のクラッシュ、電源障害、別のインストーラーによる再起動は、このポリシーでは防げない。TTSの自動復旧は継続する。[TTSの起動・復旧手順](tts-boot-recovery.md)
+
+## 再起動後に外から戻る手順（2026-10-31）
+
+Windows更新は1〜7時に自動で再起動しうる（上の方針）。再起動すると Claude Code のセッション（Remote Control）と、そこから起動した Metro は止まる。Claude Code をOS起動時に自動起動する公式の仕組みは無い（[Remote Control](https://code.claude.com/docs/en/remote-control.md)。サーバーモード `claude remote-control` も「ターミナルで動き続けるプロセス」の扱い）ので、自動起動はせず、iPhone から画面ごと入って起動し直す。
+
+| 部品 | 設定 | 確認の仕方 |
+|---|---|---|
+| Tailscale | サービス自動起動 + **Run unattended**（タスクトレイ → Preferences）。ログオン前・サインアウト後もつながる | `tailscale debug prefs` の `"ForceDaemon": true` |
+| Sunshine | Windowsサービス `SunshineService`（自動起動）。ログオン前の画面も配信する。ファイアウォールの受信許可は全プロファイル | `Get-Service SunshineService` |
+| BitLocker | 起動前PINは使っていない（ログイン時のPINは Windows Hello で別物） | 起動時に「BitLocker」の画面が出ないこと |
+| ZakiCorp TTS | ログオン不要で自動起動（[起動・復旧](tts-boot-recovery.md)） | — |
+
+手順:
+
+1. iPhone の Moonlight で、Tailscale 経由（`desktop-ojpa2dh`、`100.125.70.89`）で接続する
+2. ロック画面を開き、Windows Hello の PIN でログオンする
+3. VS Code で Claude Code を起動し、`/rc`（Remote Control）を実行する。以後はスマホの Claude アプリから操作できる
+4. アプリの確認に Metro が要れば `cd app && npm run start:tunnel`（URL は固定、[app/README](../app/README.md)）
+
+Tailscale の Run unattended と Sunshine は 2026-10-31 に設定・確認済み（iPhone の Moonlight からの操作で確認）。実際に再起動してからログオンまで入れるかは未試験。
