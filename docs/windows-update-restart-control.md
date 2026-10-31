@@ -67,7 +67,7 @@ Windows更新は1〜7時に自動で再起動しうる（上の方針）。再�
 
 | 部品 | 設定 | 確認の仕方 |
 |---|---|---|
-| Tailscale | サービス自動起動 + **Run unattended**（タスクトレイ → Preferences）。ログオン前・サインアウト後もつながる | `tailscale debug prefs` の `"ForceDaemon": true` |
+| Tailscale | サービス自動起動 + **Run unattended**（タスクトレイ → Preferences）。ログオン前・サインアウト後もつながる。PC は**鍵の期限なし**（管理画面 Machines → `desktop-ojpa2dh` → Disable key expiry、2026-10-31）。期限が切れると外から入れず、PC の前で再ログインが要るため。iPhone・Mac は期限あり（約半年ごとにアプリで再ログイン） | `tailscale debug prefs` の `"ForceDaemon": true`、`tailscale status --json` の `Self.KeyExpiry` が空 |
 | Sunshine | Windowsサービス `SunshineService`（自動起動）。ログオン前の画面も配信する。ファイアウォールの受信許可は全プロファイル | `Get-Service SunshineService` |
 | BitLocker | 起動前PINは使っていない（ログイン時のPINは Windows Hello で別物） | 起動時に「BitLocker」の画面が出ないこと |
 | ZakiCorp TTS | ログオン不要で自動起動（[起動・復旧](tts-boot-recovery.md)） | — |
