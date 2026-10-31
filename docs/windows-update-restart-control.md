@@ -74,9 +74,9 @@ Windows更新は1〜7時に自動で再起動しうる（上の方針）。再�
 
 手順:
 
-1. iPhone の Moonlight で、Tailscale 経由（`desktop-ojpa2dh`、`100.125.70.89`）で接続する
+1. iPhone の Tailscale（VPN）をオンにし、Moonlight で接続する。Moonlight が同じWi-Fiで自動検出した宛先は LAN の `192.168.11.5` なので、外からは「オフライン」扱いになり Wake-On-LAN を送ろうとする。初回だけ「+」から Tailscale の `100.125.70.89`（固定）を手動で追加する（2026-10-31 追加済み。ペアリングのやり直しは不要だった）
 2. ロック画面を開き、Windows Hello の PIN でログオンする
 3. VS Code で Claude Code を起動し、`/rc`（Remote Control）を実行する。以後はスマホの Claude アプリから操作できる
 4. アプリの確認に Metro が要れば `cd app && npm run start:tunnel`（URL は固定、[app/README](../app/README.md)）
 
-Tailscale の Run unattended と Sunshine は 2026-10-31 に設定・確認済み（iPhone の Moonlight からの操作で確認）。実際に再起動してからログオンまで入れるかは未試験。
+Tailscale の Run unattended と Sunshine は 2026-10-31 に設定・確認済み（iPhone のモバイル回線から Moonlight で接続できることを確認）。実際に再起動してからログオンまで入れるかは未試験。
