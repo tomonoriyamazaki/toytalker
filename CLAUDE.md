@@ -56,6 +56,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - 原因不明の問題の診断は「証拠→仮説（推測と明示）→合意→検証」の順で進め、証拠が足りない仮説を断定口調で言わない。対策は「根治か、痛み止めか」を一言で明示する。
 - 話題が変わる区切りや、コンテキストが膨らんだら、新しいセッションでの再開を提案する。「引き継ぎmd書いて」と言われたら、状況・決定事項・残タスクを該当領域の入口文書へまとめる（新しい引き継ぎ文書は作らない）。
 - 破壊的・不可逆な操作（DynamoDBの削除/更新、Lambda削除、`Remove-Item`、`git reset --hard` 等）のパーミッションは `ask` のままにし、`allow` へ移す提案はしない。
+- アプリの開発サーバー（dev client 用 Metro）は `cd app && npm run start:tunnel` で起動する（LAN起動は出先から繋がらない）。詳細は [app/README](app/README.md) の「実機検証1」。
 - MacBookで開発するときは [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md) を最初に読む。Windows固有のルール（PowerShell、スクリーンショット、`tools/tts-service/`）はMacでは該当しない。
 
 ### スクリーンショットの共有
