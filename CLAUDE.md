@@ -13,7 +13,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - ZakiCorp TTS（クローンボイス）: [ZakiCorp TTS](docs/zakicorp-tts.md)（状態・所在）、[起動・復旧](docs/tts-boot-recovery.md)（手順）、[バッチエンジン](docs/qwen3-tts-batch-engine-2026-09-12.md)（設計・計測）
 - 利用者認証（Cognito + Google / Apple。ロードマップ4）: [利用者認証](docs/auth.md)（状態・仕組み・各社側の設定・確認の仕方）
 - 原価・課金・前払いポイント制: [原価と課金の考え方](docs/pricing-and-cost-model.md)
-- TTSフォールバックと通知（未実装）: [仕様](docs/tts-fallback-and-notifications.md)。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)
+- TTSフォールバック（主の声が失敗・3秒超えでずんだもんへ）と通知: [TTSフォールバック](docs/tts-fallback-and-notifications.md)（状態・仕組み）。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)
 - MacBookでの開発: [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md)
 - PCの再起動と、再起動後に外から戻る手順（Tailscale + Moonlight → Claude Code の `/rc`）: [Windows更新による再起動の制御](docs/windows-update-restart-control.md)
 
@@ -42,7 +42,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - 料金体系（原価・マージン2.0・前払いポイント・プレミアムボイス）と前払いポイント制の実装仕様（未実装。購入機能は認証の後）は [原価と課金の考え方](docs/pricing-and-cost-model.md)。
 - 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。LLMのツール呼び出しは外部の有料API（Brave検索など）だけ回数課金で `tool` として記録する。
 - 為替は毎月1日に月次Lambdaが自動保存し、点検をメールする。単価は自動更新しない。`zakicorp#tts` の単価は暫定（$0.000025/文字）。
-- Cartesiaの429時は返答単位でずんだもんへ切り替えて会話を止めない（未実装）。複数アカウントでの上限回避はしない。
+- 主の声が失敗（429/5xx）するか1文に3秒を超えたら、返答単位でずんだもんへ切り替えて会話を止めない。ずんだもん分は `sakura#tts` として別の行で記録する。複数アカウントでの上限回避はしない。
 
 ## ワークフロールール
 

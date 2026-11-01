@@ -9,7 +9,7 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
-import { CloudWatchLogsClient, FilterLogEventsCommand } from "@aws-sdk/client-cloudwatch-logs";
+import { CloudWatchLogsClient, StartQueryCommand, GetQueryResultsCommand, StopQueryCommand } from "@aws-sdk/client-cloudwatch-logs";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 
@@ -31,6 +31,16 @@ const RECORDING_LOG_GROUPS = process.env.RECORDING_LOG_GROUPS
     "/aws/lambda/toytalk-stream-handler-lambda",
     "/aws/lambda/toytalk-api-stream-for-esp32-lambda",
     "/aws/lambda/toytalker-tts-only-lambda",
+  ];
+
+// TTSを呼ぶLambda（本文・相槌・読み上げ）のロググループ。1リクエスト1行のJSON（backend/shared/trace.mjs）から、
+// ずんだもんへの切り替え回数と会社ごとのピーク同時本数を数える。CDKが環境変数 TTS_LOG_GROUPS で渡す。無ければRnDの旧名
+const TTS_LOG_GROUPS = process.env.TTS_LOG_GROUPS
+  ? JSON.parse(process.env.TTS_LOG_GROUPS)
+  : [
+    ...RECORDING_LOG_GROUPS,
+    "/aws/lambda/toytalker-backchannel-for-app-lambda",
+    "/aws/lambda/toytalker-backchannel-for-esp32-lambda",
   ];
 
 // 請求額をAPIで取れない社は、確認先のURLだけ案内する
@@ -228,38 +238,159 @@ function checkStalePrices(prices, staleDays) {
   return stale.sort((a, b) => a.key.localeCompare(b.key));
 }
 
-// 記録側Lambdaが「単価行が無い」と警告した provider#api_type を対象月のログから集める
+// 記録側Lambdaが「単価行が無い」と警告した provider#api_type を対象月のログから集める（Logs Insights で1回。
+// FilterLogEvents で頭から読んでいた頃は、ログが溜まるにつれ10/1に90秒、11/1に106秒かかっていた）
 async function findMissingPriceWarnings(month) {
   const { start, end } = monthRange(month);
-  const found = {};
-  for (const group of RECORDING_LOG_GROUPS) {
-    let token;
-    let guard = 0;
-    try {
-      do {
-        const r = await logs.send(new FilterLogEventsCommand({
-          logGroupName: group,
-          startTime: start.getTime(),
-          endTime: end.getTime(),
-          filterPattern: '"[Pricing] missing price"',
-          nextToken: token,
-          limit: 1000,
-        }));
-        for (const ev of (r.events ?? [])) {
-          const m = /missing price for (\S+)/.exec(ev.message ?? "");
-          if (m) found[m[1]] = (found[m[1]] ?? 0) + 1;
-        }
-        token = r.nextToken;
-      } while (token && ++guard < 20);
-    } catch (e) {
-      found[`(取得失敗: ${group}: ${e?.message || e})`] = 0;
+  try {
+    const rows = await insightsQuery(RECORDING_LOG_GROUPS,
+      'filter @message like "[Pricing] missing price" | parse @message /missing price for (?<key>\\S+)/ | stats count(*) as n by key',
+      start.getTime(), end.getTime(), Date.now() + 60_000);
+    const found = {};
+    for (const row of rows) {
+      const key = row.find((x) => x.field === "key")?.value;
+      if (key) found[key] = Number(row.find((x) => x.field === "n")?.value) || 0;
     }
+    return found;
+  } catch (e) {
+    return { [`(取得失敗: ${e?.message || e})`]: 0 };
   }
-  return found;
 }
 
+// ---- 5b. TTSの切り替え回数とピーク同時本数（docs/tts-fallback-and-notifications.md の4） ----
+// Scale / Enterprise へ上げる時期の判断材料。Cartesia の同時接続上限は組織単位なので、全Lambdaを合わせて数える。
+
+/**
+ * ログ1行から、TTSの呼び出し区間 { vendor, start, end }（epoch ms）を取り出す。
+ * 開始はログの時刻 − total_ms。本文は文ごとに [text_at, text_at + tts_ms]、相槌・読み上げは段階の時刻から。
+ * 再試行の待ちも区間に入るので、枠を実際に握っていた時間より少し長めに出る（上限の判断には安全側）。
+ * 切り替え後の文（ずんだもんだけを呼んだ文）は sakura として数える。
+ */
+export function ttsIntervalsOf(rec, loggedAt) {
+  const t0 = loggedAt - (rec.total_ms ?? 0);
+  if (rec.kind === "turn") {
+    return (rec.segments ?? [])
+      .filter((s) => typeof s.text_at === "number" && typeof s.tts_ms === "number")
+      .map((s) => ({
+        vendor: s.fallback && s.attempts === 1 ? s.fallback : s.vendor,
+        start: t0 + s.text_at,
+        end: t0 + s.text_at + s.tts_ms,
+      }));
+  }
+  // 相槌は LLM の後、読み上げは設定の読み込みの後に TTS を呼ぶ
+  const from = rec.kind === "backchannel" ? rec.marks?.llm_done : rec.kind === "read-aloud" ? rec.marks?.config : undefined;
+  const to = rec.marks?.tts_done;
+  if (!rec.tts || typeof from !== "number" || typeof to !== "number") return [];
+  return [{ vendor: rec.tts, start: t0 + from, end: t0 + to }];
+}
+
+/** 区間の集まりの最大の重なり数と、その時刻（epoch ms） */
+export function peakConcurrency(intervals) {
+  const points = [];
+  for (const iv of intervals) {
+    points.push([iv.start, 1], [iv.end, -1]);
+  }
+  // 同じ時刻なら終わりを先に数える（ちょうど接する区間は重ならない）
+  points.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+  let cur = 0, peak = 0, at = null;
+  for (const [t, d] of points) {
+    cur += d;
+    if (cur > peak) { peak = cur; at = t; }
+  }
+  return { peak, at };
+}
+
+/** 主プロバイダー失敗でずんだもんへ切り替えたリクエストか。返り値は切り替え元の会社（無ければ null） */
+export function fallbackFromOf(rec) {
+  if (rec.kind === "turn") return rec.tts_fallback_chars > 0 ? (rec.tts ?? "unknown") : null;
+  return rec.tts_fallback ? (rec.tts ?? "unknown") : null;
+}
+
+// Logs Insights で読む（FilterLogEvents で1か月分を頭から読むと300秒に収まらなかった。2026-11-01）。
+// 1回の問い合わせは1万行までなので日ごとに分け、5日ずつ並べて投げる。時間切れでもレポートの残りは送る
+const TTS_QUERY = 'fields @timestamp, @message | filter kind = "turn" or kind = "backchannel" or kind = "read-aloud" | limit 10000';
+const INSIGHTS_ROW_LIMIT = 10000;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function insightsQuery(logGroupNames, queryString, startMs, endMs, deadlineAt) {
+  const { queryId } = await logs.send(new StartQueryCommand({
+    logGroupNames,
+    startTime: Math.floor(startMs / 1000),
+    endTime: Math.floor(endMs / 1000) - 1,
+    queryString,
+    limit: INSIGHTS_ROW_LIMIT,
+  }));
+  for (;;) {
+    await sleep(1000);
+    const r = await logs.send(new GetQueryResultsCommand({ queryId }));
+    if (r.status === "Complete") return r.results ?? [];
+    if (["Failed", "Cancelled", "Timeout", "Unknown"].includes(r.status)) throw new Error(`Insights ${r.status}`);
+    if (Date.now() > deadlineAt) {
+      await logs.send(new StopQueryCommand({ queryId })).catch(() => {});
+      throw new Error("時間切れ");
+    }
+  }
+}
+
+/** Insights の1行（[{field, value}]）→ { at: epoch ms, rec }。@message は "時刻	リクエストID	INFO	{...}" の形 */
+export function parseInsightsRow(row) {
+  const get = (f) => row.find((x) => x.field === f)?.value;
+  const msg = get("@message") ?? "";
+  const ts = get("@timestamp");
+  const i = msg.indexOf("{");
+  if (i < 0 || !ts) return null;
+  try {
+    return { at: Date.parse(`${ts.replace(" ", "T")}Z`), rec: JSON.parse(msg.slice(i)) };
+  } catch {
+    return null;
+  }
+}
+
+async function aggregateTtsTraces(month, { budgetMs = 120_000 } = {}) {
+  const { start, end } = monthRange(month);
+  const deadlineAt = Date.now() + budgetMs;
+  const intervalsByVendor = {};
+  const fallbacks = { turn: 0, backchannel: 0, "read-aloud": 0 };
+  const fallbackFrom = {};
+  let slowSwitches = 0; // 本文のうち、主プロバイダーが遅くて（3秒超え）切り替えた回数
+  const requests = { turn: 0, backchannel: 0, "read-aloud": 0 };
+  const problems = [];
+  const days = [];
+  for (let t = start.getTime(); t < end.getTime(); t += 86400_000) days.push(t);
+  const tally = ({ at, rec }) => {
+    if (!(rec.kind in requests)) return;
+    requests[rec.kind]++;
+    const from = fallbackFromOf(rec);
+    if (from) {
+      fallbacks[rec.kind]++;
+      if ((rec.ext ?? []).some((x) => x.slow)) slowSwitches++;
+      fallbackFrom[from] = (fallbackFrom[from] ?? 0) + 1;
+    }
+    for (const iv of ttsIntervalsOf(rec, at)) {
+      (intervalsByVendor[iv.vendor] ??= []).push(iv);
+    }
+  };
+  for (let i = 0; i < days.length; i += 5) {
+    const batch = days.slice(i, i + 5);
+    const results = await Promise.allSettled(batch.map((d) => insightsQuery(TTS_LOG_GROUPS, TTS_QUERY, d, Math.min(d + 86400_000, end.getTime()), deadlineAt)));
+    results.forEach((r, j) => {
+      const day = new Date(batch[j]).toISOString().slice(0, 10);
+      if (r.status === "rejected") { problems.push(`${day}（UTC）: 取得失敗（${r.reason?.message || r.reason}）`); return; }
+      if (r.value.length >= INSIGHTS_ROW_LIMIT) problems.push(`${day}（UTC）: 1万行を超えたので途中まで`);
+      for (const row of r.value) {
+        const parsed = parseInsightsRow(row);
+        if (parsed) tally(parsed);
+      }
+    });
+  }
+  const peaks = Object.fromEntries(Object.entries(intervalsByVendor).map(([v, ivs]) => [v, { ...peakConcurrency(ivs), calls: ivs.length }]));
+  return { requests, fallbacks, fallbackFrom, slowSwitches, peaks, problems };
+}
+
+const fmtJst = (ms) => new Date(ms + 9 * 3600_000).toISOString().slice(0, 16).replace("T", " ");
+
 // ---- 6. レポート組み立て ----
-function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing, staleDays, notes }) {
+function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing, staleDays, notes, tts }) {
   const L = [];
   L.push(`ToyTalker 月次コスト確認レポート（対象月: ${month}）`);
   L.push(`生成: ${new Date().toISOString()}  マージン: ${margin}`);
@@ -334,6 +465,24 @@ function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing
   }
   L.push("");
 
+  L.push(`■ TTS の切り替えと同時本数（${month}、Lambdaログから）`);
+  if (tts.status === "error") {
+    L.push(`  取得失敗（${tts.error}）`);
+  } else {
+    const f = tts.fallbacks, n = tts.requests;
+    const fromText = Object.entries(tts.fallbackFrom).sort((a, b) => b[1] - a[1]).map(([v, c]) => `${v} ${c}`).join(", ");
+    L.push(`  ずんだもんへの切り替え: 本文 ${f.turn} / ${n.turn} 回、相槌 ${f.backchannel} / ${n.backchannel} 回、読み上げ ${f["read-aloud"]} / ${n["read-aloud"]} 回${fromText ? `（切り替え元: ${fromText}）` : ""}`);
+    L.push(`    うち本文で、主プロバイダーが3秒を超えて切り替えた回数: ${tts.slowSwitches} 回（残りは 429 / 5xx などの失敗）`);
+    const peaks = Object.entries(tts.peaks).sort((a, b) => b[1].peak - a[1].peak);
+    if (peaks.length === 0) L.push("  ピーク同時本数: TTSの呼び出し記録がありません");
+    else {
+      L.push("  ピーク同時本数（全Lambda合計。Cartesia の上限は Pro 3 / Startup 5 / Scale 15）:");
+      for (const [v, p] of peaks) L.push(`    ${v}: ${p.peak} 本（${fmtJst(p.at)} JST） / 呼び出し ${p.calls.toLocaleString()} 回`);
+    }
+    for (const pr of tts.problems) L.push(`  ※ ${pr}`);
+  }
+  L.push("");
+
   L.push("■ 点検");
   const missingKeys = Object.entries(missing);
   if (missingKeys.length) {
@@ -379,12 +528,13 @@ export const handler = async (event = {}) => {
   ]);
   const stale = checkStalePrices(prices, staleDays);
   const missing = await findMissingPriceWarnings(month);
+  const tts = await safe(() => aggregateTtsTraces(month));
 
   // 対象月の為替行の有無（無ければ本文Lambdaは150円で計算していた）
   const monthRate = (await ddb.send(new GetCommand({ TableName: EXCHANGE_RATES_TABLE, Key: { month, currency: "JPY" } }))).Item;
   if (!monthRate) notes.push(`${month} の為替行が無く、その月の記録は既定の ${FX_FALLBACK_RATE} 円で計算されています`);
 
-  const report = buildReport({ month, fx, prices, margin, usage, actuals: { openai, anthropic, elevenlabs }, stale, missing, staleDays, notes });
+  const report = buildReport({ month, fx, prices, margin, usage, actuals: { openai, anthropic, elevenlabs }, stale, missing, staleDays, notes, tts });
   console.log(report);
 
   let published = false;

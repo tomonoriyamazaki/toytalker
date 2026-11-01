@@ -109,8 +109,9 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 1. **為替**: Frankfurter（ECB公表レート、キー不要）からUSD→JPYを取り、`toytalker-exchange-rates` に当月の行が無ければ作る。既存行は維持（`FX_OVERWRITE=true` で上書き）。
 2. **先月の記録集計**: `toytalker-usage` を先月分でスキャンし、プロバイダー×種別ごとにマージン後の円額・マージン前のUSD実費・使用量をまとめる。
 3. **各社の実績との突き合わせ**: APIで請求を取れる社（OpenAI・Anthropic）は差分と割合を出し、20%超なら要確認印。ElevenLabsは使用文字数。取れない社（Cartesia・Serper・Google・Soniox・Sakura・Fish Audio）は記録実費と確認先URLを並べる。
-4. **点検**: 単価行が無くて記録されなかった呼び出し（記録側Lambdaの `[Pricing] missing price` ログをCloudWatchから検索）、180日以上更新されていない単価行、対象月の為替行の有無。
-5. **通知**: SNSトピック `toytalker-ops-monthly` にメール。件名はASCII固定（`ToyTalker monthly cost report YYYY-MM`）。
+4. **点検**: 単価行が無くて記録されなかった呼び出し（記録側Lambdaの `[Pricing] missing price` ログを CloudWatch Logs Insights で数える。2026-11-01に `FilterLogEvents` から替えた。頭から読む方式はログが溜まるにつれ遅くなり、10/1に90秒・11/1に106秒かかっていた。替えた後はレポート全体で約14秒）、180日以上更新されていない単価行、対象月の為替行の有無。
+5. **TTSの切り替えと同時本数**（2026-11-01）: 本文・相槌・読み上げのLambdaログから、ずんだもんへ切り替えた回数（うち遅さで切り替えた回数）と、声の会社ごとのピーク同時本数を数える。Scale / Enterprise へ上げる時期の判断材料。数え方は [TTSフォールバック](tts-fallback-and-notifications.md) の第4節。
+6. **通知**: SNSトピック `toytalker-ops-monthly` にメール。件名はASCII固定（`ToyTalker monthly cost report YYYY-MM`）。
 
 ### 記録側の変更（同日）
 

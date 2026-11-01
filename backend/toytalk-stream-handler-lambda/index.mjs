@@ -498,6 +498,8 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
 
   // ---- TTSフォールバック ----
   // 主プロバイダーが 429（同時接続上限）や 5xx で失敗したら短く再試行し、だめならずんだもん（Sakura）で続ける。
+  // 主プロバイダーが遅いとき（1文の合成が TTS_SLOW_MS を超えた）も、待たずにずんだもんへ切り替える（再試行はしない）。
+  // ふだんは Cartesia で最大2秒程度（2026-10の実測）。Gemini はふだんから数秒かかるので対象外。
   // 一度切り替えたらその返答の残りはずんだもんのまま。仕様: docs/tts-fallback-and-notifications.md
   const TTS_RETRY_WAITS_MS = [300, 600];
   const TTS_FALLBACK_NOTICE = "いまはこんでいるから、べつのこえでおはなしするね。";
@@ -507,6 +509,18 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
     return s === 429 || s === 408 || (s !== null && s >= 500);
   }
   const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+  const TTS_SLOW_MS = 3000;
+  const TTS_SLOW_EXEMPT = new Set(["sakura", "gemini"]);
+  class TtsSlowError extends Error {
+    constructor(ms) { super(`TTS slower than ${ms}ms`); this.name = "TtsSlowError"; this.slow = true; }
+  }
+  // 打ち切った呼び出しは裏で走り切るが、結果は捨てる（その分の主プロバイダーの費用は記録されない）
+  function withTtsDeadline(promise, ms) {
+    let timer;
+    const deadline = new Promise((_, reject) => { timer = setTimeout(() => reject(new TtsSlowError(ms)), ms); });
+    promise.catch(() => {});
+    return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+  }
 
   // Fish Audio TTS → base64(WAV)
   async function ttsToBase64FishAudio(text, { referenceId = "6fdaebea7db042129f03ecb0a57ea7b6" } = {}) {
@@ -916,6 +930,7 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
         }
         return { b64, fmt };
       }
+      const callPrimary = (t) => TTS_SLOW_EXEMPT.has(cfg.ttsVendor) ? synthesizePrimary(t) : withTtsDeadline(synthesizePrimary(t), TTS_SLOW_MS);
       const synthesizeFallback = async (t) => { seg.attempts++; return { b64: await ttsToBase64Sakura(t, { model: "zundamon" }), fmt: "wav" }; };
       try {
         let out;
@@ -925,15 +940,19 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
           usedFallback = true;
         } else {
           try {
-            out = await synthesizePrimary(t);
+            out = await callPrimary(t);
           } catch (e) {
             let lastErr = e;
-            trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e), ms: Date.now() - ttsStart, error: true });
+            trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e), ms: Date.now() - ttsStart, error: true, ...(e?.slow ? { slow: true } : {}) });
             if (cfg.ttsVendor !== "sakura" && isRetryableTtsError(e)) {
               for (const wait of TTS_RETRY_WAITS_MS) {
                 await sleepMs(wait);
-                try { out = await synthesizePrimary(t); lastErr = null; break; }
-                catch (e2) { lastErr = e2; trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e2), error: true, retry: true }); }
+                try { out = await callPrimary(t); lastErr = null; break; }
+                catch (e2) {
+                  lastErr = e2;
+                  trace.ext(cfg.ttsVendor, { status: ttsErrorStatus(e2), error: true, retry: true, ...(e2?.slow ? { slow: true } : {}) });
+                  if (e2?.slow) break; // 遅いならこれ以上待たずに切り替える
+                }
               }
             }
             if (lastErr) {

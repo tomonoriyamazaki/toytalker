@@ -1081,6 +1081,7 @@ export default function Chat() {
       let buffer = "";
       let accText = "";
       const printedIds = new Set<string>();
+      let fallbackNoticeShown = false; // 主の声が混み合ってずんだもんに替わったことを、返答ごとに1回だけ知らせる
       let lastEventType: string | null = null;
       let currentEvent: string | null = null;
       let currentData: string[] = [];
@@ -1110,7 +1111,11 @@ export default function Chat() {
           } else if (ev === "tts") {
             if (DEBUG_TIME && !(mtRef.current as any).firstTtsArriveAt) mtSet("firstTtsArriveAt");
             const obj = JSON.parse(dataStr);
-            const { id, b64, format } = obj || {};
+            const { id, b64, format, fallback } = obj || {};
+            if (fallback && !fallbackNoticeShown) {
+              fallbackNoticeShown = true;
+              setLog((L) => [...L, "（混み合っているため、一時的に別の声で話しています）"]);
+            }
             if (id != null && b64 && format) {
               const key = `tts:${String(id)}`;
               if (!printedIds.has(key)) {

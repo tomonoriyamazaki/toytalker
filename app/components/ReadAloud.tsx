@@ -213,7 +213,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
   };
 
   // arraybuffer 取得（POSTボディが必要なため downloadAsync は使えない → XHR）
-  const fetchAudio = (body: object): Promise<{ buf: ArrayBuffer; format: string }> =>
+  const fetchAudio = (body: object): Promise<{ buf: ArrayBuffer; format: string; fallback: string | null }> =>
     new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       xhr.open("POST", TTS_ONLY_URL, true);
@@ -225,7 +225,9 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
           const fmt =
             (xhr.getResponseHeader("x-audio-format") ||
               (xhr.getResponseHeader("content-type") === "audio/mpeg" ? "mp3" : "wav")).trim();
-          resolve({ buf: xhr.response as ArrayBuffer, format: fmt });
+          // 選んだ声が混み合っていて別の声（ずんだもん）で作られたときだけ付く
+          const fallback = xhr.getResponseHeader("x-tts-fallback")?.trim() || null;
+          resolve({ buf: xhr.response as ArrayBuffer, format: fmt, fallback });
         } else {
           let msg = `HTTP ${xhr.status}`;
           try {
@@ -257,7 +259,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
     setStatus("音声を生成中…");
     stopPlayback();
     try {
-      const { buf, format } = await fetchAudio({
+      const { buf, format, fallback } = await fetchAudio({
         text: t,
         voice_id: selectedVoice.voice_id,
         owner_id: ownerId ?? undefined,
@@ -283,7 +285,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
         FileSystem.deleteAsync(`${AUDIO_DIR}${old.fileName}`, { idempotent: true }).catch(() => {});
       }
       await persistRecents(next);
-      setStatus("");
+      setStatus(fallback ? "混み合っているため、一時的に別の声で作りました" : "");
       await playFile(fileName);
     } catch (e: any) {
       setStatus(`失敗: ${e?.message ?? e}`);

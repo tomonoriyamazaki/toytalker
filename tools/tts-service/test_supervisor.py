@@ -76,5 +76,20 @@ class RecoveryTests(unittest.TestCase):
 
 
 
+class QueueWatchTests(unittest.TestCase):
+    @patch.object(service.time, "monotonic")
+    def test_warns_on_queue_or_wait_at_most_every_five_minutes(self, clock):
+        watch = service.QueueWatch({})
+        clock.return_value = 1000
+        self.assertFalse(watch.observe(None))
+        self.assertFalse(watch.observe({"pending": 3}))   # engine without the counters
+        self.assertFalse(watch.observe({"queue_length": 0, "max_wait_ms": 200}))
+        self.assertTrue(watch.observe({"queue_length": 2, "max_wait_ms": 0}))
+        clock.return_value = 1100
+        self.assertFalse(watch.observe({"queue_length": 2, "max_wait_ms": 0}))
+        clock.return_value = 1301
+        self.assertTrue(watch.observe({"queue_length": 0, "max_wait_ms": 1500}))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -206,8 +206,10 @@ function resolveNames(spec: FunctionSpec, config: StageConfig): { id: string; na
   return { id, name: `toytalker-${spec.key}-${config.stage}` };
 }
 
-/** 月次レポートが「単価行なし」の警告を拾う記録側Lambda */
+/** 月次レポートが「単価行なし」の警告を拾う記録側Lambda（TTS_FUNCTION_KEYS に含まれる） */
 const RECORDING_FUNCTION_KEYS = ["chat-app", "chat-mcu", "read-aloud-app"] as const;
+/** 月次レポートがずんだもんへの切り替え回数とピーク同時本数を数える、TTSを呼ぶLambda */
+const TTS_FUNCTION_KEYS = [...RECORDING_FUNCTION_KEYS, "backchannel-app", "backchannel-mcu"] as const;
 
 const FUNCTIONS: readonly FunctionSpec[] = [
   {
@@ -345,7 +347,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 300,
     format: "esm",
     description: "Monthly ops report: FX rate, recorded cost vs provider bills, price table checks",
-    env: ["OPS_SNS_TOPIC_ARN", "RECORDING_LOG_GROUPS"],
+    env: ["OPS_SNS_TOPIC_ARN", "RECORDING_LOG_GROUPS", "TTS_LOG_GROUPS"],
     secrets: ["ELEVENLABS_API_KEY", "OPENAI_ADMIN_KEY", "ANTHROPIC_ADMIN_KEY"],
     warm: false,
     selfWarm: false,
@@ -425,6 +427,7 @@ export class ToyTalkerStack extends cdk.Stack {
       FIRMWARE_BUCKET: config.firmwareBucketName,
       OPS_SNS_TOPIC_ARN: opsTopic.topicArn,
       RECORDING_LOG_GROUPS: JSON.stringify(RECORDING_FUNCTION_KEYS.map((k) => `/aws/lambda/${nameOf(k).name}`)),
+      TTS_LOG_GROUPS: JSON.stringify(TTS_FUNCTION_KEYS.map((k) => `/aws/lambda/${nameOf(k).name}`)),
     };
 
     const functions = new Map<string, lambda.Function>();
@@ -583,9 +586,15 @@ export class ToyTalkerStack extends cdk.Stack {
     const opsFn = functions.get("ops-monthly")!;
     if (!importPhase) {
       opsTopic.grantPublish(opsFn);
+      // 単価行なしの警告と、TTSの切り替え回数・ピーク同時本数を Logs Insights で読む
+      // （FilterLogEvents で頭から読むと1か月分が300秒に収まらなくなった。2026-11-01）
       opsFn.addToRolePolicy(new iam.PolicyStatement({
-        actions: ["logs:FilterLogEvents"],
-        resources: RECORDING_FUNCTION_KEYS.map((k) => logGroups.get(k)!.logGroupArn),
+        actions: ["logs:StartQuery"],
+        resources: TTS_FUNCTION_KEYS.map((k) => logGroups.get(k)!.logGroupArn),
+      }));
+      opsFn.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["logs:GetQueryResults", "logs:StopQuery"],
+        resources: ["*"],
       }));
     }
     const opsSchedule = new scheduler.Schedule(this, "OpsMonthlySchedule", {
@@ -622,6 +631,8 @@ export class ToyTalkerStack extends cdk.Stack {
       "クローンボイスの speaker embedding を保存・削除する。バケット1つに限定");
     ack("AwsSolutions-IAM5[Resource::<OpsMonthlyCC65D2A5.Arn>:*]",
       "EventBridge Scheduler が月次Lambdaのバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
+    ack("AwsSolutions-IAM5[Resource::*]",
+      "月次Lambdaの logs:GetQueryResults / logs:StopQuery。資源単位の指定ができない操作で、問い合わせIDを知っている自分の問い合わせしか読めない。どのロググループを読むかは logs:StartQuery の側で5本に絞っている");
     ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup]",
       "AWS Backup のサービスロール。対象資源のバックアップに必要な動詞を AWS が保守する標準ポリシー（ロードマップ10）");
     ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores]",

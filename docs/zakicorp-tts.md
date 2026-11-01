@@ -10,7 +10,9 @@
 - 単独要求の元実装は `StaticCache` が1つで同時要求が互いのKV文脈を上書きする構造があった（言葉の繰り返し・抜けの原因）。バッチ版で解消。
 - 単価 `zakicorp#tts` は暫定（$0.000025/文字、Cartesiaの半額、2026-09-13登録）。正式な単価は未決定。
 - `supervisor.py` から Lambda の `ZAKICORP_TTS_URL` 照合を外した（2026-10-28決定。公開URLが固定になった今は比べる意味が無く、CLI の SSO 化（2026-10-25）で非対話タスクからは期限切れのたびに `exit 255` で失敗していた。ngrok 予備経路の書き込みは残す）。`.local/tts-service/` へ反映済み（2026-10-28 21:34、`switch-api.ps1 -ApiScript api_server_batch.py` を昇格実行。API停止約35秒、公開 `/health` 復帰確認）。
-- 待ち行列の可視化は検討のみ（[先送り項目](deferred-items.md)）。Cartesia 429時のずんだもんフォールバックは別件（[TTSフォールバック](tts-fallback-and-notifications.md)）。
+- **待ち行列の見える化**（2026-11-01、ロードマップ5）: 内側の `/health`（127.0.0.1 から呼んだときだけ）の `engine` に、`queue_length`（いま待っている要求数）と `max_wait_ms`（直近5分の最長の待ち時間。投入から受け入れまで）、`wait_max_ms`（起動からの最長）が出る。監視タスクは15秒ごとの確認で、待ちが1件以上か待ち時間が1秒以上なら `supervisor.log` に `TTS queue: ...` の WARNING を出す（5分に1回まで。閾値は `config.json` の `queue_warn` / `wait_warn_ms`）。公開側の `/health` は `status` だけのまま。`batch_engine.py` の変更前の控えは `batch_engine.py.bak-20261101`。
+- 待ちが常態化したら `.env` の `TTS_BATCH_CLASSES` を `1,2,4,8,16,32` に戻す（VRAM約19GB）。48件構成は未実装・未計測で、見込みは [バッチエンジンの文書](qwen3-tts-batch-engine-2026-09-12.md) 第3版。
+- 主の声（ZakiCorp を含む）が失敗するか1文に3秒を超えたときのずんだもんへの切り替えは [TTSフォールバック](tts-fallback-and-notifications.md)。
 
 ## 公開経路（2026-09-13にCloudflare Tunnelへ切替）
 

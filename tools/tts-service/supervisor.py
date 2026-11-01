@@ -129,6 +129,32 @@ def synchronize_urls(config, url):
         LOG.info("Updated TTS URL for %s", name)
 
 
+class QueueWatch:
+    """Warn when the batch engine queues requests (the 17th concurrent one with TTS_BATCH_CLASSES=...,16).
+
+    /health on 127.0.0.1 reports queue_length (waiting now) and max_wait_ms (longest wait in the last
+    5 minutes). Logs at most once per 5 minutes; thresholds come from config.json (queue_warn, wait_warn_ms).
+    """
+    def __init__(self, config):
+        self.queue_warn = int(config.get("queue_warn", 1))
+        self.wait_warn_ms = int(config.get("wait_warn_ms", 1000))
+        self.next_log = 0
+
+    def observe(self, engine):
+        if not isinstance(engine, dict) or "max_wait_ms" not in engine:
+            return False   # api_server.py (non-batch) or an engine without the counters
+        queued, wait = engine.get("queue_length", 0), engine.get("max_wait_ms", 0)
+        if queued < self.queue_warn and wait < self.wait_warn_ms:
+            return False
+        now = time.monotonic()
+        if now < self.next_log:
+            return False
+        self.next_log = now + 300
+        LOG.warning("TTS queue: %s waiting now, longest wait %s ms in the last 5 minutes (active %s)",
+                    queued, wait, engine.get("active"))
+        return True
+
+
 def probe(config):
     import torch
     if not torch.cuda.is_available():
@@ -175,6 +201,7 @@ def run(config):
             stray.terminate()
     else:
         tunnel = Component("ngrok", [config["ngrok"], "http", "8000", "--config", config["ngrok_config"]], "8000", config)
+    queue_watch = QueueWatch(config)
     synced_url = None
     next_sync = 0
     last_error = None
@@ -182,10 +209,12 @@ def run(config):
         try:
             api.ensure_running()
             try:
-                healthy = get_json("http://127.0.0.1:8000/health").get("status") == "ok"
+                local = get_json("http://127.0.0.1:8000/health")
+                healthy = local.get("status") == "ok"
             except Exception:
-                healthy = False
+                local, healthy = {}, False
             api.health(healthy)
+            queue_watch.observe(local.get("engine"))
             if tunnel is not None:
                 tunnel.ensure_running()
                 try:
