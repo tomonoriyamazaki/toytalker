@@ -10,7 +10,7 @@
   import { Agent, setGlobalDispatcher } from "undici";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
-  import { recordConsume } from "../shared/wallet.mjs";
+  import { recordConsume, checkBalance } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
   import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
@@ -528,6 +528,24 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     return wavBuffer.slice(44);
   }
 
+  // ---- 残高0の停止（docs/pricing-and-cost-model.md 11.1）----
+  // 本体は画面が無いので一言しゃべって終える。声はキャラクターによらずずんだもん（フォールバックと同じ。1回作ればインスタンスが覚えておく）。
+  // 合成の原価は運営持ち（残高0の人から引かない）。ファームは通常の返答と同じ順（segment → tts_start → PCM → done）で受けるので変更不要
+  const NO_BALANCE_TEXT = "ポイントがなくなったよ。おうちのひとにきいてね。";
+  let noBalancePcm = null;
+  async function sendNoBalance(res, trace) {
+    sendMeta(res, "segment", { id: 1, text: NO_BALANCE_TEXT, final: true });
+    try {
+      noBalancePcm ??= trimSilence(await ttsBufferSakura(NO_BALANCE_TEXT, { model: "zundamon" }));
+      sendMeta(res, "tts_start", { id: 1, size: noBalancePcm.length });
+      sendPCM(res, noBalancePcm);
+    } catch (e) {
+      trace.error("tts", e);
+      sendMeta(res, "error", { message: `TTS failed: ${e?.message || e}` });
+    }
+    sendMeta(res, "done", {});
+  }
+
   // ZakiCorp TTS (clone voice via local GPU) — streaming PCM to ESP32
   // 戻り値は { bytes, firstChunkMs }（最初の音声チャンクが届くまでの時間。ログの切り分け用）
   async function ttsStreamZakiCorp(text, { speaker = "vivian", language = "Japanese" } = {}, res, segSeq) {
@@ -707,6 +725,13 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         if (charConfig?.ownerId) { ownerId = charConfig.ownerId; trace.set({ owner_id: ownerId }); }
         trace.set({ device_registered: charConfig?.registered === true }); // 未登録か、キャラクター未設定。body の値で続ける
       }
+    }
+
+    // 残高が0以下なら会話を始めず、止めた理由を一言しゃべって終える（docs/pricing-and-cost-model.md 11.3）
+    if (!(await checkBalance(ownerId)).ok) {
+      trace.set({ status: 402, reason: "no_balance" });
+      try { await sendNoBalance(res, trace); } finally { res.end(); trace.finish(); }
+      return;
     }
 
     // キャラ側にLLM指定がなければ is_default エントリを使う

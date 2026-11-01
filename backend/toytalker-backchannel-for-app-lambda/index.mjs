@@ -9,6 +9,7 @@ import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, lookupOwner, canUse } from "../shared/auth.mjs";
+import { checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 
 // ---- 予備インスタンスの事前ウォームアップ ----
 // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -359,6 +360,16 @@ export const handler = async (event, context) => {
       return { statusCode: 400, body: JSON.stringify({ error: "partial_text is required" }) };
     }
 
+    // 持ち主（ログイン中だけ分かる）。残高0なら相槌も返さない（本文が止める。docs/pricing-and-cost-model.md 11.3）
+    const who = await lookupOwner(identity, undefined);
+    if (who.ownerId) {
+      trace.set({ owner_id: who.ownerId });
+      if (!(await checkBalance(who.ownerId)).ok) {
+        trace.set({ status: 402, reason: NO_BALANCE });
+        return { statusCode: 402, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: NO_BALANCE }) };
+      }
+    }
+
     // キャラクター設定を解決
     let ttsVendor = "sakura";
     let ttsVoice = "zundamon";
@@ -368,8 +379,6 @@ export const handler = async (event, context) => {
       const charConfig = await resolveCharacter(characterId);
       if (charConfig) {
         // 他人のキャラクター（声・人格）は使えない。本文Lambdaと同じ判定（system 製は誰でも）
-        const who = await lookupOwner(identity, undefined);
-        trace.set({ owner_id: who.ownerId });
         if (!canUse(identity, who.ownerId, charConfig.ownerId)) {
           trace.set({ status: 403, reason: "not_owner" });
           return { statusCode: 403, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: "not_owner" }) };

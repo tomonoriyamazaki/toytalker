@@ -288,7 +288,7 @@ export default function ReadAloud({ visible, onClose, ownerId }: Props) {
       setStatus(fallback ? "混み合っているため、一時的に別の声で作りました" : "");
       await playFile(fileName);
     } catch (e: any) {
-      setStatus(`失敗: ${e?.message ?? e}`);
+      setStatus(e?.message === "no_balance" ? "ポイントがなくなったため読み上げできません" : `失敗: ${e?.message ?? e}`);
     } finally {
       setBusy(false);
     }

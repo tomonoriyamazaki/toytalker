@@ -947,15 +947,23 @@ export default function Settings() {
                   <Text style={s.usageTotalAmount}>{formatCost(usageData?.total_cost ?? 0)} 円</Text>
                 </View>
 
-                {/* 前払いポイントの残高（1ポイント=1円。まだ購入・付与が無いので使った分だけマイナスになる）。
-                    表示は整数で切り捨て（Math.floor）。多く見せないため、マイナスは -53.99 → -54 と大きい側に寄せる */}
+                {/* 前払いポイントの残高（1ポイント=1円）。
+                    表示は整数で切り捨て（Math.floor）。多く見せないため、マイナスは -53.99 → -54 と大きい側に寄せる。
+                    0以下ならサーバーが会話・読み上げを止めている（docs/pricing-and-cost-model.md 11.3） */}
                 {typeof usageData?.balance_jpy === "number" && (
-                  <View style={s.usageBalanceRow}>
-                    <Text style={s.usageBalanceLabel}>ポイント残高</Text>
-                    <Text style={s.usageBalanceValue}>
-                      {Math.floor(usageData.balance_jpy).toLocaleString()} 円分
-                    </Text>
-                  </View>
+                  <>
+                    <View style={s.usageBalanceRow}>
+                      <Text style={s.usageBalanceLabel}>ポイント残高</Text>
+                      <Text style={[s.usageBalanceValue, usageData.balance_jpy <= 0 && s.usageBalanceEmpty]}>
+                        {Math.floor(usageData.balance_jpy).toLocaleString()} 円分
+                      </Text>
+                    </View>
+                    {usageData.balance_jpy <= 0 && (
+                      <Text style={s.usageBalanceNotice}>
+                        ポイントがなくなりました。会話と読み上げは、ポイントを追加するまで止まっています。
+                      </Text>
+                    )}
+                  </>
                 )}
 
                 {/* デバイス別 */}
@@ -1600,6 +1608,8 @@ const s = StyleSheet.create({
   usageBalanceRow:         { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginTop: 12, paddingHorizontal: 4 },
   usageBalanceLabel:       { fontSize: 14, color: "#666" },
   usageBalanceValue:       { fontSize: 16, fontWeight: "700", color: "#333" },
+  usageBalanceEmpty:       { color: "#D32F2F" },
+  usageBalanceNotice:      { fontSize: 13, color: "#D32F2F", marginTop: 6, paddingHorizontal: 4 },
   usageApiCard:            { backgroundColor: "#f9f9f9", padding: 14, borderRadius: 10, borderWidth: 1, borderColor: "#e0e0e0" },
   usageApiHeader:          { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   usageApiLabel:           { fontSize: 15, fontWeight: "600", color: "#333" },

@@ -164,7 +164,7 @@ interface FunctionSpec {
   readonly selfWarm: boolean;
   readonly readTables: readonly TableKey[];
   readonly readWriteTables: readonly TableKey[];
-  /** 読み取りに加えて UpdateItem だけ許すテーブル（Put/Delete は許さない） */
+  /** GetItem と UpdateItem だけ許すテーブル（Put/Delete・Query・Scan は許さない） */
   readonly updateTables?: readonly TableKey[];
   /** PutItem だけ許すテーブル（読み取り・Update・Delete は許さない）。追記だけの台帳に使う */
   readonly appendTables?: readonly TableKey[];
@@ -227,7 +227,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     selfWarm: true,
     readTables: ["devices", "characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
     readWriteTables: ["chat-logs", "usage"],
-    // 1ターンの原価を台帳に足し、残高から引く（backend/shared/wallet.mjs）
+    // 1ターンの原価を台帳に足し、残高から引く。始める前に残高を読む（backend/shared/wallet.mjs）
     updateTables: ["wallets"],
     appendTables: ["wallet-ledger"],
   },
@@ -261,6 +261,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     warm: true,
     selfWarm: true,
     readTables: ["characters", "voices", "users"], // users は他人のキャラクターを使わせないための所有者確認（読むだけ）
+    lookupTables: ["wallets"], // 残高0なら相槌を返さない（段階2）
     readWriteTables: [],
   },
   {
@@ -277,6 +278,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     warm: true,
     selfWarm: true,
     readTables: ["devices", "characters", "voices"],
+    lookupTables: ["wallets"], // 残高0なら相槌を返さない（段階2）
     readWriteTables: [],
   },
   {
@@ -501,7 +503,7 @@ export class ToyTalkerStack extends cdk.Stack {
       if (!importPhase) {
         for (const t of spec.readTables) tables[t].grantReadData(fn);
         for (const t of spec.readWriteTables) tables[t].grantReadWriteData(fn);
-        for (const t of spec.updateTables ?? []) tables[t].grant(fn, "dynamodb:UpdateItem");
+        for (const t of spec.updateTables ?? []) tables[t].grant(fn, "dynamodb:GetItem", "dynamodb:UpdateItem");
         for (const t of spec.appendTables ?? []) tables[t].grant(fn, "dynamodb:PutItem");
         for (const t of spec.lookupTables ?? []) tables[t].grant(fn, "dynamodb:GetItem", "dynamodb:Query");
         // 秘密の実行時取得。SecureStringの復号はAWS管理キー（aws/ssm）ならSSM経由で許可される

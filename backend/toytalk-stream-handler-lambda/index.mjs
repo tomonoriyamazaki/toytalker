@@ -9,7 +9,7 @@
   import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
-  import { recordConsume } from "../shared/wallet.mjs";
+  import { recordConsume, checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
   import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
@@ -743,6 +743,9 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
       ...describeClient(event, body),
     });
 
+    // 残高が0以下なら始めない（docs/pricing-and-cost-model.md 11.3）。キャラクターの読み込みと並べて読む
+    const balanceCheck = checkBalance(ownerId);
+
     // 単価キャッシュ・デフォルトLLMを先にロード（await不要、バックグラウンドで）
     loadPricingCache();
     loadDefaultLlm();
@@ -764,6 +767,8 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
         trace.set({ character_found: false }); // キャラクターかボイスが無い。body の値で続ける
       }
     }
+
+    if (!(await balanceCheck).ok) return reject({ statusCode: 402, error: NO_BALANCE });
 
     // キャラ側にLLM指定がなければ is_default エントリを使う
     if (!llmProvider || !llmModelId) {

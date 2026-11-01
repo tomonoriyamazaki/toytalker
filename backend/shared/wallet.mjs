@@ -5,7 +5,8 @@
 //   会話の文章は持たない。consume の ref は chat-logs の並べ替えキー（"session_id#…#timestamp#…"）
 //
 // 台帳の行と残高の加算は1つのトランザクションで書く（片方だけ残らない。同じ行の二重書きは条件で弾く）。
-// 段階1（2026-10-31）は引くだけで、残高が0を下回っても会話は止めない。
+// 引くのはターンの終わりで、そのターンで0を下回っても最後まで返す。止めるのは次のターンの始め（段階2、checkBalance）。
+import { randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { tableName } from "./tables.mjs";
@@ -29,40 +30,81 @@ const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOption
  */
 export async function recordConsume({ ownerId, deviceId, timestamp, source, amountJpy, detail = {} }) {
   if (!ownerId || !deviceId || !timestamp) return false;
-  const amount = -(Number(amountJpy) || 0);
   try {
-    await ddb.send(new TransactWriteCommand({
-      TransactItems: [
-        {
-          Put: {
-            TableName: LEDGER_TABLE,
-            Item: {
-              owner_id: ownerId,
-              [LEDGER_SK]: `${timestamp}#consume#${deviceId}`,
-              type: "consume",
-              amount_jpy: amount,
-              timestamp, device_id: deviceId, source,
-              ...detail,
-            },
-            ConditionExpression: "attribute_not_exists(owner_id)",
-          },
-        },
-        {
-          Update: {
-            TableName: WALLETS_TABLE,
-            Key: { owner_id: ownerId },
-            UpdateExpression: "ADD balance_jpy :d SET updated_at = :t",
-            ExpressionAttributeValues: { ":d": amount, ":t": new Date().toISOString() },
-          },
-        },
-      ],
-    }));
+    await appendAndAdd(ownerId, {
+      [LEDGER_SK]: `${timestamp}#consume#${deviceId}`,
+      type: "consume",
+      amount_jpy: -(Number(amountJpy) || 0),
+      timestamp, device_id: deviceId, source,
+      ...detail,
+    });
     return true;
   } catch (e) {
     console.error("[wallet] consume error:", e?.name ?? e);
     return false;
   }
 }
+
+/**
+ * 運用者の手作業の調整（返金・お詫び・検証用など。11.2）。1回につき1行。書いた行は直さず、間違えたら逆向きの調整を足す。
+ * 運用者が手元から呼ぶ（infra/scripts/wallet-adjust.ts）。Lambda には書く権限が無い。失敗は投げる。
+ * @param {object} p
+ * @param {string} p.ownerId
+ * @param {number} p.amountJpy  足すなら正、引くなら負
+ * @param {string} p.memo       理由
+ * @param {string} p.by         書いた人
+ */
+export async function recordAdjust({ ownerId, amountJpy, memo, by }) {
+  const amount = Number(amountJpy);
+  if (!ownerId || !Number.isFinite(amount) || amount === 0) throw new Error("ownerId と 0 以外の amountJpy が要る");
+  if (!memo || !by) throw new Error("memo（理由）と by（書いた人）が要る");
+  const timestamp = new Date().toISOString();
+  const id = randomUUID().slice(0, 8);
+  await appendAndAdd(ownerId, { [LEDGER_SK]: `${timestamp}#adjust#${id}`, type: "adjust", amount_jpy: amount, timestamp, memo, by });
+  return { timestamp, id };
+}
+
+/** 台帳に1行足し（同じキーの行があれば失敗）、同じ額を残高に足す。1つのトランザクションで書く */
+async function appendAndAdd(ownerId, row) {
+  await ddb.send(new TransactWriteCommand({
+    TransactItems: [
+      {
+        Put: {
+          TableName: LEDGER_TABLE,
+          Item: { owner_id: ownerId, ...row },
+          ConditionExpression: "attribute_not_exists(owner_id)",
+        },
+      },
+      {
+        Update: {
+          TableName: WALLETS_TABLE,
+          Key: { owner_id: ownerId },
+          UpdateExpression: "ADD balance_jpy :d SET updated_at = :t",
+          ExpressionAttributeValues: { ":d": row.amount_jpy, ":t": new Date().toISOString() },
+        },
+      },
+    ],
+  }));
+}
+
+/**
+ * 会話・読み上げを始めてよいか（段階2）。残高が0以下（財布が無いときも0）なら始めない。
+ * 残高を読めなかったときは止めない（DynamoDB の障害で会話を全部止めないため。損はその間の原価だけ）。
+ * @returns {Promise<{ ok: boolean, balanceJpy: number|null }>}
+ */
+export async function checkBalance(ownerId) {
+  if (!ownerId) return { ok: true, balanceJpy: null };
+  try {
+    const balanceJpy = await getBalance(ownerId);
+    return { ok: balanceJpy > 0, balanceJpy };
+  } catch (e) {
+    console.error("[wallet] balance error:", e?.name ?? e);
+    return { ok: true, balanceJpy: null };
+  }
+}
+
+/** 残高0で止めたときの応答の error（アプリが文言を出し分ける） */
+export const NO_BALANCE = "no_balance";
 
 /** 残高（円）。財布が無ければ 0 */
 export async function getBalance(ownerId) {

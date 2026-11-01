@@ -12,7 +12,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
-import { recordConsume } from "../shared/wallet.mjs";
+import { recordConsume, checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
@@ -475,6 +475,8 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
 
   if (!text)    return fail(400, "text is required");
   if (!voiceId) return fail(400, "voice_id is required");
+  // 残高が0以下なら読み上げない（会話と同じ。docs/pricing-and-cost-model.md 11.3）
+  if (!(await checkBalance(ownerId)).ok) return fail(402, NO_BALANCE);
 
   // ボイス解決
   let ttsKey = TTS_DEFAULT;

@@ -12,6 +12,7 @@ import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { deviceGate } from "../shared/auth.mjs";
+import { checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 
 // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
 // 会話の間が空くとLLM/TTSへのTLS接続が閉じられ、次の相槌でハンドシェイクからやり直しになる
@@ -85,10 +86,10 @@ async function resolveCharacterFromDevice(deviceId) {
     const device = deviceRes.Item;
     if (!device) return { registered: false }; // 未登録機。本番では拒む（deviceGate）
 
-    if (device.character_id) {
-      return resolveCharacter(device.character_id);
-    }
-    return null;
+    // ownerId は残高の確認に使う。キャラクターが無い（未設定・解決できない）ときも持ち主は返す
+    const ownerId = device.owner_id ?? null;
+    const char = device.character_id ? await resolveCharacter(device.character_id) : null;
+    return char ? { ...char, ownerId } : { ownerId, noCharacter: true };
   } catch (e) {
     console.error("[resolveCharacterFromDevice] error:", e);
     return null;
@@ -383,15 +384,28 @@ export const handler = async (event, context) => {
     // ESP32 はログインしない。本番（AUTH_REQUIRED）では devices テーブルに登録済みの機器だけ通す（docs/auth.md）。
     // DynamoDB の失敗（null）は従来どおり続ける
     let registered = false;
+    let ownerId = null;
     if (deviceId) {
       const fromDevice = await resolveCharacterFromDevice(deviceId);
-      if (fromDevice?.registered !== false) { registered = true; charConfig = fromDevice; }
+      if (fromDevice?.registered !== false) {
+        registered = true;
+        ownerId = fromDevice?.ownerId ?? null;
+        charConfig = fromDevice?.noCharacter ? null : fromDevice;
+      }
     }
     {
       const gate = registered ? null : deviceGate(null);
       if (gate) {
         trace.set({ status: gate.statusCode, reason: gate.error });
         return { statusCode: gate.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: gate.error }) };
+      }
+    }
+    // 残高0なら相槌も返さない（本文が止める旨をしゃべる。docs/pricing-and-cost-model.md 11.3）。ファームは200以外を捨てる
+    if (ownerId) {
+      trace.set({ owner_id: ownerId });
+      if (!(await checkBalance(ownerId)).ok) {
+        trace.set({ status: 402, reason: NO_BALANCE });
+        return { statusCode: 402, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: NO_BALANCE }) };
       }
     }
     if (!charConfig && characterId) {

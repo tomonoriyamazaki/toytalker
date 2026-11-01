@@ -1217,12 +1217,13 @@ export default function Chat() {
 
       xhr.onload = () => {
         if (xhr.status >= 400) {
-          // 認証・所有者確認で拒まれた（docs/auth.md）。無言にせず理由を出す
+          // 認証・所有者確認（docs/auth.md）か、残高0（402 no_balance）で拒まれた。無言にせず理由を出す
           let reason = "";
           try { reason = JSON.parse(xhr.responseText || "{}").error ?? ""; } catch {}
           const msg = reason === "login_required" ? "ログインが必要です。設定のアカウント情報からログインしてください。"
             : reason === "invalid_token" ? "ログインの期限が切れました。設定のアカウント情報からログインし直してください。"
             : reason === "not_owner" ? "このキャラクターは使えません（別のアカウントのものです）。キャラクターを選び直してください。"
+            : reason === "no_balance" ? "ポイントがなくなりました。ポイントを追加すると、また話せます（残高は設定の利用状況で見られます）。"
             : `会話を始められませんでした（${xhr.status}${reason ? " " + reason : ""}）。`;
           setLog((L) => [...L, msg]);
           sendingRef.current = false;
