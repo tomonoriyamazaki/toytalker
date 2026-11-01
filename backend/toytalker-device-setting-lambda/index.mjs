@@ -6,7 +6,8 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, ScanComm
 import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
-import { getBalance, listLedgerByDate } from "../shared/wallet.mjs";
+import { getBalance, listLedgerBetween } from "../shared/wallet.mjs";
+import { jstDate, jstDayRange } from "../shared/jst.mjs";
 import { startTrace, describeClient } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner, ownerGate, touchLogin, AUTH_REQUIRED } from "../shared/auth.mjs";
 
@@ -474,7 +475,8 @@ async function route(method, path, event, body, identity, who, trace) {
     // ---- GET /usage ---- 月次利用状況取得
     if (method === "GET" && path === "/usage") {
       const ownerId = ownerOr("user_123");
-      const month   = event.queryStringParameters?.month ?? new Date().toISOString().slice(0, 7);
+      // usage の日付は日本時間（2026-11-01から。それより前の行は UTC の日付のまま）
+      const month   = event.queryStringParameters?.month ?? jstDate(new Date().toISOString()).slice(0, 7);
 
       // usageテーブルから該当月のレコードを取得
       const result = await ddb.send(new QueryCommand({
@@ -587,6 +589,8 @@ async function route(method, path, event, body, identity, who, trace) {
         } catch (e) { deviceNameMap[did] = did; }
       }
 
+      // date は日本時間の日付。chat-logs・台帳の timestamp は UTC なので、その日の範囲で拾う
+      const { start: dayStart, end: dayEnd } = jstDayRange(date);
       const allItems = [];
       for (const did of deviceIds) {
         const pk = `owner_id#${ownerId}#device_id#${did}`;
@@ -598,7 +602,7 @@ async function route(method, path, event, body, identity, who, trace) {
           ScanIndexForward: true,
         }));
         for (const item of (result.Items ?? [])) {
-          if (item.timestamp?.startsWith(date)) allItems.push({ ...item, _device_id: did });
+          if (item.timestamp >= dayStart && item.timestamp < dayEnd) allItems.push({ ...item, _device_id: did });
         }
       }
       allItems.sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
@@ -618,7 +622,7 @@ async function route(method, path, event, body, identity, who, trace) {
 
       // 金額は台帳から（ref で chat-logs の返答の行と結ぶ）。台帳が無い古い行は chat-logs のコスト列、それも無ければ計算し直す
       const ledgerByRef = new Map();
-      for (const row of await listLedgerByDate(ownerId, date)) {
+      for (const row of await listLedgerBetween(ownerId, dayStart, dayEnd)) {
         if (row.type !== "consume" || !row.ref || (deviceId && row.device_id !== deviceId)) continue;
         ledgerByRef.set(`${row.device_id}|${row.ref}`, row);
       }

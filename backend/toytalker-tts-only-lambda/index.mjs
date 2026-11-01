@@ -13,6 +13,7 @@ import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { recordConsume } from "../shared/wallet.mjs";
+import { jstDate } from "../shared/jst.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
 
@@ -397,7 +398,7 @@ async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len }) {
   try {
     await loadPricingCache();
     const ts = new Date().toISOString();
-    const date = ts.slice(0, 10);
+    const date = jstDate(ts);  // usage の日付は日本時間（為替の月は従来どおり UTC）
     const month = ts.slice(0, 7);
     const usdJpyRate = await getExchangeRate(month);
     const chars = [...text].length;

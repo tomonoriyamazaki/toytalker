@@ -71,16 +71,17 @@ export async function getBalance(ownerId) {
   return Number(r.Item?.balance_jpy) || 0;
 }
 
-/** その日（"YYYY-MM-DD"、UTC。chat-logs・usage と同じ切り方）の台帳の行 */
-export async function listLedgerByDate(ownerId, date) {
+/** 時刻が start 以上 end 未満（UTC の ISO 8601）の台帳の行。日本時間の1日は jst.mjs の jstDayRange で作る */
+export async function listLedgerBetween(ownerId, start, end) {
   const items = [];
   let ExclusiveStartKey;
   do {
     const r = await ddb.send(new QueryCommand({
       TableName: LEDGER_TABLE,
-      KeyConditionExpression: "owner_id = :o AND begins_with(#sk, :d)",
+      // 並べ替えキーは "時刻#type#id" なので、ちょうど end の時刻の行は end より後ろに並び、範囲から外れる
+      KeyConditionExpression: "owner_id = :o AND #sk BETWEEN :s AND :e",
       ExpressionAttributeNames: { "#sk": LEDGER_SK },
-      ExpressionAttributeValues: { ":o": ownerId, ":d": date },
+      ExpressionAttributeValues: { ":o": ownerId, ":s": start, ":e": end },
       ExclusiveStartKey,
     }));
     items.push(...(r.Items ?? []));

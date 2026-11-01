@@ -119,7 +119,9 @@ export default function Settings() {
   // 利用状況
   const [usageData, setUsageData] = useState<any>(null);
   const [usageLoading, setUsageLoading] = useState(false);
-  const [usageMonth, setUsageMonth] = useState(() => new Date().toISOString().slice(0, 7));
+  // 利用額は日本時間の日付で区切る（サーバーの usage と同じ）。端末の時間帯に関係なく JST の今月
+  const jstMonthNow = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 7);
+  const [usageMonth, setUsageMonth] = useState(jstMonthNow);
   const [expandedApi, setExpandedApi] = useState<string | null>(null);
   const [expandedDevice, setExpandedDevice] = useState<string | null>(null);
   const [usageDetailData, setUsageDetailData] = useState<any>(null);
@@ -150,7 +152,7 @@ export default function Settings() {
   };
 
   const openUsage = () => {
-    const month = new Date().toISOString().slice(0, 7);
+    const month = jstMonthNow();
     setUsageMonth(month);
     setExpandedApi(null);
     setExpandedDevice(null);

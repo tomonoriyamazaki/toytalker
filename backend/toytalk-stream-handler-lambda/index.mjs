@@ -10,6 +10,7 @@
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
   import { recordConsume } from "../shared/wallet.mjs";
+import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
   import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
@@ -1049,7 +1050,7 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
         const assistantTimestamp = new Date().toISOString();
 
         await loadPricingCache();
-        const date = assistantTimestamp.slice(0, 10);
+        const date = jstDate(assistantTimestamp);  // usage の日付は日本時間（為替の月は従来どおり UTC）
         const month = assistantTimestamp.slice(0, 7);
         const usdJpyRate = await getExchangeRate(month);
 
