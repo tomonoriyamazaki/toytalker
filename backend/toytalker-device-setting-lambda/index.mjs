@@ -709,7 +709,7 @@ async function route(method, path, event, body, identity, who, trace) {
 
       if (provider === "Cartesia") {
         // Cartesia Instant clone: 音声をそのまま送り、返ってきたボイスUUIDを vendor_id にする。
-        // 元音声はS3に控えを残す（作り直し・移行用）。
+        // 元音声は持たない（2026-11-03。家族の声を預からないため。作り直し・移行は録り直しで行う）。
         const cartesiaKey = secret("CARTESIA_API_KEY");
         if (!cartesiaKey) return response(500, { error: "Cartesia not configured" });
         const mime = (mime_type || "audio/wav").toLowerCase();
@@ -736,8 +736,6 @@ async function route(method, path, event, body, identity, who, trace) {
         const cv = await cr.json();
         if (!cv?.id) return response(502, { error: "Cartesia clone returned no voice id" });
 
-        const sampleKey = `${owner_id}/cartesia_${voiceId}.${ext}`;
-        await s3.send(new PutObjectCommand({ Bucket: SPEAKERS_BUCKET, Key: sampleKey, Body: audioBuf, ContentType: mime }));
         await ddb.send(new PutCommand({
           TableName: VOICES_TABLE,
           Item: {
@@ -746,7 +744,6 @@ async function route(method, path, event, body, identity, who, trace) {
             owner_id,
             vendor_id: cv.id,
             label,
-            sample_key: sampleKey,
             created_at: new Date().toISOString(),
           },
         }));

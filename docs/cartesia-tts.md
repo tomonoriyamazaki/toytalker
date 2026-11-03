@@ -100,9 +100,9 @@ aws lambda get-function-configuration --function-name toytalk-stream-handler-lam
 
 ZakiCorpのカスタムボイスと同じ画面・同じAPIで、Cartesia Instant cloneも作れるようにした。
 
-- **API**: `POST /custom-voices` の `provider` に `"Cartesia"` を渡す（省略時は ZakiCorp）。デバイス設定Lambdaが音声をそのまま `POST https://api.cartesia.ai/voices/clone`（multipart、`language: ja`）へ送り、返ってきたボイスUUIDを `vendor_id` に保存する。元音声は `toytalker-tts-speakers` の `{owner_id}/cartesia_{voice_id}.{ext}` に控えを残し、`sample_key` に記録する。
+- **API**: `POST /custom-voices` の `provider` に `"Cartesia"` を渡す（省略時は ZakiCorp）。デバイス設定Lambdaが音声をそのまま `POST https://api.cartesia.ai/voices/clone`（multipart、`language: ja`）へ送り、返ってきたボイスUUIDを `vendor_id` に保存する。**元音声は持たない**（2026-11-03。家族の声を預からないため。作り直し・別会社への移行は録り直しで行う。それまでは `toytalker-tts-speakers` の `{owner_id}/cartesia_{voice_id}.{ext}` に控えを残し `sample_key` に記録していたが、既存の控えも削除した）。
 - **一覧**: `GET /custom-voices` は ZakiCorp と Cartesia の両方（system + 自分のもの）を返す。`GET /voices` は owner_id 付きの行を除外する（ZakiCorp限定から一般化）。
-- **削除**: `DELETE /custom-voices/{id}` は Cartesia 側のボイスも `DELETE /voices/{uuid}` で消し、S3の控えも消す。
+- **削除**: `DELETE /custom-voices/{id}` は Cartesia 側のボイスも `DELETE /voices/{uuid}` で消す（古い行に `sample_key` があれば S3 の控えも消す。控えは削除済みなので空振りする）。
 - **受け付ける音声**: wav / mp3 / ogg / flac / webm、16MB以下。m4a（iOSのボイスメモなど）はCartesiaが受け付けないため400を返す。アプリの録音はwavなので問題ない。
 - **アプリ**: 録音画面に「作成に使うエンジン」の切替（Cartesia / ZakiCorp、既定Cartesia）。Cartesiaは録音10秒、ZakiCorpは5秒。ボイス選択と読み上げ画面に「Cartesia（カスタム）」の区分を追加。
 - **環境変数**: デバイス設定Lambdaに `CARTESIA_API_KEY` を設定済み。

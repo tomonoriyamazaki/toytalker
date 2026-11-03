@@ -444,6 +444,13 @@ export class ToyTalkerStack extends cdk.Stack {
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
       enforceSSL: true, // 平文HTTPのアクセスを拒否するバケットポリシー（Security Hub S3.5。2026-10-25）
       removalPolicy: cdk.RemovalPolicy.RETAIN,
+      // 消した声のデータを本当に消す（2026-11-04）。バージョニングでは削除しても古い版が残り続けるので、
+      // 古い版は35日（バックアップ保管庫の保持日数と同じ）で消し、残った削除マーカーも片付ける。
+      lifecycleRules: [{
+        id: "expire-noncurrent-35d",
+        noncurrentVersionExpiration: cdk.Duration.days(35),
+        expiredObjectDeleteMarker: true,
+      }],
     });
 
     // ---- SNS: 月次運用レポートの宛先 ----
