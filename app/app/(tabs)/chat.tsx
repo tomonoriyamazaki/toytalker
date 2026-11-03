@@ -106,6 +106,54 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
   return bytes.buffer;
 }
 
+// 文字の出し方（2026-11-03 試し）。
+//   "voice":  文ごとに、その文の音声が鳴り始めてから、声の長さの REVEAL_SPEED 倍の時間で1字ずつ出す（文の間で止まる。声ごとに速さが違う）
+//   "steady": 返答の最初の音声が鳴ったら、以後の文は音声を待たず REVEAL_CHARS_PER_SEC の一定の速さで続けて出す（文字が声より先に進む）
+// 相槌はどちらでも音声が鳴り始めたときに出す。戻すときは "voice" にするだけ
+const REVEAL_MODE: "voice" | "steady" = "steady";
+const REVEAL_SPEED = 0.4;
+const REVEAL_CHARS_PER_SEC = 20;
+// 返答・相槌の1行。時刻 at から span ミリ秒かけて1字ずつ出す。
+// 各字は REVEAL_FADE_MS かけて薄い色から濃くする（パッと出さずになめらかに）。
+// 時間が過ぎてから描かれたとき（画面の作り直しなど）は最初から全文を出す
+const REVEAL_FADE_MS = 250;
+function RevealText({ text, at, span, style }: { text: string; at: number; span: number; style: any }) {
+  const chars = Array.from(text);
+  const doneAt = at + span + REVEAL_FADE_MS;
+  const [now, setNow] = useState(Date.now);
+  useEffect(() => {
+    if (span <= 0 || Date.now() >= doneAt) return;
+    let raf = 0;
+    const tick = () => {
+      const t = Date.now();
+      setNow(t);
+      if (t < doneAt) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [text, at, span]);
+  if (span <= 0 || now >= doneAt) return <Text selectable style={style}>{text}</Text>;
+
+  // 濃さが1になった字はまとめ、現れ途中の字だけ1字ずつ色の濃さを変える
+  const step = span / chars.length;
+  let solid = "";
+  const fading: { c: string; a: number }[] = [];
+  for (let i = 0; i < chars.length; i++) {
+    const a = Math.min(1, Math.max(0, (now - at - i * step) / REVEAL_FADE_MS));
+    if (a <= 0) break;
+    if (a >= 1 && fading.length === 0) solid += chars[i];
+    else fading.push({ c: chars[i], a });
+  }
+  return (
+    <Text selectable style={style}>
+      {solid}
+      {fading.map((f, i) => (
+        <Text key={i} style={{ color: `rgba(0,0,0,${f.a})` }}>{f.c}</Text>
+      ))}
+    </Text>
+  );
+}
+
 export default function Chat() {
   const ownerId = useOwnerId();
   // 時間計測
@@ -299,7 +347,13 @@ export default function Chat() {
 
   // 音声キュー
   const playingRef = useRef(false);
-  const queueRef = useRef<Array<{ uri: string }>>([]);
+  // 文字は音声が鳴り始めたときに出す（画面の順番を鳴った順番に揃える）。uri の無い項目は文字だけ（音声が作れなかった文）
+  type Queued = { uri?: string; text?: string; notice?: string; kind?: "bc"; session: string };
+  const queueRef = useRef<Queued[]>([]);
+  // steady 用。返答の最初の音声が鳴ったか / 一定速で出している文字が出し終わる時刻 / 音声待ちの文（send ごとに作り直す）
+  const replyAudioStartedRef = useRef(false);
+  const steadyCursorRef = useRef(0);
+  const pendingTextsRef = useRef<Map<string, string>>(new Map());
   const loopBeatRef = useRef(0);
   const currentSoundRef = useRef<any>(null); // 再生中のSoundオブジェクト
 
@@ -767,8 +821,7 @@ export default function Chat() {
                 if (data.audio) {
                   if (sttFinishedRef.current) {
                     console.log("[BC] playing now");
-                    setLog(L => [...L, data.text]);
-                    enqueueAudio(data.audio, `bc-${Date.now()}`, data.format || "wav");
+                    enqueueAudio(data.audio, `bc-${Date.now()}`, data.format || "wav", { text: data.text, kind: "bc" });
                   } else {
                     console.log("[BC] cached for later");
                     backchannelAudioRef.current = { text: data.text, audio: data.audio, format: data.format || "wav" };
@@ -811,8 +864,7 @@ export default function Chat() {
         const bc = backchannelAudioRef.current;
         if (bc) {
           console.log("[BC] Playing cached backchannel:", bc.text);
-          setLog(L => [...L, bc.text]);
-          enqueueAudio(bc.audio, `bc-${Date.now()}`, bc.format);
+          enqueueAudio(bc.audio, `bc-${Date.now()}`, bc.format, { text: bc.text, kind: "bc" });
           backchannelAudioRef.current = null;
         }
         // ケース1（fetchがまだ返ってない）はfetch完了時にsttFinishedRefを見て即再生
@@ -845,6 +897,7 @@ export default function Chat() {
       currentSoundRef.current?.stop();
       currentSoundRef.current?.release();
       currentSoundRef.current = null;
+      for (const item of queueRef.current) showQueued(item, 0);
       queueRef.current = [];
       playingRef.current = false;
     }
@@ -916,13 +969,50 @@ export default function Chat() {
   };
 
   /* === 既存: 音声再生キュー/TTS === */
-  const enqueueAudio = async (b64: string, id: string, format: string) => {
+  // 鳴らす項目の文字を出す。ms は音声の長さ（0なら全文を一度に）。会話を切り替えた後に鳴った分は出さない
+  const showQueued = (item: Queued, ms: number) => {
+    if (item.session !== sessionIdRef.current) return;
+    if (REVEAL_MODE === "steady" && item.uri && item.kind !== "bc") {
+      // 返答の音声が鳴り始めた。この文と、すでに届いている後ろの文（鳴る待ちの音声に付いた文字、音声がまだ来ていない文）を一定速で続けて出す
+      if (item.notice) setLog((L) => [...L, item.notice!]);
+      if (item.text) showSteady(item.text);
+      for (const q of queueRef.current) {
+        if (q.text && q.uri && q.kind !== "bc" && q.session === item.session) { showSteady(q.text); q.text = undefined; }
+      }
+      for (const text of pendingTextsRef.current.values()) showSteady(text);
+      pendingTextsRef.current.clear();
+      replyAudioStartedRef.current = true;
+      return;
+    }
+    const lines: string[] = [];
+    if (item.notice) lines.push(item.notice);
+    if (item.text) lines.push(ms > 0 ? JSON.stringify({ type: "bot", text: item.text, at: Date.now(), span: ms * REVEAL_SPEED }) : item.text);
+    if (lines.length > 0) setLog((L) => [...L, ...lines]);
+  };
+
+  // steady: 前の文の出し終わりに続けて、文字数に応じた時間で出す
+  const showSteady = (text: string) => {
+    const at = Math.max(Date.now(), steadyCursorRef.current);
+    const span = (Array.from(text).length / REVEAL_CHARS_PER_SEC) * 1000;
+    steadyCursorRef.current = at + span;
+    setLog((L) => [...L, JSON.stringify({ type: "bot", text, at, span })]);
+  };
+
+  // 音声の無い文字だけの項目。鳴らす待ちがあればその後ろに並べ、無ければすぐ出す
+  const enqueueText = (text: string) => {
+    const item: Queued = { text, session: sessionIdRef.current };
+    if (playingRef.current || queueRef.current.length > 0) queueRef.current.push(item);
+    else showQueued(item, 0);
+  };
+
+  const enqueueAudio = async (b64: string, id: string, format: string, show?: { text?: string; notice?: string; kind?: "bc" }) => {
     if(DEBUG)setLog(L => [...L, `---start--- enqueueAudio called: id=${id}, format=${format}`]);
+    const session = sessionIdRef.current;
     const path = `${FileSystem.cacheDirectory}${id}.${format}`;
     await FileSystem.writeAsStringAsync(path, b64, {
       encoding: FileSystem.EncodingType.Base64,
     });
-    queueRef.current.push({ uri: path });
+    queueRef.current.push({ uri: path, ...show, session });
     if (DEBUG) setLog(L => [...L, `before playLoop queue length: ${queueRef.current.length}`]);
     if (DEBUG) setLog(L => [...L, `before playLoop playingRef status: ${playingRef.current}`]);
     if (!playingRef.current) {
@@ -944,13 +1034,18 @@ export default function Chat() {
     try {
       Sound.setCategory("Playback");
       while (queueRef.current.length) {
-        const { uri } = queueRef.current.shift()!;
-        const path = uri.replace("file://", "");
+        const item = queueRef.current.shift()!;
+        if (!item.uri) {
+          showQueued(item, 0);
+          continue;
+        }
+        const path = item.uri.replace("file://", "");
         console.log(`🎵 dequeued (Sound): ${path}`);
         await new Promise<void>((resolve) => {
           const s = new Sound(path, "", (error) => {
             if (error) {
               console.log("❌ Sound load error:", error);
+              showQueued(item, 0);
               currentSoundRef.current = null;
               resolve();
               return;
@@ -962,6 +1057,7 @@ export default function Chat() {
             if (queueRef.current.length === 0 && sttMode === "soniox") {
               preconnectSonioxWs();
             }
+            showQueued(item, s.getDuration() * 1000);
             s.play((success) => {
               if (success) console.log("🏁 Finished playing:", path);
               else console.log("⚠️ Playback failed:", path);
@@ -1081,6 +1177,16 @@ export default function Chat() {
       let buffer = "";
       let accText = "";
       const printedIds = new Set<string>();
+      // 文のid → 文字。音声（tts）が届いたら音声と一緒に順番待ちへ入れ、鳴り始めに出す
+      const pendingTexts = new Map<string, string>();
+      pendingTextsRef.current = pendingTexts;
+      replyAudioStartedRef.current = false;
+      steadyCursorRef.current = 0;
+      // 音声が来なかった文（TTSの失敗など）の文字を、鳴らす待ちの後ろに並べる。応答の終わり・通信の失敗で呼ぶ
+      const flushPendingTexts = () => {
+        for (const text of pendingTexts.values()) enqueueText(text);
+        pendingTexts.clear();
+      };
       let fallbackNoticeShown = false; // 主の声が混み合ってずんだもんに替わったことを、返答ごとに1回だけ知らせる
       let lastEventType: string | null = null;
       let currentEvent: string | null = null;
@@ -1112,15 +1218,24 @@ export default function Chat() {
             if (DEBUG_TIME && !(mtRef.current as any).firstTtsArriveAt) mtSet("firstTtsArriveAt");
             const obj = JSON.parse(dataStr);
             const { id, b64, format, fallback } = obj || {};
-            if (fallback && !fallbackNoticeShown) {
-              fallbackNoticeShown = true;
-              setLog((L) => [...L, "（混み合っているため、一時的に別の声で話しています）"]);
-            }
             if (id != null && b64 && format) {
               const key = `tts:${String(id)}`;
               if (!printedIds.has(key)) {
                 printedIds.add(key);
-                enqueueAudio(b64, String(id), String(format));
+                const text = pendingTexts.get(String(id));
+                pendingTexts.delete(String(id));
+                // 切り替えの一言は、切り替わった文の前に出す（steady で文字がもう出ていれば、その後ろ）
+                let notice: string | undefined;
+                if (fallback && !fallbackNoticeShown) {
+                  fallbackNoticeShown = true;
+                  notice = "（混み合っているため、一時的に別の声で話しています）";
+                }
+                if (REVEAL_MODE === "steady" && replyAudioStartedRef.current) {
+                  if (notice) setLog((L) => [...L, notice!]);
+                  enqueueAudio(b64, String(id), String(format));
+                } else {
+                  enqueueAudio(b64, String(id), String(format), { text, notice });
+                }
               }
             }
           } else if (ev === "segment") {
@@ -1134,7 +1249,9 @@ export default function Chat() {
             if (!segKey || !printedIds.has(segKey)) {
               if (segKey) printedIds.add(segKey);
               if (text) {
-                setLog((L) => [...L, text]);
+                if (REVEAL_MODE === "steady" && replyAudioStartedRef.current) showSteady(text);
+                else if (segId) pendingTexts.set(segId, text);
+                else enqueueText(text);
                 curAssistantRef.current += text;
               }
             }
@@ -1144,6 +1261,7 @@ export default function Chat() {
           } else if (ev === "error") {
             setLog((L) => [...L, `Error: ${dataStr}`]);
           } else if (ev === "done") {
+            flushPendingTexts();
             if (DEBUG_TIME) mtReport(setLog);
           }
         } catch (e: any) {
@@ -1184,6 +1302,7 @@ export default function Chat() {
         if (chunk) processChunk(chunk);
       };
       xhr.onerror = () => {
+        flushPendingTexts();
         // 未受信でもサーバーが処理済みの可能性はある。再送は最大2回に制限する。
         // 受信開始後の失敗は再送しない(既に再生した音声・表示した文が二重になるため)。
         const receivedNothing = lastIndex === 0;
@@ -1210,6 +1329,7 @@ export default function Chat() {
         sendingRef.current = false;
       };
       xhr.ontimeout = () => {
+        flushPendingTexts();
         // 30s待った後なので再送しない
         setLog((L) => [...L, "応答の受信が30秒以内に完了しなかったため、通信を終了しました。もう一度お試しください。"]);
         sendingRef.current = false;
@@ -1232,6 +1352,7 @@ export default function Chat() {
         const text = xhr.responseText || "";
         const tail = text.slice(lastIndex);
         if (tail) processChunk(tail);
+        flushPendingTexts();
         const out = accText.trim();
         if (DEBUG) setLog((L) => [...L, "=== stream done ==="]);
 
@@ -1381,6 +1502,8 @@ export default function Chat() {
             if (obj.type === "user") {
               content = obj.text;
               isUser = true;
+            } else if (obj.type === "bot") {
+              return <RevealText key={i} text={obj.text} at={obj.at} span={obj.span} style={s.line} />;
             }
           } catch {}
           if (isUser) {
