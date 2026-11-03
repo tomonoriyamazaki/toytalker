@@ -109,7 +109,7 @@ const common = {
   region: "ap-northeast-1",
   opsEmail: "exodjp@gmail.com",
   zakicorpTtsUrl: "https://tts.zakicorp.com",
-  sonioxModel: "stt-rt-v4",
+  sonioxModel: "stt-rt-v6",
   cartesiaDefaultVoiceId: "c7eafe22-8b71-40cd-850b-c5a3bbd8f8d2",
   architecture: "x86_64",
   wallet: { stopAtZero: true },
