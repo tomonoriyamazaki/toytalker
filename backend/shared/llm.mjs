@@ -11,6 +11,12 @@
 // トークン数は呼び出し側が渡す usage = { in, out } に足し込む（検索ありのターンは要求が2回になる）。
 import { secret } from "./secrets.mjs";
 
+// ---- コードに書くLLMのモデル名はここだけ（モデルの終了通知が来たら、ここと toytalker-llms の行を見る。ロードマップ15） ----
+// 本文の既定は toytalker-llms の is_default 行。これはそのテーブルが読めなかったときの予備
+export const FALLBACK_DEFAULT_LLM = { provider: "google", modelId: "gemini-3.5-flash-lite" };
+// 相槌（backchannel Lambda 2本）。キャラクターの設定によらず固定。速さ最優先で選ぶ（2026-11-03 計測: 相槌1回 0.5〜0.9秒、2.5 と同じか少し速い）
+export const BACKCHANNEL_LLM_MODEL = "gemini-3.5-flash-lite";
+
 // ---- Web検索ツール ----
 
 export const WEB_SEARCH_TOOL = {
@@ -213,7 +219,7 @@ function toGeminiRequest(messages) {
 
 // Gemini の思考は切る（会話の遅延と、記録されない思考トークンを避ける）。
 // 2.5系は thinkingBudget:0、3系は thinkingLevel:"minimal"（3系に thinkingBudget を送ると 400）
-function geminiThinkingConfig(model) {
+export function geminiThinkingConfig(model) {
   return /^gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: "minimal" };
 }
 

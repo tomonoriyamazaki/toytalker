@@ -89,11 +89,13 @@ async function appendAndAdd(ownerId, row) {
 
 /**
  * 会話・読み上げを始めてよいか（段階2）。残高が0以下（財布が無いときも0）なら始めない。
+ * 環境変数 WALLET_STOP_AT_ZERO が "false" の環境（RnD）は残高にかかわらず続ける。引き落としはそのまま記録するので残高はマイナスになる。
  * 残高を読めなかったときは止めない（DynamoDB の障害で会話を全部止めないため。損はその間の原価だけ）。
  * @returns {Promise<{ ok: boolean, balanceJpy: number|null }>}
  */
 export async function checkBalance(ownerId) {
   if (!ownerId) return { ok: true, balanceJpy: null };
+  if (process.env.WALLET_STOP_AT_ZERO === "false") return { ok: true, balanceJpy: null };
   try {
     const balanceJpy = await getBalance(ownerId);
     return { ok: balanceJpy > 0, balanceJpy };

@@ -12,7 +12,7 @@
   import { tableName } from "../shared/tables.mjs";
   import { recordConsume, checkBalance } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
-  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION } from "../shared/llm.mjs";
+  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
   import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { deviceGate } from "../shared/auth.mjs";
 
@@ -256,9 +256,7 @@ import { deviceGate } from "../shared/auth.mjs";
 
   // ---- LLMデフォルト（llm_id未設定時のフォールバック）----
   // toytalker-llms の is_default エントリを使う（コンテナ生存中はキャッシュ）。
-  // テーブルから取れないときだけ下の定数に落ちる
-  const LLM_DEFAULT_PROVIDER = "google";
-  const LLM_DEFAULT_MODEL    = "gemini-2.5-flash";
+  // テーブルから取れないときだけ FALLBACK_DEFAULT_LLM（backend/shared/llm.mjs）に落ちる
   let defaultLlmPromise = null;
   function loadDefaultLlm() {
     if (!defaultLlmPromise) {
@@ -270,7 +268,7 @@ import { deviceGate } from "../shared/auth.mjs";
         } catch (e) {
           console.error("[DynamoDB] loadDefaultLlm error:", e);
         }
-        return { provider: LLM_DEFAULT_PROVIDER, modelId: LLM_DEFAULT_MODEL };
+        return FALLBACK_DEFAULT_LLM;
       })();
     }
     return defaultLlmPromise;
@@ -459,6 +457,8 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
   // 主プロバイダーが 429（同時接続上限）や 5xx で失敗したら短く再試行し、だめならずんだもん（Sakura）で続ける。
   // 主プロバイダーが遅いとき（1文の合成が TTS_SLOW_MS を超えた）も、待たずにずんだもんへ切り替える（再試行はしない）。
   // ふだんは Cartesia で最大2秒程度（2026-10の実測）。Gemini はふだんから数秒かかるので対象外。
+  // 長い文ほど合成に時間がかかるので、待つ時間は TTS_SLOW_MS ＋ 1文字あたりの上乗せ（声ごと）。
+  // 上乗せの根拠（声ごとの実測）は docs/tts-fallback-and-notifications.md の第2節。
   // 一度切り替えたらその返答の残りはずんだもんのまま。仕様: docs/tts-fallback-and-notifications.md
   const TTS_RETRY_WAITS_MS = [300, 600];
   const TTS_FALLBACK_NOTICE = "いまはこんでいるから、べつのこえでおはなしするね。";
@@ -469,6 +469,9 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
   }
   const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
   const TTS_SLOW_MS = 3000;
+  const TTS_SLOW_MS_PER_CHAR = { cartesia: 15, openai: 15, fishaudio: 50, zakicorp: 50 };
+  const TTS_SLOW_MS_PER_CHAR_DEFAULT = 30;
+  const ttsSlowMs = (vendor, text) => TTS_SLOW_MS + (TTS_SLOW_MS_PER_CHAR[vendor] ?? TTS_SLOW_MS_PER_CHAR_DEFAULT) * Array.from(text ?? "").length;
   const TTS_SLOW_EXEMPT = new Set(["sakura", "gemini"]);
   class TtsSlowError extends Error {
     constructor(ms) { super(`TTS slower than ${ms}ms`); this.name = "TtsSlowError"; this.slow = true; }
@@ -875,7 +878,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         }
         return pcmBuffer;
       }
-      const callPrimary = (t) => TTS_SLOW_EXEMPT.has(cfg.ttsVendor) ? synthesizePrimary(t) : withTtsDeadline(synthesizePrimary(t), TTS_SLOW_MS);
+      const callPrimary = (t) => TTS_SLOW_EXEMPT.has(cfg.ttsVendor) ? synthesizePrimary(t) : withTtsDeadline(synthesizePrimary(t), ttsSlowMs(cfg.ttsVendor, t));
       const synthesizeFallback = (t) => { seg.attempts++; return ttsBufferSakura(t, { model: "zundamon" }); };
       try {
         let pcmBuffer;

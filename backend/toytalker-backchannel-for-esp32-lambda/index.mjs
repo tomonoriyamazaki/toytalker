@@ -13,6 +13,7 @@ import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { deviceGate } from "../shared/auth.mjs";
 import { checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
+import { BACKCHANNEL_LLM_MODEL, geminiThinkingConfig } from "../shared/llm.mjs";
 
 // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
 // 会話の間が空くとLLM/TTSへのTLS接続が閉じられ、次の相槌でハンドシェイクからやり直しになる
@@ -157,14 +158,14 @@ async function generateBackchannel(partialText, personalityPrompt, history = [],
 - 絶対に質問・返答・感想・コメントはしない。相槌のみ`;
 
   const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${key}`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${BACKCHANNEL_LLM_MODEL}:generateContent?key=${key}`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: systemPrompt }] },
         contents: [{ role: "user", parts: [{ text: `（話し中）${partialText}` }] }],
-        generationConfig: { maxOutputTokens: 20, temperature: 0.9, thinkingConfig: { thinkingBudget: 0 } },
+        generationConfig: { maxOutputTokens: 20, temperature: 0.9, thinkingConfig: geminiThinkingConfig(BACKCHANNEL_LLM_MODEL) },
       }),
     }
   );
@@ -216,26 +217,30 @@ async function ttsPcmGoogle(text, { voiceName = "ja-JP-Neural2-B", sampleRateHer
 async function ttsPcmGemini(text, { model = "gemini-2.5-flash-preview-tts", voiceName = "Kore" } = {}) {
   const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-    {
-      method: "POST",
-      headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ parts: [{ text }] }],
-        generationConfig: {
-          responseModalities: ["AUDIO"],
-          speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-        },
-        model,
-      }),
-    }
-  );
-  const json = await resp.json();
-  if (!resp.ok) throw new Error(json?.error?.message || "Gemini TTS failed");
-  const b64Pcm = json?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
-  if (!b64Pcm) throw new Error("Gemini TTS: empty audio");
-  return Buffer.from(b64Pcm, "base64");
+  // Gemini はたまに音声の無い応答を返す（短い相槌で起きやすい。2026-11-03）。本文Lambdaと同じく空ならやり直す。
+  // 相槌は遅れると意味が無いので1回だけ
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+      {
+        method: "POST",
+        headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{ parts: [{ text }] }],
+          generationConfig: {
+            responseModalities: ["AUDIO"],
+            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
+          },
+          model,
+        }),
+      }
+    );
+    const json = await resp.json();
+    if (!resp.ok) throw new Error(json?.error?.message || "Gemini TTS failed");
+    const b64Pcm = json?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
+    if (b64Pcm) return Buffer.from(b64Pcm, "base64");
+  }
+  throw new Error("Gemini TTS: empty audio after retry");
 }
 
 async function ttsPcmElevenLabs(text, { model = "eleven_turbo_v2_5", voiceId = "hMK7c1GPJmptCzI4bQIu" } = {}) {

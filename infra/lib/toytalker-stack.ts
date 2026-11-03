@@ -187,6 +187,8 @@ const CORS_GET_ONLY: lambda.CfnUrl.CorsProperty = {
 const TTS_ENV = ["CARTESIA_DEFAULT_VOICE_ID", "ZAKICORP_TTS_URL"] as const;
 /** 利用者認証（backend/shared/auth.mjs）。アプリから呼ばれる Lambda に配る。ESP32 用は AUTH_REQUIRED だけ（未登録機の門） */
 const AUTH_ENV = ["AUTH_REQUIRED", "COGNITO_USER_POOL_ID", "COGNITO_CLIENT_ID"] as const;
+/** 前払いポイントの残高確認（backend/shared/wallet.mjs の checkBalance）。残高を確かめる Lambda に配る */
+const WALLET_ENV = ["WALLET_STOP_AT_ZERO"] as const;
 
 const TTS_SECRETS = [
   "OPENAI_API_KEY",
@@ -220,7 +222,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 120,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, "AUTH_REQUIRED"],
+    env: [...TTS_ENV, "AUTH_REQUIRED", ...WALLET_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-mcu" },
     warm: true,
@@ -238,7 +240,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 2048,
     timeoutSeconds: 120,
     format: "esm",
-    env: [...TTS_ENV, ...AUTH_ENV],
+    env: [...TTS_ENV, ...AUTH_ENV, ...WALLET_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-app" },
     warm: true,
@@ -255,7 +257,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 1024,
     timeoutSeconds: 20,
     format: "esm",
-    env: [...TTS_ENV, ...AUTH_ENV],
+    env: [...TTS_ENV, ...AUTH_ENV, ...WALLET_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/backchannel-app" },
     warm: true,
@@ -272,7 +274,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 20,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, "AUTH_REQUIRED"],
+    env: [...TTS_ENV, "AUTH_REQUIRED", ...WALLET_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY"],
     url: { invokeMode: "BUFFERED", route: "/backchannel-mcu" },
     warm: true,
@@ -322,7 +324,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 2048,
     timeoutSeconds: 120,
     format: "esm",
-    env: [...TTS_ENV, ...AUTH_ENV],
+    env: [...TTS_ENV, ...AUTH_ENV, ...WALLET_ENV],
     secrets: [...TTS_SECRETS],
     url: {
       invokeMode: "RESPONSE_STREAM",
@@ -421,6 +423,7 @@ export class ToyTalkerStack extends cdk.Stack {
 
     const allEnv: Record<string, string> = {
       AUTH_REQUIRED: String(config.auth.required),
+      WALLET_STOP_AT_ZERO: String(config.wallet.stopAtZero),
       COGNITO_USER_POOL_ID: auth.userPool.userPoolId,
       COGNITO_CLIENT_ID: auth.client.userPoolClientId,
       CARTESIA_DEFAULT_VOICE_ID: config.cartesiaDefaultVoiceId,

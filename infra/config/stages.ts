@@ -54,6 +54,12 @@ export interface StageConfig {
    *   Apple の秘密鍵）は Secrets Manager（lib/secrets.ts の IDP_SECRETS）。SSM の ssm-secure は Cognito の IdP に使えない
    *   （CloudFormation の対応資源に無い。2026-10-29確認）ので、この2件だけ Secrets Manager
    */
+  /**
+   * 前払いポイント（docs/pricing-and-cost-model.md 第11節）。stopAtZero: 残高0以下（財布が無い利用者も）の会話・読み上げを止めるか。
+   * 本番は true。RnD は false（外部テスターや家族の端末を止めない。引き落としは記録するので残高はマイナスになる）。
+   * 止まる動きを RnD で試すときは一時的に true にしてデプロイする。環境変数 WALLET_STOP_AT_ZERO で Lambda へ渡す
+   */
+  readonly wallet: { readonly stopAtZero: boolean };
   readonly auth: {
     readonly required: boolean;
     readonly domainPrefix: string;
@@ -99,6 +105,7 @@ const common = {
   sonioxModel: "stt-rt-v4",
   cartesiaDefaultVoiceId: "c7eafe22-8b71-40cd-850b-c5a3bbd8f8d2",
   architecture: "x86_64",
+  wallet: { stopAtZero: true },
 } as const;
 
 export const stages: Record<StageName, StageConfig> = {
@@ -113,6 +120,7 @@ export const stages: Record<StageName, StageConfig> = {
     firmwareBucketName: "toytalker-firmware", // 手作業で作成済み（2026-09-16）。CDKは参照のみ
     apiDomain: "api-rnd.zakicorp.com",
     directFunctionUrls: true, // 配布機（OTA非対応の旧ファーム）と旧アプリが Function URL を直接呼ぶ間は true。ロードマップ6の書き換え後に false
+    wallet: { stopAtZero: false }, // 2026-11-03決定。財布の無い外部テスター等が黙って止まっていたため
     auth: {
       required: false,
       domainPrefix: "toytalker-auth-rnd",
