@@ -963,6 +963,10 @@ export default function Settings() {
                         ポイントがなくなりました。会話と読み上げは、ポイントを追加するまで止まっています。
                       </Text>
                     )}
+                    {/* 購入導線は Web の案内にとどめる（アプリ内課金のルール。docs/pricing-and-cost-model.md 11.1）。リンクにはしない */}
+                    <Text style={s.usageBalanceHint}>
+                      ポイントの追加は Web の購入ページ（toytalker.zakicorp.com/buy）から、アプリと同じアカウントでログインして行えます。
+                    </Text>
                   </>
                 )}
 
@@ -1610,6 +1614,7 @@ const s = StyleSheet.create({
   usageBalanceValue:       { fontSize: 16, fontWeight: "700", color: "#333" },
   usageBalanceEmpty:       { color: "#D32F2F" },
   usageBalanceNotice:      { fontSize: 13, color: "#D32F2F", marginTop: 6, paddingHorizontal: 4 },
+  usageBalanceHint:        { fontSize: 12, color: "#888", marginTop: 6, paddingHorizontal: 4 },
   usageApiCard:            { backgroundColor: "#f9f9f9", padding: 14, borderRadius: 10, borderWidth: 1, borderColor: "#e0e0e0" },
   usageApiHeader:          { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   usageApiLabel:           { fontSize: 15, fontWeight: "600", color: "#333" },

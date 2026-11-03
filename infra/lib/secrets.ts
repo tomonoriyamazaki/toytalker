@@ -16,6 +16,11 @@ export const REQUIRED_SECRETS = {
   ZAKICORP_EDGE_KEY: "/toytalker/zakicorp-edge-key",
   BRAVE_API_KEY: "/toytalker/brave-api-key",
   SONIOX_API_KEY: "/toytalker/soniox-api-key",
+  // 課金（docs/pricing-and-cost-model.md 11.10）。restricted key を2本に分け、外向きの billing-app には Checkout と Customer だけ、
+  // 内向きの billing-worker には Events 読み・PaymentIntents・Refunds/Disputes 読みを許す。Webhook の秘密は署名の検証用
+  STRIPE_KEY_APP: "/toytalker/stripe-key-app",
+  STRIPE_KEY_WORKER: "/toytalker/stripe-key-worker",
+  STRIPE_WEBHOOK_SECRET: "/toytalker/stripe-webhook-secret",
 } as const;
 
 /** 無くてもデプロイできるもの（月次レポートが各社の請求を取りに行くときだけ使う） */

@@ -1,0 +1,83 @@
+// 課金の設定（docs/pricing-and-cost-model.md 11.10）。テーブル `toytalker-billing`（owner_id がキー）に、Stripe の顧客・保存したカード・
+// オートチャージの設定と状態を持つ。書けるのは課金の Lambda 2本（billing-app / billing-worker）だけで、本文 Lambda は読む権限も持たない
+// （財布は本文 Lambda が毎ターン書くので、設定を同じ行に置かない）。
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { tableName } from "./tables.mjs";
+
+const BILLING_TABLE = tableName("billing");
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
+
+/** 単発で買える額（円、税込み。11.1 / 11.9）。サーバーがこの中から決め、クライアントの自由な額は受け取らない */
+export const BUY_AMOUNTS = [500, 1000, 3000];
+/** オートチャージの選択肢（11.10）: 残高がこれを下回ったら / 1回に買い足す額 / 月の上限 */
+export const AUTO_BELOW_OPTIONS = [100, 300, 500];
+export const AUTO_AMOUNT_OPTIONS = [500, 1000, 3000];
+export const AUTO_CAP_OPTIONS = [1000, 3000, 5000, 10000];
+export const AUTO_CAP_DEFAULT = 3000;
+/** 最終確認画面と同意文の版（web/site/buy/ と合わせる）。文言を変えたら上げる */
+export const CONSENT_VERSION = "2026-11-03";
+/** Checkout の作成をこの間隔に絞る（連打・自動化の抑止） */
+export const CHECKOUT_MIN_INTERVAL_MS = 60 * 1000;
+
+/** 行。無ければ null */
+export async function getBilling(ownerId) {
+  if (!ownerId) return null;
+  const r = await ddb.send(new GetCommand({ TableName: BILLING_TABLE, Key: { owner_id: ownerId } }));
+  return r.Item ?? null;
+}
+
+/**
+ * 列を SET で書く（無い行は作る）。undefined の列は触らない。null を渡すとその列を消す。
+ * @param {string} ownerId
+ * @param {object} fields
+ * @param {{ condition?: string, values?: object, names?: object }} [opts]  条件付き更新（失敗は ConditionalCheckFailedException）
+ */
+export async function updateBilling(ownerId, fields, opts = {}) {
+  const sets = [];
+  const removes = [];
+  const names = { ...(opts.names ?? {}) };
+  const values = { ...(opts.values ?? {}), ":updated_at": new Date().toISOString() };
+  sets.push("#updated_at = :updated_at");
+  names["#updated_at"] = "updated_at";
+  for (const [k, v] of Object.entries(fields)) {
+    if (v === undefined) continue;
+    names[`#${k}`] = k;
+    if (v === null) { removes.push(`#${k}`); continue; }
+    values[`:${k}`] = v;
+    sets.push(`#${k} = :${k}`);
+  }
+  let UpdateExpression = `SET ${sets.join(", ")}`;
+  if (removes.length > 0) UpdateExpression += ` REMOVE ${removes.join(", ")}`;
+  const r = await ddb.send(new UpdateCommand({
+    TableName: BILLING_TABLE,
+    Key: { owner_id: ownerId },
+    UpdateExpression,
+    ConditionExpression: opts.condition,
+    ExpressionAttributeNames: names,
+    ExpressionAttributeValues: values,
+    ReturnValues: "ALL_NEW",
+  }));
+  return r.Attributes ?? null;
+}
+
+/** 画面に出す形（カードは brand と下4桁と期限だけ。Stripe の ID は出さない） */
+export function describeBilling(row) {
+  if (!row) return { card: null, auto: null };
+  const card = row.payment_method_id
+    ? { brand: row.card_brand ?? null, last4: row.card_last4 ?? null, exp: row.card_exp ?? null }
+    : null;
+  const auto = row.auto_enabled !== undefined
+    ? {
+        enabled: Boolean(row.auto_enabled),
+        below_jpy: row.auto_below_jpy ?? null,
+        amount_jpy: row.auto_amount_jpy ?? null,
+        monthly_cap_jpy: row.auto_monthly_cap_jpy ?? null,
+        charged_this_month_jpy: row.auto_charged_jpy ?? 0,
+        status: row.auto_status ?? null,
+        last_error: row.auto_last_error ?? null,
+        consent_version: row.auto_consent?.version ?? null,
+      }
+    : null;
+  return { card, auto };
+}

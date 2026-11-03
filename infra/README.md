@@ -75,7 +75,7 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 
 | 項目 | 意味 |
 |---|---|
-| `kind` | `turn`（本文）/ `backchannel`（相槌）/ `stt-token`（Soniox鍵発行とOTA判定）/ `read-aloud`（読み上げ） |
+| `kind` | `turn`（本文）/ `backchannel`（相槌）/ `stt-token`（Soniox鍵発行とOTA判定）/ `read-aloud`（読み上げ）/ `settings`（設定）/ `billing`（課金 API。`stripe_event` `stripe_type` と `reason`）/ `billing-worker`（課金の処理。`status` は recorded / duplicate / dropped / retry / ignored） |
 | `request_id` `session_id` `device_id` `owner_id` | 識別子。`request_id` はLambdaの requestId（`REPORT` 行と同じ値） |
 | `source` `fw` `app_version` `ua` | 出どころ。`source` は `esp` / `app`。`fw` はESP32が本文に添えるファーム版（v0.7.3以降）、`app_version` はアプリ版（`app/lib/appVersion.ts`。次の配布以降）。古い版からの要求は null。**送信元IPは書かない**（個人に結びつく。2026-10-28決定） |
 | `edge` `country` | 経路（2026-10-29）。`cloudfront` = 固定ドメイン経由で、`country` に `CloudFront-Viewer-Country` の国コード（JP など）。`direct` = Function URL を直接呼ぶ旧ファーム・旧アプリで、`country` は null。`direct` が無くなったら Function URL を IAM 認証にする（下の「固定ドメイン」） |

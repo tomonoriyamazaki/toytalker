@@ -1,0 +1,9 @@
+{
+  "name": "toytalker-billing-app-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "description": "Billing API (Stripe Checkout, webhook receiver). AWS SDK はランタイム同梱のものを使う。Stripe は REST を fetch で呼ぶ（backend/shared/stripe.mjs）",
+  "dependencies": {}
+}

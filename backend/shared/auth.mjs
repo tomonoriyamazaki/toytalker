@@ -29,12 +29,15 @@ export const AUTH_REQUIRED = process.env.AUTH_REQUIRED === "true";
 
 const USER_POOL_ID = process.env.COGNITO_USER_POOL_ID || "";
 const CLIENT_ID = process.env.COGNITO_CLIENT_ID || "";
+// 受け付けるクライアント（トークンの aud）。アプリのクライアントに加え、購入ページの Web クライアント（COGNITO_WEB_CLIENT_ID）を
+// 配られた Lambda（billing-app だけ）はそれも通す。他の Lambda は Web のトークンを受け付けない
+const CLIENT_IDS = [CLIENT_ID, process.env.COGNITO_WEB_CLIENT_ID || ""].filter(Boolean);
 const USERS_TABLE = tableName("users");
 
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 // JWKS（公開鍵）は初回検証で取りに行き、容器の間は保持する。鍵が替わったら自動で取り直す（ライブラリの既定）
 const verifier = USER_POOL_ID && CLIENT_ID
-  ? CognitoJwtVerifier.create({ userPoolId: USER_POOL_ID, tokenUse: "id", clientId: CLIENT_ID })
+  ? CognitoJwtVerifier.create({ userPoolId: USER_POOL_ID, tokenUse: "id", clientId: CLIENT_IDS })
   : null;
 
 /** ID トークンの出どころ（Google / SignInWithApple / cognito）。federated だと identities に入る */

@@ -158,14 +158,14 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 | 無料枠・特典 | **配らない（2026-11-01）**。本体の登録特典も特典コードも作らない。仕組みが増えると穴（偽の本体や大量のアカウントで集める）ができ、小さな運営では効果に見合わないので、費用を下げる工夫とサービスの品質に力を使う。お詫びやキャンペーンでポイントを渡すときは、運用者が `adjust` で手で足す。旧案（本体1台に300円分、アプリだけの利用者に100円分）は採らない。本体を買った人は残高0から始まるので、初めて話すまでの流れ（セットアップの途中で購入へ案内するなど）は段階3で考える |
 | 払い方 | **前払い ＋ オートチャージ（使うかは親が選ぶ）**（2026-11-01）。基本はポイントを買う形。オートチャージを選んだ家庭は、残高が決めた額を下回ったら保存したカードで決めた額を買い足す（例: 100円を下回ったら500円）。毎月決まった日に買う形にはしない（使わない月に請求が来て、使われない残高も増えるため）。自動で買い足す額には月の上限を付け、親が選ぶ（初期値は月3,000円）。上限に達したら、その月はもう自動で買い足さずに知らせる。後払いと月額の定額は採らない（11.7） |
 | 残高0のとき | **会話を止めて親に知らせる**（2026-11-01。旧案の「無料継続モード」（ずんだもん固定で1日50ターン）は原則に反するので採らない）。会話の始めに残高を見て、0以下なら本体が一言伝えて（例:「ポイントがなくなったよ。おうちのひとにきいてね」）その会話を始めない。アプリには表示とプッシュで知らせる。オートチャージが失敗した（カードの期限切れなど）ときも同じで、運営は損をしない |
-| 購入 | Webの購入ページ（`toytalk.zakicorp.com/buy`）でログイン後、500 / 1,000 / 3,000円から選ぶ。Stripe Checkoutへ遷移し、カード・Apple Pay・Google Pay・Linkが使える。オートチャージの申し込み（カードの保存、買い足す条件と額、月の上限）と止める操作も同じWebページで行う |
+| 購入 | Webの購入ページ（`toytalker.zakicorp.com/buy/`。11.10）でログイン後、500 / 1,000 / 3,000円から選ぶ。Stripe Checkoutへ遷移し、カード・Apple Pay・Google Pay・Linkが使える。オートチャージの申し込み（カードの保存、買い足す条件と額、月の上限）と止める操作も同じWebページで行う |
 | iOSアプリ | 残高と消費内訳の表示のみ。購入導線はアプリ内課金ルールに触れないよう、Webページの案内にとどめる（スマホ新法の運用が固まったら外部リンクを検討） |
 | 通知 | 残高が100円を下回ったら1日1回プッシュ（オートチャージの家庭は不要）。残高0で止めたとき、購入完了時、オートチャージで買い足したとき・失敗したとき・月の上限に達したときにプッシュ |
 | 返金・調整 | 原則返金しない（11.7）。例外は、買い間違いで手を付けていない購入を14日以内に取り消すときと、運営の障害で減った分をポイントで埋めるとき。どちらも運用者が行う。チャージバックは自動で差し引く |
 
 ### 11.2 データ
 
-- **`toytalker-wallets`**（残高の要約、`owner_id` がキー）: `balance_jpy`、`updated_at`。段階3で有効期限のための最終利用日（`consume` と `purchase` で更新。`adjust` では更新しない）、段階4で `low_balance_notified_date` を足す。オートチャージの設定（買い足す条件と額、月の上限、今月自動で買った額、Stripe の顧客ID）の置き場所は段階3で決める（財布は本文Lambdaが毎ターン書くので、設定を書ける権限を本文Lambdaに渡さない）。
+- **`toytalker-wallets`**（残高の要約、`owner_id` がキー）: `balance_jpy`、`updated_at`。段階3で有効期限のための最終利用日（`consume` と `purchase` で更新。`adjust` では更新しない）、段階4で `low_balance_notified_date` を足す。オートチャージの設定（買い足す条件と額、月の上限、今月自動で買った額、Stripe の顧客ID）は別テーブル `toytalker-billing`（11.10。財布は本文Lambdaが毎ターン書くので、設定を書ける権限を本文Lambdaに渡さない）。
 - **`toytalker-wallet-ledger`**（追記だけの台帳、`owner_id` ＋ `timestamp#type#id` がキー）: `type`（`purchase` / `consume` / `adjust`、段階3で `refund` / `dispute` / `expire`）、`amount_jpy`（消費はマイナス）、`ref`、`memo`。キーの `id` は `consume` なら `device_id`、`purchase` なら Stripe のセッションID。`grant`（特典）は特典をやめたので使わない。
 - **`adjust`**（運用者の手作業の調整。返金・お詫び・検証用など）: 1回の調整につき1行を足し、`memo` に理由、`by` に書いた人を入れる。書いた行は直さず、間違えたら逆向きの `adjust` を足して打ち消す。書くのは `backend/shared/wallet.mjs` の `recordAdjust`（`recordConsume` と同じく台帳の行と残高の加算を1回の書き込みで）で、運用者が手元から `infra/scripts/wallet-adjust.ts` で呼ぶ（`--yes` を付けるまでは残高と書く内容を見せるだけ）。Lambda には書く権限が無い。日次詳細は `consume` の行だけを拾うので、`adjust` の行が増えても表示は崩れない。
 - `consume` の行は1ターンの原価の正本（11.6）: `ref`（chat-logs の並べ替えキー `session_id#…#timestamp#…`。返答の行と同じ時刻）、`session_id`、`source`（`app` / `esp` / `tts`）、`cost_usd`（マージン前）、`cost_stt` `cost_llm` `cost_tts` `cost_tool`、`stt_chars`、`llm_provider` `llm_model` `llm_tokens_in` `llm_tokens_out`、`tts_provider` `tts_chars` `tts_fallback`、`tool_usage`、`character_id`。文章は持たない。読み上げ（`source: tts`）は `ref` 無し。
@@ -180,7 +180,7 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
    - **RnD は止めない**（2026-11-03）。`infra/config/stages.ts` の `wallet.stopAtZero` が false の環境は `checkBalance` がいつも続けてよいと返す（環境変数 `WALLET_STOP_AT_ZERO`）。財布の無い外部テスターや家族の端末が、0.8.6 以前のアプリでは何も出ずに黙って止まっていたため。引き落としは記録するので残高はマイナスになる。止まる動きを試すときは一時的に true にしてデプロイする。
    - **App**: 本文・読み上げは 402 `{"error":"no_balance"}` を返し、アプリは「ポイントがなくなりました。ポイントを追加すると、また話せます」を出す。相槌も 402 で返し、アプリは鳴らさない。利用状況の残高が0以下なら赤字にして「会話と読み上げは、ポイントを追加するまで止まっています」を添える。
    - **ESP32**: 本体は画面が無いので、本文Lambdaが「ポイントがなくなったよ。おうちのひとにきいてね。」をずんだもんの声で1回返す（キャラクターの声にしないのは、止めるときに有料のTTSを使わないため。合成は1インスタンスで1回だけで、原価は運営持ち）。通常の返答と同じ並び（`segment` → `tts_start` → PCM → `done`）なのでファームは変えない。相槌は 402 で返し、ファームは200以外を捨てる。
-4. **購入**: Web購入ページで金額を選ぶ → デバイス設定Lambdaが `owner_id` をメタデータに付けたStripe Checkoutセッションを作って返す → 支払い完了のWebhook（`checkout.session.completed`）をLambdaが受け、セッションIDが台帳に無ければ `purchase` を書いて残高に足す（同じWebhookが二重に来ても1回だけ処理）→ プッシュ通知。
+4. **購入**: Web購入ページで金額を選ぶ → 課金Lambda（`billing-app`）が本人の `owner_id` をメタデータに付けたStripe Checkoutセッションを作って返す → 支払い完了のWebhook（`payment_intent.succeeded`）を署名検証して SQS 経由で `billing-worker` が受け、PaymentIntent の ID が台帳に無ければ `purchase` を書いて残高に足す（同じWebhookが二重に来ても1回だけ処理）→ プッシュ通知（段階4）。詳細は 11.10。
 5. **表示**: アプリの利用状況ページに残高と「今月の消費」を出す。消費内訳は既存の集計をそのまま使う。
 
 ### 11.4 認証との関係
@@ -226,11 +226,11 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 - **RnD のテストユーザー**（2026-11-01、済）: 財布が無い人は残高0として止まるので、段階2の deploy の前に、本体の持ち主5人とアプリだけで最近使った2人（`u_14bf…`・`u_3517…`）へ `adjust` で1,000円ずつ渡した。ログインしていない人のポイントはアプリの仮の ID に付くので、入れ直しやログインで ID が変わったら運用者が足し直す。`u_3517…` は開発者の以前のアプリの ID だった（「メイド」のキャラクター ID がこの ID で始まり、持ち主は `u_584a…`）ので、逆向きの `adjust` -1000円で打ち消した。
 
 - 残高0で止めるときの本体の文言と、アプリでの見せ方: 段階2で仮に決めた（11.3）。本体の文言は子どもに聞かせて見直す。
-- Appleの外部リンクの扱い（スマホ新法の運用）を実装前に確認する。
+- **Apple の外部リンク（2026-11-03 調査。Apple の「Changes to iOS in Japan」と国内の解説記事）**: iOS アプリから購入ページへ押せるリンクを出すには、ライセンス契約の付属文書 A12 に同意して entitlement を取り、リンクのタップから7日以内の外部の売上に **Store services commission 15%**（Small Business Program なら 10%）を払い、毎月15日までに外部の取引を Apple へ報告し、アプリ内の開示シートを実装する。さらに **Kids カテゴリのアプリと 13 歳未満の利用者には外部の Web での購入案内そのものができない**（13〜17 歳は保護者ゲートの後ろなら可）。いまの「URL を文字で書くだけ（押せない）」は、解説記事（Repro）では Apple・Google とも手数料なしの扱いとされるが、Apple の公式ページには文字だけの案内の記述が無い（未確認）。**決定**: 3a は文字の案内のまま。ボタンにするのは、売上が出てから「15% を払ってでも導線が要るか」で判断する（500円の購入で 75円。Stripe の 18円と合わせて 93円）。アプリは親のアカウントで使うものなので App Store のカテゴリは Kids にしない（Kids だと外部購入の案内が一切できない）。Android（Google）も外部リンクには手数料があるので同じ扱い。
 - Stripe Checkoutで使える支払い手段は日本アカウントの設定次第。PayPalは当面入れない。
 - **返金（決定 2026-11-02）: 原則返金しない。例外は2つ。** (1) 買い間違いで、その購入の後に1度も使っていないときは、購入から14日以内なら運用者が Stripe で取り消し、台帳に `refund`（マイナス）を書く。Stripe の手数料3.6%は戻らないので運営の持ち出し（500円で18円）。(2) 運営の障害で減った分は、お金ではなく `adjust` でポイントを足す。理由: 資金決済法は前払いのポイントの払い戻しを原則禁止している（金融庁の資料。届出前の発行者にも当てはまるかは未確認）。返金しないことと例外の条件は、特商法の最終確認画面の「申込みの撤回又は解除に関する事項」として購入画面に出す。
 - **チャージバック（決定 2026-11-02）**: Stripe から `charge.dispute.created` が来たら、Webhook のLambdaがその購入額を台帳に `dispute`（マイナス）で書いて残高から引き、オートチャージを止め、運用者にメールする。残高が負になれば次の会話から止まる（11.3）。基本は争わない（申し立て1件 ¥1,500 は勝ち負けにかかわらず運営の負担で、購入額が小さいので争う手間に見合わない）。争って勝ったときは逆向きの `adjust` で戻す。3-D セキュアを通した支払いの不正利用はカード会社の負担になる（ライアビリティシフト）が、3-D セキュアを通さない自動の買い足しでは運営の負担になる。
-- **オートチャージと 3-D セキュア（2026-11-02 確認、Stripe の「日本の 3D セキュア必須化の例外」）**: カードの保存時に `usage=off_session`（Checkout なら `setup_future_usage=off_session`）で一度 3-D セキュアを通せば、その後の運営側から引く支払い（MIT）は 3-D セキュア不要。Apple Pay・Google Pay・Link は免除。保存した時点の同意（マンデート）として、買い足す条件・額・月の上限を申し込み画面で示して同意を取る。新しい Off-Session Payments API（プレビュー）は使わず、`PaymentIntent` に `off_session=true` を付ける従来の形で作る。**未決**: 利用者が設定（額・条件・月の上限）を変えるのは、Stripe の言う「顧客からの契約内容の変更の申出」に当たり 3-D セキュアが要るか。支払いを伴わない変更も含むかが文書から読めないので Stripe のサポートに聞く（2026-11-02 に AI の窓口へ聞いたが「文書に記載が無く断定できない」。2026-11-03 にチャットで担当者へ聞いた答えは下）。英語の原文は "If any change to a contract, service, or product requires customer approval, the associated payment must be customer-initiated (CIT) and must explicitly request 3DS." で、3-D セキュアが要るのは「変更に関連する支払い」。その場で支払いの無い設定変更は当たらないと読めるが、変更後の自動の買い足しが「関連する支払い」に入るかは読めない。**担当者の答え（2026-11-03、チャット）**: (1) 下げる変更（額・上限を下げる）はカードの保存し直し不要。手元の off-session のカードのまま引いてよい（危険が下がるので銀行に止められにくい）。ただし設定を更新し、新しい条件の同意文を見せる。(2) 止める操作は Stripe 側で何もしなくてよく、こちらのシステムで買い足しの請求を出さなくするだけ。(3) 上げる変更は「新しい条件を示して同意を取り、SetupIntent（off_session、3-D セキュアあり）で保存し直せば、その後の自動の買い足しは MIT として 3-D セキュアなしで引ける」が一般的には問題ない、ただし日本特有の扱いは日本の事情が分かる担当からメールで確認する、とのこと（返事待ち。2026-11-03 に受付のメールとチャットの記録が Gmail に届いた。中身の答えはまだ）。**設計**: 上げる変更は Checkout で保存し直す、下げる変更と停止は保存し直さず同意文だけ見せる。メールの答えで変わり得るのは、上げる変更での保存し直しを省けるかだけ。
+- **オートチャージと 3-D セキュア（2026-11-02 確認、Stripe の「日本の 3D セキュア必須化の例外」）**: カードの保存時に `usage=off_session`（Checkout なら `setup_future_usage=off_session`）で一度 3-D セキュアを通せば、その後の運営側から引く支払い（MIT）は 3-D セキュア不要。Apple Pay・Google Pay・Link は免除。保存した時点の同意（マンデート）として、買い足す条件・額・月の上限を申し込み画面で示して同意を取る。新しい Off-Session Payments API（プレビュー）は使わず、`PaymentIntent` に `off_session=true` を付ける従来の形で作る。**未決**: 利用者が設定（額・条件・月の上限）を変えるのは、Stripe の言う「顧客からの契約内容の変更の申出」に当たり 3-D セキュアが要るか。支払いを伴わない変更も含むかが文書から読めないので Stripe のサポートに聞く（2026-11-02 に AI の窓口へ聞いたが「文書に記載が無く断定できない」。2026-11-03 にチャットで担当者へ聞いた答えは下）。英語の原文は "If any change to a contract, service, or product requires customer approval, the associated payment must be customer-initiated (CIT) and must explicitly request 3DS." で、3-D セキュアが要るのは「変更に関連する支払い」。その場で支払いの無い設定変更は当たらないと読めるが、変更後の自動の買い足しが「関連する支払い」に入るかは読めない。**担当者の答え（2026-11-03、チャット）**: (1) 下げる変更（額・上限を下げる）はカードの保存し直し不要。手元の off-session のカードのまま引いてよい（危険が下がるので銀行に止められにくい）。ただし設定を更新し、新しい条件の同意文を見せる。(2) 止める操作は Stripe 側で何もしなくてよく、こちらのシステムで買い足しの請求を出さなくするだけ。(3) 上げる変更は「新しい条件を示して同意を取り、SetupIntent（off_session、3-D セキュアあり）で保存し直せば、その後の自動の買い足しは MIT として 3-D セキュアなしで引ける」が一般的には問題ない、ただし日本特有の扱いは日本の事情が分かる担当からメールで確認する、とのこと（返事待ち。2026-11-03 に受付のメールとチャットの記録が Gmail に届き、同日 13:02 に担当の北野氏から「質問の要約に相違ないか」の確認メール。要約は 11.7 の問いと一致したので「相違なし」と返し、社内専門部署の答えを待つ）。**設計**: 上げる変更は Checkout で保存し直す、下げる変更と停止は保存し直さず同意文だけ見せる。メールの答えで変わり得るのは、上げる変更での保存し直しを省けるかだけ。
 - **特商法の最終確認画面（2026-11-02 確認、消費者庁「通信販売の申込み段階における表示についてのガイドライン」）**: オートチャージそのものの記述は無いが、「自動更新のある契約はその旨を出す」「期限の無い継続契約は1年分など一定期間の総額の目安を出すのが望ましい」「解約の条件・方法を出す」とあるので、自動更新と同じ扱いで出す。オートチャージの申し込み画面: 自動で買い足すこと、条件（残高が◯円を下回ったら）、1回の額、月の上限（総額の目安の代わり）、支払いの時期（下回った時点）と方法（保存したカード）、止め方（同じ Web ページでいつでも。止めたら次の買い足しから止まる）。単発の購入画面: 額、支払い方法、有効期限、返金しないことと例外。どちらも6項目（分量・対価・支払いの時期と方法・提供時期・申込期間・撤回と解除）を満たす。
 - グループとメンバーの招待（[先送り項目](deferred-items.md)）との関係（2026-10-31）: ポイントはグループ（`owner_id`）に付くので、メンバーが増えても同じ財布を複数人で使うだけ。ただし `purchase` の行に買った人のユーザー ID（`sub`）を書いておく（メンバーが増えてから後で足せないため）。
 
@@ -240,7 +240,7 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 |---|---|---|
 | 1 | 台帳と財布のテーブル、本文（App / ESP32）・読み上げで `consume` を書いて残高から引く（0を下回っても止めない）、`chat-logs` からコスト列を外す、日次詳細を台帳から、アプリの利用状況に「ポイント残高」 | RnD deploy済み（2026-11-01に財布・台帳のテーブルと `consume` の行を確認） |
 | 2 | 残高0以下なら会話・相槌・読み上げを始めない（App は 402、本体は停止の文言をしゃべる）、アプリに「ポイントがなくなりました」の表示、運用者の `adjust`（`infra/scripts/wallet-adjust.ts`） | RnD deploy済み（2026-11-01）。実機で確認済み: 残高0で App が 402 で止まる、本体が停止の文言をしゃべって止まる、本体の相槌が 402、`adjust` で足すと App も本体も話せる。未確認: アプリの新しい文言と利用状況の赤字表示（確認したビルドが古い） |
-| 3 | Web 購入ページと Stripe Checkout・Webhook（`purchase` に買った人の `sub`、`refund` / `dispute`）、オートチャージ（カードの保存、条件と額と月の上限、止める操作、残高が条件を下回ったら off-session で買い足す）、有効期限（最終利用日・失効の予告・`expire`）、最終確認画面の表示 | 未着手。着手前に決めること（有効期限・返金・チャージバック・off-session・最終確認画面）は 2026-11-02 に決めた（11.7）。残りは Stripe への問い合わせ（設定変更に 3-D セキュアが要るか）。Stripe は sandbox を 2026-11-02 に作成（ZakiCorp sandbox。Tailscale を入れたままだとダッシュボードが開かない）。本番の申し込みの前に、ホームページ `toytalker.zakicorp.com` に特商法の表記を足し、明細書表記（statement descriptor）を「TOYTALKER」など親が見て分かる名前にする（知らない請求と思われるとチャージバックの原因になる） |
+| 3 | Web 購入ページと Stripe Checkout・Webhook（`purchase` に買った人の `sub`、`refund` / `dispute`）、オートチャージ（カードの保存、条件と額と月の上限、止める操作、残高が条件を下回ったら off-session で買い足す）、有効期限（最終利用日・失効の予告・`expire`）、最終確認画面の表示 | **3a（単発の購入・返金・チャージバック）は RnD deploy・sandbox で確認済み（2026-11-03）。3b（オートチャージ）・3c（有効期限）は未着手。設計は 11.10。** 確認した経路: 購入ページ → Checkout（テストカード）→ Webhook → 台帳 `purchase` → 残高（約5秒）、Stripe の画面からの返金 → `refund`、紛争用テストカード → `purchase` + `dispute` と運用者へのメール。着手前に決めること（有効期限・返金・チャージバック・off-session・最終確認画面）は 2026-11-02 に決めた（11.7）。残りは Stripe への問い合わせ（設定変更に 3-D セキュアが要るか）。Stripe は sandbox を 2026-11-02 に作成（ZakiCorp sandbox。Tailscale を入れたままだとダッシュボードが開かない）。本番の申し込みの前に、ホームページ `toytalker.zakicorp.com` に特商法の表記を足し、明細書表記（statement descriptor）を「TOYTALKER」など親が見て分かる名前にする（知らない請求と思われるとチャージバックの原因になる） |
 | 4 | プッシュ通知（残高が100円を下回ったら、残高0で止めたとき、購入完了、オートチャージの実行・失敗・上限到達） | 未着手 |
 
 **売り始める前の宿題**（段階3の実装とは別。本番（ロードマップ7）で売り始める前に済ませる）:
@@ -258,6 +258,51 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 - **インボイスは登録しない**: 買い手が事業者のときの制度で、買い手は家庭なので要らない。
 - **ポイントの売上をいつ計上するか**（売ったときか、使われたときか）は課税事業者になったら税理士と決める。台帳に `purchase` と `consume` が両方あるので、どちらにも対応できる。
 - Stripe の Tax（税の自動計算）と Billing（従量の後払い請求）は使わない（2026-11-02、Stripe のアカウント作成時）。どちらも取引ごとに追加の手数料がかかり、国内だけで税込みの値段なら税の計算は要らず、ポイントの引き落としは自分の台帳で行うため。
+
+### 11.10 段階3の設計（2026-11-03 合意。実装の正本）
+
+着手の判断（2026-11-03）: 13（本番のテーブル設計）より先に作る。RnD の利用者は `adjust` で無料のまま、課金の検証は Stripe の sandbox でいつでもでき、機能を足すときに原価と残高への影響を実装面で見られる。13 では段階3で足したテーブルも含めて見直す。
+
+**守りの方針**: (a) お金を動かす Lambda にインターネットからの入口を持たせない、(b) 残高に足す額・足す相手はクライアントの値を使わず Stripe と本人のトークンから決める、(c) 二重に引かない・二重に足さないは Stripe の冪等キーと台帳のキーで保証する、(d) 自動で引く額に天井（月の上限・1回の額・1時間に1回）を置く。
+
+| 部品 | 中身 |
+|---|---|
+| **`toytalker-billing`**（新テーブル、`owner_id` がキー） | オートチャージの設定と Stripe の顧客: `stripe_customer_id`、保存したカード（`payment_method_id`、`card_brand`、`card_last4`、`card_exp`）、`auto_enabled`、`auto_below_jpy`（条件）、`auto_amount_jpy`（1回の額）、`auto_monthly_cap_jpy`（月の上限）、`auto_consent`（同意文の版・時刻・`sub`・SetupIntent）、`auto_month` と `auto_charged_jpy`（今月（日本時間）自動で買った額）、`auto_reservation`（買い足し中の予約 ID と時刻。Stripe の冪等キー）、`auto_last_charged_at`、`auto_status`（`active` / `failed` / `cap_reached` / `stopped_by_dispute`）、`auto_last_error`、`last_checkout_at`。書けるのは課金の Lambda 2本だけ。本文 Lambda は読む権限も持たない |
+| **`toytalker-wallets` に `last_used_at`** | 有効期限の起点（最後に使った日から1年）。`consume` と `purchase` で更新し、`adjust` では更新しない。`wallet.mjs` の `appendAndAdd` が SET するので本文 Lambda の権限は変わらない。無い財布は段階3を出した日から数える |
+| **`billing-app`**（外向き。`/billing*`） | Cognito のトークン必須（RnD でも必須）。`GET /billing`（残高・期限・カード・オートチャージの状態）、`POST /billing/checkout`（単発の購入。額は 500 / 1,000 / 3,000 からサーバーが決める）、`POST /billing/auto-charge/setup`（カードの保存。Checkout の setup モード、`setup_future_usage=off_session` 相当で 3-D セキュアあり）、`PUT /billing/auto-charge`（下げる・止める。保存し直し無し。`額 > 条件` を必須）、`POST /billing/webhook`（Stripe の署名を検証し、`livemode` が環境と合うことを見て、**イベント ID だけ** SQS へ）。権限: billing 読み書き、wallets 読むだけ、SQS 送信。**台帳には書けない**。Stripe の鍵は Checkout Sessions・Customers だけの restricted key `/toytalker/stripe-key-app`。Webhook の秘密は `/toytalker/stripe-webhook-secret`。CORS の allowOrigins は購入ページのドメインだけ。`last_checkout_at` で Checkout の作成を1分1回に絞る |
+| **`billing-worker`**（内向き。URL なし） | 入口は SQS、5分ごと（買い足し）、毎日（有効期限）の3つ。**SQS の中身は信じず、イベント ID で Stripe の API から取り直したものだけを処理する**（`billing-app` が乗っ取られて偽のメッセージを入れられても、Stripe に無い ID では何もしない）。権限: 台帳に追記、wallets の更新と Scan、billing 読み書き、SNS（運用者へのメール）。鍵は Events 読み・PaymentIntents・Refunds/Disputes 読みの restricted key `/toytalker/stripe-key-worker`。失敗したメッセージは DLQ へ退避し、SNS で知らせる |
+| **SQS** | `billing-app` → `billing-worker` の受け渡し（標準キュー + DLQ）。Stripe の再送と合わせて「届かない」を防ぐ |
+| **購入ページ** | `https://toytalker.zakicorp.com/buy/`（正本 `web/site/buy/`。素の HTML と JS、外部 JS は読み込まない、CSP を厳しく）。Cognito に Web 用の公開クライアント `toytalker-web-<環境>`（PKCE、戻り先は `/buy/callback.html`。RnD は `http://localhost` も許す）。トークンは sessionStorage。設定は `buy/config.js`（API のドメイン・Cognito のクライアント ID）。当面は RnD と sandbox を向け、本番（ロードマップ7）で差し替える。画面は (1) トップ: 残高・有効期限・額のボタン・オートチャージの状態とカード、(2) 購入の最終確認、(3) オートチャージの申し込みと変更、(4) 完了（Checkout から戻る先。Webhook が遅れることがあるので残高を数秒ごとに読み直す。URL のパラメータから何も実行しない）。11.1 の `toytalk.zakicorp.com/buy` は旧デモのドメインだったので、ここの URL が正 |
+| **アプリ** | 利用状況に「ポイントの追加は Web から（toytalker.zakicorp.com/buy）」の文だけ（リンクにしない。11.1 の iOS の方針） |
+
+**残高に足すのは `payment_intent.succeeded` を受けたときだけ**。単発も自動も PaymentIntent の metadata に `owner_id`・`sub`・`kind`（`buy` / `auto`）を付け、足す処理を1か所にする。足す額は metadata でなく `amount_received`（通貨 `jpy`、額が 500 / 1,000 / 3,000 か設定の額のどれかであることも確かめる）。Customer の metadata にも `owner_id` を入れ、PaymentIntent 側と突き合わせる。
+
+| Stripe のイベント | 処理 |
+|---|---|
+| `payment_intent.succeeded` | 台帳に `purchase`（キー `<PI の作成時刻>#purchase#<PI の ID>`。**時刻も ID も Stripe 側の値**にするのは、受け取った時刻をキーにすると同じイベントが2回来たとき2行書けてしまうため）、`last_used_at` を更新、`kind: auto` なら `auto_charged_jpy` に足して予約を消す |
+| `payment_intent.payment_failed` | `kind: auto` なら `auto_status: failed`・`auto_last_error` を書いて予約を消す（カードの期限切れ・`authentication_required` など）。親への知らせは段階4のプッシュまで無し |
+| `checkout.session.completed`（setup モード） | カード（`payment_method` と brand・下4桁・期限）と同意（`auto_consent`）を billing に保存し、`auto_status: active`。その場で残高を見て、条件を下回っていれば買い足しをすぐ予約する（残高0から始まる本体の持ち主が、申し込んだ直後に話せるように） |
+| `charge.refunded` | `charge.refunds` の各 refund ごとに台帳に `refund`（キーは refund の作成時刻と ID。部分返金が複数あっても1行ずつ）。返金そのものは運用者が Stripe のダッシュボードで行う（14日以内・未使用の判断は人） |
+| `charge.dispute.created` | 台帳に `dispute`（その購入額のマイナス。キーは dispute の作成時刻と ID）、`auto_status: stopped_by_dispute`、運用者へ SNS でメール。争って勝ったら逆向きの `adjust` |
+
+**買い足し（5分ごと）**: billing の `auto_enabled` の行を読み、財布の残高が `auto_below_jpy` を下回っていれば予約して請求する。Streams（テーブルの変更の流れ）ではなくポーリングにしたのは、条件の最小値 100円が約140ターン（1時間近い会話）に当たり5分の遅れで困らず、at-least-once・シャード詰まり・フィルタの確認が要らず、手元から1回呼んで試せるため。即時性が要るようになったら Streams に置き換える。
+- 予約: 条件付き UpdateItem で「予約が無い」「`auto_charged_jpy + auto_amount_jpy ≤ auto_monthly_cap_jpy`（月が変わっていれば0から）」「`auto_last_charged_at` から1時間以上」のときだけ `auto_reservation` を書く。上限に届くなら `cap_reached` にして止める（その月は知らせるだけ。段階4）。1時間の cooldown は、条件 500円・額 500円のような組で買い足した直後にまた下回って連続請求するのを防ぐ。
+- 請求: `PaymentIntent` を `customer`・`payment_method`・`off_session: true`・`confirm: true`・冪等キー = 予約 ID で作る。**再試行は同じ予約 ID を冪等キーにして同じ要求を出す**（Stripe は同じ冪等キーには同じ PaymentIntent を返す。24時間）。予約を消すのは Webhook で成功か最終失敗を受けたときだけで、「古いから外す」はしない（請求は成功したが Lambda が落ちて印を消せなかったとき、新しい ID で再請求して二重に引くため）。24時間を超えて残った予約は運用者へメール。
+- 設定の変更（11.7 の Stripe 担当者の答え）: 上げる・新しく申し込む → Checkout の setup モードで保存し直す。下げる・止める → 新しい同意文を見せて billing を更新するだけ。メールの答えで変わり得るのは「上げるときの保存し直しを省けるか」だけ。
+
+**最終確認画面（特商法）**: 自分のページと Stripe の画面の両方に出す。自分のページで 11.7 の項目（単発: 額・支払い方法・有効期限・返金しないことと例外。オートチャージ: 自動で買い足すこと・条件・1回の額・月の上限・支払いの時期と方法・止め方）を全部出して「同意して支払いへ進む」。実際の「支払う」は Stripe の画面にあるので、要点を Checkout の `custom_text.submit` にも入れ、`consent_collection.terms_of_service` で同意のチェックも取る。どこまでを最終確認画面とみなすかはガイドラインから読み切れない（推測）ので両方に置く。同意文には版番号を付け、`auto_consent.version` に残す。
+
+**有効期限（毎日）**: wallets を Scan（財布が数千を超えたら索引。13）し、`last_used_at` から 335日で予告の記録、365日で台帳に `expire`（残高を0にする額。キーは日付と `owner_id` で1日1回）。予告の通知は段階4のプッシュ。月次レポートに全員の残高の合計（3月末・9月末の値、11.7 の資金決済法）。
+
+**親への知らせ**: 段階4のプッシュまでは Stripe の領収書メール（Customer にログインのメールを入れる）で代わりにする。チャージバックを減らす効果もある。
+
+**実装で決まったこと（2026-11-03）**: (1) `billing-app` の Function URL は、他の Lambda を IAM 認証に切り替えた後も公開（NONE）のまま（`FunctionSpec.url.alwaysPublic`）。CloudFront の OAC の署名には本文の SHA-256 を `x-amz-content-sha256` で添える必要があり、Stripe の Webhook はそれを付けられないため。守りはトークンと Webhook の署名で、本番の WAF（CloudFront）は直叩きには効かない（Lambda の呼び出し回数のアラームで気づく）。(2) 購入ページのリンクと Stripe の戻り先は `/buy/index.html`（CloudFront の既定ルートオブジェクトはルートにしか効かない）。`/buy/` で開けるようにするなら CloudFront Function で書き換える（web/README）。(3) Stripe の SDK は使わず REST を fetch で呼ぶ（`backend/shared/stripe.mjs`。Checkout・Customer・PaymentIntent・Event の数本だけで、依存を増やさない）。(4) Checkout の `consent_collection.terms_of_service` は本番（`stripeLivemode`）だけ付ける。Stripe の設定（公開情報）に利用規約の URL `https://toytalker.zakicorp.com/buy/terms.html` が要るが、sandbox は事業者情報を入れられない（本番の申し込みで入れる。2026-11-03 に確認）。同意は購入ページの確認画面でも取っている（`consent_version`）。(5) 親への領収書は Stripe のメール（Customer にログインのメールを入れる。Stripe の設定で「支払い成功時のメール」を ON にする）。(6) トークンの検証（`backend/shared/auth.mjs`）はアプリのクライアント ID だけを受け付けるので、`billing-app` にだけ環境変数 `COGNITO_WEB_CLIENT_ID` で購入ページの Web クライアントも渡して通す。他の Lambda は Web クライアントのトークンを受け付けない（購入ページのトークンで `/me` やデバイス登録は叩けない）。
+
+**残る前提**: 最大の信頼点は Stripe の署名秘密と worker の鍵（SSM の読み取りは関数ごとの最小権限）。トークンを盗まれた人にできるのは、下げる・止める・残高と下4桁を見る・購入ページを開くまでで、**被害者のカードで請求額を増やすことはできない**（上げる変更は 3-D セキュア付きの保存し直しが要る）。金銭被害の最大は既存設定の月の上限まで。CSRF はトークンがヘッダー送り（cookie 不使用）なので成立しない。カード情報は Stripe の Checkout に任せ（PCI は SAQ-A 相当）、手元は brand・下4桁・期限だけ。ログには event ID・PaymentIntent ID だけで、メール・`sub`・カード番号は書かない。
+
+**順番**: 3a = billing テーブル・Lambda 2本・SQS・単発の購入・Webhook（`purchase` / `refund` / `dispute`）・購入ページと最終確認画面・`last_used_at`。3b = オートチャージ（setup・5分ごとの買い足し・月の上限・失敗）。3c = 有効期限の毎日の処理・月次レポートの残高合計。
+
+**Stripe 側の設定（2026-11-03 に sandbox で実施。本番の申し込み時に同じものを作る）**: 鍵は「Create secret key → Building your own integration → Custom permissions」で2本。`toytalker-billing-app`: Checkout Sessions・Customers・Products・Prices の Write。`toytalker-billing-worker`: Events・Customers・Charges and Refunds の Read、Payment Intents の Write（Charges and Refunds の Read は返金の一覧を `/refunds` から取るのに要る。API 版 2022-11-15 以降は `charge` に同梱されない）。Webhook は「Add destination」で `payment_intent.succeeded` `payment_intent.payment_failed` `checkout.session.completed` `charge.refunded` `charge.dispute.created` の5つ、宛先 `https://api-rnd.zakicorp.com/billing/webhook`（CloudFront 経由で通った）、署名の秘密は送信先の画面の Signing secret。3本とも SSM（`infra/scripts/put-secret.ts` か AWS コンソールのパラメータストア）。sandbox では事業者情報（利用規約 URL）を入れられない。
 
 ## 参考: 2026-09-10の市場調査（単価は当時のリスト値、要再確認）
 

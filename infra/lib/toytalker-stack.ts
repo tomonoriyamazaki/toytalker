@@ -6,6 +6,8 @@ import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as backup from "aws-cdk-lib/aws-backup";
 import * as sns from "aws-cdk-lib/aws-sns";
+import * as sqs from "aws-cdk-lib/aws-sqs";
+import { SqsEventSource } from "aws-cdk-lib/aws-lambda-event-sources";
 import * as subs from "aws-cdk-lib/aws-sns-subscriptions";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as logs from "aws-cdk-lib/aws-logs";
@@ -129,13 +131,14 @@ type TableKey =
   | "exchange-rates"
   | "users"
   | "wallets"
-  | "wallet-ledger";
+  | "wallet-ledger"
+  | "billing";
 
 interface FunctionSpec {
   /** 機能名（docs/naming-conventions.md）。新名は `toytalker-<key>-<環境>`、部品IDは PascalCase（chat-app → ChatApp） */
   readonly key: string;
-  /** 改名前のRnDで使う部品IDと固定名（config.legacyNames のとき）。変えると作り直しになる */
-  readonly legacy: { readonly id: string; readonly name: string };
+  /** 改名前のRnDで使う部品IDと固定名（config.legacyNames のとき）。変えると作り直しになる。改名後に足した関数は無し（最初から新名） */
+  readonly legacy?: { readonly id: string; readonly name: string };
   /** backend/ のディレクトリ名（RnDの改名と同時に機能名へ直す） */
   readonly dir: string;
   readonly memorySize: number;
@@ -150,7 +153,13 @@ interface FunctionSpec {
   readonly secrets: readonly SecretName[];
   readonly url?: {
     readonly invokeMode: "RESPONSE_STREAM" | "BUFFERED";
-    readonly cors?: lambda.CfnUrl.CorsProperty;
+    /** CORS。環境の値（購入ページの URL など）が要るものは関数で */
+    readonly cors?: lambda.CfnUrl.CorsProperty | ((config: StageConfig) => lambda.CfnUrl.CorsProperty);
+    /**
+     * directFunctionUrls を false にしても NONE（公開）のままにする。Stripe の Webhook は OAC の署名に要る x-amz-content-sha256 を
+     * 付けられないので、課金 API は IAM 認証にできない。守りはトークンと Webhook の署名（docs/pricing-and-cost-model.md 11.10）
+     */
+    readonly alwaysPublic?: boolean;
     /**
      * 固定ドメイン（config.apiDomain）での経路。CloudFront がこの path pattern の要求をこの Function URL へ送る。
      * Lambda には path がそのまま届く（本文・相槌・鍵発行・読み上げは path を見ない）。"default" はそれ以外の全部で、
@@ -170,6 +179,8 @@ interface FunctionSpec {
   readonly appendTables?: readonly TableKey[];
   /** GetItem と Query だけ許すテーブル（grantReadData の Scan・ストリームまでは要らないもの） */
   readonly lookupTables?: readonly TableKey[];
+  /** GetItem・Query に加えて Scan も許すテーブル（全行を見る日次の処理。本番のテーブル設計（ロードマップ13）で索引に替える） */
+  readonly scanTables?: readonly TableKey[];
 }
 
 /** 認証トークンを載せるヘッダー（backend/shared/auth.mjs の TOKEN_HEADER、app/lib/api.ts）。Authorization は CloudFront の OAC が上書きするので別名 */
@@ -183,6 +194,18 @@ const CORS_GET_ONLY: lambda.CfnUrl.CorsProperty = {
   allowOrigins: ["*"],
   exposeHeaders: ["date, content-type, transfer-encoding"],
 };
+
+/**
+ * 課金 API の CORS（購入ページ web/site/buy/ がブラウザから呼ぶ）。許可元は購入ページのドメインだけ。
+ * x-amz-content-sha256 はページが POST に添える（app/lib/api.ts と同じ理由）
+ */
+const billingCors = (config: StageConfig): lambda.CfnUrl.CorsProperty => ({
+  allowCredentials: false,
+  allowHeaders: ["content-type", TOKEN_HEADER, "x-amz-content-sha256"],
+  allowMethods: ["GET", "POST", "PUT"],
+  allowOrigins: [new URL(config.billing.buyPageUrl).origin],
+  maxAge: 600,
+});
 
 const TTS_ENV = ["CARTESIA_DEFAULT_VOICE_ID", "ZAKICORP_TTS_URL"] as const;
 /** 利用者認証（backend/shared/auth.mjs）。アプリから呼ばれる Lambda に配る。ESP32 用は AUTH_REQUIRED だけ（未登録機の門） */
@@ -203,7 +226,7 @@ const TTS_SECRETS = [
 
 /** 環境ごとの部品IDと固定名（docs/naming-conventions.md）。RnDは改名まで旧名 */
 function resolveNames(spec: FunctionSpec, config: StageConfig): { id: string; name: string } {
-  if (config.legacyNames) return spec.legacy;
+  if (config.legacyNames && spec.legacy) return spec.legacy;
   const id = spec.key.replace(/(^|-)(\w)/g, (_, __, c: string) => c.toUpperCase());
   return { id, name: `toytalker-${spec.key}-${config.stage}` };
 }
@@ -344,6 +367,43 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     appendTables: ["wallet-ledger"],
   },
   {
+    // 課金 API（外向き。docs/pricing-and-cost-model.md 11.10）。購入ページから呼ばれ、Stripe の Webhook も受ける。
+    // 台帳には書けず、off-session の請求もできない（鍵は Checkout と Customer だけ）。Webhook は署名を確かめて ID だけ SQS へ
+    key: "billing-app",
+    dir: "toytalker-billing-app-lambda",
+    memorySize: 256,
+    timeoutSeconds: 20,
+    format: "esm",
+    description: "Billing API: Stripe Checkout, settings, webhook receiver (verifies signature, queues event IDs)",
+    env: ["BILLING_QUEUE_URL", "BUY_PAGE_URL", "STRIPE_LIVEMODE", ...AUTH_ENV, "COGNITO_WEB_CLIENT_ID"], // 購入ページの Web クライアントのトークンも通す（auth.mjs）
+    secrets: ["STRIPE_KEY_APP", "STRIPE_WEBHOOK_SECRET"],
+    url: { invokeMode: "BUFFERED", cors: billingCors, route: "/billing*", alwaysPublic: true },
+    warm: false,
+    selfWarm: false,
+    readTables: [],
+    readWriteTables: ["billing", "users"], // users は初回ログインの行作成（resolveOwner）
+    lookupTables: ["wallets"], // 残高と最終利用日を読むだけ
+  },
+  {
+    // 課金の処理（内向き。URL なし）。SQS（Webhook のイベント ID）と、5分ごと・毎日のスケジュールで動く。
+    // この Lambda だけが台帳に purchase / refund / dispute / expire を書き、off-session の請求を出す。SQS の中身は信じず Stripe から取り直す
+    key: "billing-worker",
+    dir: "toytalker-billing-worker-lambda",
+    memorySize: 256,
+    timeoutSeconds: 60,
+    format: "esm",
+    description: "Billing worker: records Stripe purchases/refunds/disputes to the ledger, auto-charge, expiry",
+    env: ["OPS_SNS_TOPIC_ARN", "STRIPE_LIVEMODE"],
+    secrets: ["STRIPE_KEY_WORKER"],
+    warm: false,
+    selfWarm: false,
+    readTables: [],
+    readWriteTables: ["billing"],
+    updateTables: ["wallets"],
+    appendTables: ["wallet-ledger"],
+    scanTables: ["wallets"], // 有効期限の日次処理（段階3c）
+  },
+  {
     key: "ops-monthly",
     legacy: { id: "OpsMonthly", name: "toytalker-ops-monthly-lambda" },
     dir: "toytalker-ops-monthly-lambda",
@@ -421,11 +481,18 @@ export class ToyTalkerStack extends cdk.Stack {
     // ---- 利用者認証: Cognito（ロードマップ4、docs/auth.md） ----
     const auth = this.createAuth(config, importPhase);
 
+    // ---- 課金: Webhook のイベント ID を billing-app → billing-worker へ渡す SQS（11.10） ----
+    const billingQueues = this.createBillingQueues(config, opsTopic);
+
     const allEnv: Record<string, string> = {
+      BILLING_QUEUE_URL: billingQueues.queue.queueUrl,
+      BUY_PAGE_URL: config.billing.buyPageUrl,
+      STRIPE_LIVEMODE: String(config.billing.stripeLivemode),
       AUTH_REQUIRED: String(config.auth.required),
       WALLET_STOP_AT_ZERO: String(config.wallet.stopAtZero),
       COGNITO_USER_POOL_ID: auth.userPool.userPoolId,
       COGNITO_CLIENT_ID: auth.client.userPoolClientId,
+      COGNITO_WEB_CLIENT_ID: auth.webClient.userPoolClientId,
       CARTESIA_DEFAULT_VOICE_ID: config.cartesiaDefaultVoiceId,
       ZAKICORP_TTS_URL: config.zakicorpTtsUrl,
       SONIOX_MODEL: config.sonioxModel,
@@ -480,15 +547,16 @@ export class ToyTalkerStack extends cdk.Stack {
         // 入口は CloudFront の固定ドメイン（createApiDistribution）。Function URL を直接呼ぶ旧クライアントが残る間だけ
         // NONE + 公開ポリシーで直接も受け、全部が移ったら AWS_IAM にして CloudFront（OAC）だけが呼べるようにする。
         // authType の変更は作り直しにならない（ホスト名は変わらない）
+        const publicUrl = config.directFunctionUrls || spec.url.alwaysPublic === true;
         const url = new lambda.CfnUrl(this, `${id}Url`, {
           targetFunctionArn: fn.functionArn,
-          authType: config.directFunctionUrls ? "NONE" : "AWS_IAM",
+          authType: publicUrl ? "NONE" : "AWS_IAM",
           invokeMode: spec.url.invokeMode,
-          cors: spec.url.cors,
+          cors: typeof spec.url.cors === "function" ? spec.url.cors(config) : spec.url.cors,
         });
         url.applyRemovalPolicy(RETAIN);
         urls.set(spec.key, url);
-        if (!importPhase && config.directFunctionUrls) {
+        if (!importPhase && publicUrl) {
           fn.addPermission(`${id}UrlPublicAccess`, {
             principal: new iam.AnyPrincipal(),
             action: "lambda:InvokeFunctionUrl",
@@ -509,6 +577,7 @@ export class ToyTalkerStack extends cdk.Stack {
         for (const t of spec.updateTables ?? []) tables[t].grant(fn, "dynamodb:GetItem", "dynamodb:UpdateItem");
         for (const t of spec.appendTables ?? []) tables[t].grant(fn, "dynamodb:PutItem");
         for (const t of spec.lookupTables ?? []) tables[t].grant(fn, "dynamodb:GetItem", "dynamodb:Query");
+        for (const t of spec.scanTables ?? []) tables[t].grant(fn, "dynamodb:GetItem", "dynamodb:Query", "dynamodb:Scan");
         // 秘密の実行時取得。SecureStringの復号はAWS管理キー（aws/ssm）ならSSM経由で許可される
         fn.addToRolePolicy(new iam.PolicyStatement({
           actions: ["ssm:GetParameters"],
@@ -524,6 +593,16 @@ export class ToyTalkerStack extends cdk.Stack {
           }));
         }
       }
+    }
+
+    // ---- 課金: SQS の配線（11.10） ----
+    if (!importPhase) {
+      const billingApp = functions.get("billing-app")!;
+      const billingWorker = functions.get("billing-worker")!;
+      billingQueues.queue.grantSendMessages(billingApp);
+      // 1件ずつ処理し、失敗した件だけ再試行（reportBatchItemFailures）。maxReceiveCount 回失敗したら DLQ へ
+      billingWorker.addEventSource(new SqsEventSource(billingQueues.queue, { batchSize: 1, reportBatchItemFailures: true }));
+      opsTopic.grantPublish(billingWorker); // チャージバック・想定外の支払いを運用者へ
     }
 
     // ---- CloudFront 固定ドメイン（ロードマップ3） ----
@@ -651,8 +730,10 @@ export class ToyTalkerStack extends cdk.Stack {
     ack("AwsSolutions-IAM5[Resource::<UsersTable9725E9C8.Arn>/index/*]",
       "users テーブルの GSI（owner_id-index）を読む。grantReadWriteData が index/* で付ける。テーブル1つに限定");
     ack("AwsSolutions-S1", "非公開・単一利用者のバケット。アクセスログ用バケットを増やす価値が小さい（CloudTrail でAPI操作は追える）");
-    ack("Serverless-LambdaDLQ", "呼び出しは Function URL（同期）と温め・月次（失敗はログで見て手動再実行）。DLQ を置く非同期処理が無い");
+    ack("Serverless-LambdaDLQ", "呼び出しは Function URL（同期）と温め・月次（失敗はログで見て手動再実行）。SQS から呼ぶ課金 worker は、関数の DLQ でなくキュー側の DLQ（createBillingQueues）で取りこぼしを拾う");
     ack("Serverless-EventBusDLQ", "温めpingのみ。取りこぼしても5分後に再実行される");
+    ack("Serverless-SQSRedrivePolicy", "課金の DLQ 自身（toytalker-billing-dlq）。DLQ の先はもう無く、溜まったらアラームで運用者が見る（createBillingQueues）");
+    ack("Serverless-LambdaEventSourceMappingDestination", "課金 worker の SQS イベントソース。失敗した件はキュー側の DLQ（maxReceiveCount 3）へ退避するので、イベントソースの失敗先は重ねて置かない");
     ack("Serverless-SNSRedrivePolicy", "メール購読のみ。配信失敗の再処理先は不要");
     ack("Serverless-CloudWatchLogGroupRetentionPeriod", "引き取り時の設定（無期限）を維持。保持期間はロードマップ8(e)で決める");
     ack("Serverless-LambdaTracing", "X-Ray は使っていない。必要になったら有効化する（費用と情報量の追加）");
@@ -699,6 +780,7 @@ export class ToyTalkerStack extends cdk.Stack {
         "access-control-request-headers",
         "cloudfront-viewer-country",
         TOKEN_HEADER, // 認証トークン（ロードマップ4）。Authorization は OAC が上書きするので別名
+        "stripe-signature", // Stripe の Webhook の署名（課金 API /billing/webhook。11.10）
         // x-amz-content-sha256 は書けない（CloudFront が「not allowed」で拒否。OAC が署名用に自分で扱う。2026-10-29 deploy で判明）
       ),
       queryStringBehavior: cloudfront.OriginRequestQueryStringBehavior.all(),
@@ -885,6 +967,38 @@ export class ToyTalkerStack extends cdk.Stack {
     }).addAlarmAction(new cwActions.SnsAction(topic));
   }
 
+  /**
+   * 課金の SQS（docs/pricing-and-cost-model.md 11.10）。billing-app が署名を確かめた Stripe のイベント ID を入れ、billing-worker が
+   * Stripe から取り直して処理する。worker が3回失敗した件は DLQ へ退避し、DLQ に1件でもあればアラームで運用者へ（月次レポートと同じトピック）。
+   * 可視性タイムアウトは worker のタイムアウト（60秒）の6倍（Lambda の要件）。
+   */
+  private createBillingQueues(config: StageConfig, topic: sns.ITopic): { queue: sqs.Queue; dlq: sqs.Queue } {
+    const dlq = new sqs.Queue(this, "BillingDeadLetterQueue", {
+      queueName: `toytalker-billing-dlq-${config.stage}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      retentionPeriod: cdk.Duration.days(14),
+    });
+    const queue = new sqs.Queue(this, "BillingQueue", {
+      queueName: `toytalker-billing-${config.stage}`,
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      enforceSSL: true,
+      visibilityTimeout: cdk.Duration.seconds(360),
+      retentionPeriod: cdk.Duration.days(4),
+      deadLetterQueue: { queue: dlq, maxReceiveCount: 3 },
+    });
+    new cw.Alarm(this, "BillingDeadLetterAlarm", {
+      alarmName: `toytalker-billing-dlq-${config.stage}`,
+      alarmDescription: `ToyTalker ${config.stage}: a Stripe event could not be processed (billing worker failed 3 times). Check the DLQ and billing-worker logs`,
+      metric: dlq.metricApproximateNumberOfMessagesVisible({ period: cdk.Duration.minutes(5), statistic: "Maximum" }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cwActions.SnsAction(topic));
+    return { queue, dlq };
+  }
+
   private createTables(tableSuffix: string): Record<TableKey, dynamodb.Table> {
     const S = dynamodb.AttributeType.STRING;
     const defs: Record<TableKey, { pk: string; sk?: string }> = {
@@ -900,6 +1014,8 @@ export class ToyTalkerStack extends cdk.Stack {
       // 前払いポイント（ロードマップ4、docs/pricing-and-cost-model.md 第11節）。残高の要約と、追記だけの台帳
       "wallets": { pk: "owner_id" },
       "wallet-ledger": { pk: "owner_id", sk: "timestamp#type#id" },
+      // 課金の設定（Stripe の顧客・保存したカード・オートチャージ。11.10）。書けるのは課金の Lambda 2本だけ
+      "billing": { pk: "owner_id" },
     };
     const tables = {} as Record<TableKey, dynamodb.Table>;
     for (const [key, def] of Object.entries(defs) as [TableKey, { pk: string; sk?: string }][]) {
@@ -938,7 +1054,7 @@ export class ToyTalkerStack extends cdk.Stack {
    *   IdP が検証した同じメールの既存利用者に新しい IdP をリンクする（2026-10-29決定。docs/auth.md）
    * - 消すとログインできなくなり、sub が全部変わる（users テーブルの対応が無効になる）。RETAIN + 削除保護
    */
-  private createAuth(config: StageConfig, importPhase: boolean): { userPool: cognito.UserPool; client: cognito.UserPoolClient } {
+  private createAuth(config: StageConfig, importPhase: boolean): { userPool: cognito.UserPool; client: cognito.UserPoolClient; webClient: cognito.UserPoolClient } {
     const userPool = new cognito.UserPool(this, "UserPool", {
       userPoolName: `toytalker-auth-${config.stage}`,
       featurePlan: cognito.FeaturePlan.ESSENTIALS,
@@ -1040,19 +1156,47 @@ export class ToyTalkerStack extends cdk.Stack {
     });
     for (const idp of idps) client.node.addDependency(idp);
 
-    // managed login は見た目の設定（branding）が無いとログイン画面がエラーになる。Cognito 既定の見た目を使う
+    // 購入ページ（web/site/buy/、docs/pricing-and-cost-model.md 11.10）用。アプリとは別のクライアントにして、戻り先をページの URL に限る。
+    // RnD だけ手元の確認用に localhost も許す。トークンはページの sessionStorage に置くだけなので短め（ID 1時間、リフレッシュは使わない）
+    const buyPage = config.billing.buyPageUrl.replace(/\/$/, "");
+    const webClient = userPool.addClient("WebClient", {
+      userPoolClientName: `toytalker-web-${config.stage}`,
+      generateSecret: false,
+      authFlows: { userSrp: true },
+      oAuth: {
+        flows: { authorizationCodeGrant: true },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
+        callbackUrls: [`${buyPage}/callback.html`, ...(config.stage === "rnd" ? ["http://localhost:8080/buy/callback.html"] : [])],
+        logoutUrls: [`${buyPage}/`, ...(config.stage === "rnd" ? ["http://localhost:8080/buy/"] : [])],
+      },
+      supportedIdentityProviders: providers,
+      preventUserExistenceErrors: true,
+      idTokenValidity: cdk.Duration.hours(1),
+      accessTokenValidity: cdk.Duration.hours(1),
+      refreshTokenValidity: cdk.Duration.days(1),
+    });
+    for (const idp of idps) webClient.node.addDependency(idp);
+
+    // managed login は見た目の設定（branding）が無いとログイン画面がエラーになる。Cognito 既定の見た目を使う（クライアントごとに要る）
     const branding = new cognito.CfnManagedLoginBranding(this, "ManagedLoginBranding", {
       userPoolId: userPool.userPoolId,
       clientId: client.userPoolClientId,
       useCognitoProvidedValues: true,
     });
     branding.node.addDependency(domain);
+    const webBranding = new cognito.CfnManagedLoginBranding(this, "WebManagedLoginBranding", {
+      userPoolId: userPool.userPoolId,
+      clientId: webClient.userPoolClientId,
+      useCognitoProvidedValues: true,
+    });
+    webBranding.node.addDependency(domain);
+    new cdk.CfnOutput(this, "WebClientId", { value: webClient.userPoolClientId, description: "購入ページ web/site/buy/config.js の COGNITO_CLIENT_ID" });
 
     const authDomain = `${config.auth.domainPrefix}.auth.${this.region}.amazoncognito.com`;
     new cdk.CfnOutput(this, "UserPoolId", { value: userPool.userPoolId });
     new cdk.CfnOutput(this, "UserPoolClientId", { value: client.userPoolClientId, description: "app/lib/auth.ts の EXPO_PUBLIC_COGNITO_CLIENT_ID" });
     new cdk.CfnOutput(this, "AuthDomain", { value: authDomain, description: "app/lib/auth.ts の EXPO_PUBLIC_COGNITO_DOMAIN。Google / Apple 側のリダイレクト先は https://<この値>/oauth2/idpresponse" });
-    return { userPool, client };
+    return { userPool, client, webClient };
   }
 
   /**

@@ -74,6 +74,13 @@ export interface StageConfig {
    */
   readonly backup?: { readonly retentionDays: number };
   /**
+   * 前払いポイントの購入（ロードマップ4 段階3、docs/pricing-and-cost-model.md 11.10）。
+   * - buyPageUrl: 購入ページ（web/site/buy/）。Checkout の戻り先、CORS の許可元、Cognito の Web クライアントの戻り先に使う。
+   *   サイトは1つ（toytalker.zakicorp.com）なので、ページ側の config.js がどの環境の API を向くかで決まる（当面は RnD）
+   * - stripeLivemode: 本番の鍵か。Webhook のイベントの livemode と比べ、sandbox のイベントが本番に（逆も）混ざらないようにする
+   */
+  readonly billing: { readonly buyPageUrl: string; readonly stripeLivemode: boolean };
+  /**
    * Organizations の組織ID。管理アカウントの環境（RnD）にだけ置く。これがある環境では
    * 組織全体で1つの資源（CloudTrail 組織トレイル）を持つスタック `toytalker-org` も合成する。
    */
@@ -130,6 +137,7 @@ export const stages: Record<StageName, StageConfig> = {
       apple: { servicesId: "com.zakicorp.toytalker.signin", teamId: "89J44WY33V", keyId: "WADH8C78NZ" },
     },
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
+    billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: false }, // Stripe は sandbox（2026-11-02 作成）
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
       lambdaRoleArn: "arn:aws:iam::342082316736:role/toytalk-lambda-role-dev",
@@ -149,6 +157,7 @@ export const stages: Record<StageName, StageConfig> = {
     apiDomain: "api-stg.zakicorp.com",
     directFunctionUrls: false, // 新しい環境は最初から CloudFront 経由だけ
     auth: { required: true, domainPrefix: "toytalker-auth-stg" },
+    billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: false },
   },
   prd: {
     ...common,
@@ -161,6 +170,7 @@ export const stages: Record<StageName, StageConfig> = {
     apiDomain: "api-prd.zakicorp.com",
     directFunctionUrls: false,
     auth: { required: true, domainPrefix: "toytalker-auth-prd" },
+    billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: true },
     // 1ターン = 本文1 + 相槌1、Soniox鍵は3分に1回。家庭のNATの裏に数台いても 5分で300 には届かない。費用燃やしの天井が目的で、精密な値ではない
     apiRateLimitPer5Min: 300,
   },
@@ -175,6 +185,7 @@ export const stages: Record<StageName, StageConfig> = {
     apiDomain: "api-prd-dg.zakicorp.com",
     directFunctionUrls: false,
     auth: { required: true, domainPrefix: "toytalker-auth-prd-dg" },
+    billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: true },
     apiRateLimitPer5Min: 300,
   },
 };

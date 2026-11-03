@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src https://*.zakicorp.com https://*.amazoncognito.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <meta name="robots" content="noindex">
+  <title>ポイントの購入 - ToyTalker</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <nav>
+      <a class="brand" href="/">ToyTalker</a>
+      <a href="/buy/terms.html">利用規約・特定商取引法に基づく表示</a>
+    </nav>
+  </header>
+  <main>
+    <h1>ポイントの購入</h1>
+    <p class="lead">ToyTalker の会話に使う前払いポイントを購入します。1ポイント＝1円（税込）です。</p>
+
+    <div id="error" class="notice error" hidden></div>
+
+    <section id="login" hidden>
+      <div class="card">
+        <p>アプリで使っているアカウントでログインしてください。購入したポイントは、そのアカウントの残高に加わります。</p>
+        <div class="buttons">
+          <button class="primary" data-provider="Google">Google でログイン</button>
+          <button class="primary" data-provider="SignInWithApple">Apple でログイン</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="account" hidden>
+      <div class="card">
+        <p class="account-row"><span>ログイン中: <span id="email"></span></span><button id="logout" class="link">ログアウト</button></p>
+        <p class="balance">残高 <strong id="balance">—</strong> 円分</p>
+        <p class="muted" id="expiry"></p>
+        <p class="muted small">残高は、会話や読み上げのたびに使った分だけ減ります。アプリの「利用状況」でも確認できます。</p>
+      </div>
+
+      <h2>ポイントを購入する</h2>
+      <p>金額を選んでください。</p>
+      <div class="buttons" id="amounts"></div>
+
+      <section id="confirm" hidden>
+        <h2>ご注文内容の確認</h2>
+        <p>以下の内容をご確認のうえ、「同意して支払いへ進む」を押してください。支払いの画面（Stripe）に移ります。</p>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr><th>商品</th><td>ToyTalker ポイント <span class="amount"></span>円分（1ポイント＝1円。税込）</td></tr>
+              <tr><th>お支払い金額</th><td><strong><span class="amount"></span>円</strong></td></tr>
+              <tr><th>お支払い方法</th><td>クレジットカード、Apple Pay、Google Pay、Link（Stripe の画面でお選びいただけます）</td></tr>
+              <tr><th>お支払い時期</th><td>Stripe の画面で「支払う」を押したとき</td></tr>
+              <tr><th>ポイントの付与時期</th><td>お支払い完了後、ただちに残高に加わります（通常1分以内）</td></tr>
+              <tr><th>有効期限</th><td>最後にポイントを使った日（または購入した日）から1年間。1年間ご利用がないと失効します</td></tr>
+              <tr><th>返品・返金</th><td>デジタルコンテンツのため、購入後の返金は原則できません。お買い間違いで、購入後に一度もポイントを使っていない場合に限り、購入から14日以内に <a href="mailto:support@zakicorp.com">support@zakicorp.com</a> までご連絡ください（詳しくは<a href="/buy/terms.html">利用規約</a>）</td></tr>
+              <tr><th>販売事業者</th><td>ZakiCorp（<a href="/buy/terms.html">特定商取引法に基づく表示</a>）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="buttons">
+          <button id="checkout" class="primary">同意して支払いへ進む</button>
+          <button id="cancel" class="link">やめる</button>
+        </div>
+      </section>
+    </section>
+  </main>
+  <footer>© 2026 ZakiCorp</footer>
+  <script src="/buy/config.js"></script>
+  <script src="/buy/auth.js"></script>
+  <script src="/buy/app.js"></script>
+</body>
+</html>

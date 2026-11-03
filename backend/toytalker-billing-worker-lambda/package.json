@@ -1,0 +1,9 @@
+{
+  "name": "toytalker-billing-worker-lambda",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.mjs",
+  "description": "Billing worker (SQS from webhook, auto-charge, expiry). AWS SDK はランタイム同梱のものを使う",
+  "dependencies": {}
+}
