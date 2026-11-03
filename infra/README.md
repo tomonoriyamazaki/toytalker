@@ -94,8 +94,6 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 | sort @timestamp desc
 ```
 
-Logs Insights は1行のJSONから項目を200個までしか取り出さない。文やエラーの多いターンでは後ろの項目（`tts_fallback_chars` など）が取り出されず、それで絞ると少なく出る（2026-11-01）。正確に数えるときは `parse @message` で取り出すか、`@message` を手元で JSON として読む（月次レポートはこの方法）。
-
 音声が途切れた箇所の切り分け: `segments` の `sent_at` の間隔が空いた文を見つけ、その文の `sent_at - text_at` が大きければTTS側、前の文との `text_at` の差が大きければLLM側（`marks.tool_call` があれば検索待ち）、`ext` に 429 / 5xx があれば外部サービス側。相槌は `marks.llm_done` と `marks.tts_done` の差で見る。
 
 ## 固定ドメイン（CloudFront、ロードマップ3）

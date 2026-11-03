@@ -30,6 +30,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - **STTはLambdaを経由しない**: Soniox一時キーをLambdaが発行し、クライアントがSonioxへ直接WebSocket接続する。
 - **相槌(backchannel)**: メインLLMの処理中に「そうだね〜」等の短い応答を先に返す。デフォルトON。
 - **App / ESP32は対称構成**: 各々にメインLambda+相槌Lambdaがあり、出力形式だけ異なる（App=base64, ESP32=PCM）。
+- **LLM**は DynamoDB `toytalker-llms` で切替（キャラクターの `llm_id`、無ければ `is_default` の行）。コードに書くモデル名は `backend/shared/llm.mjs` の2行だけ（相槌用と、テーブルが読めないときの予備）。モデルの終了通知が来たら見るのはこの2か所。
 - **TTSプロバイダー**は DynamoDB `toytalker-voices` で切替: OpenAI / Google / Gemini / ElevenLabs / Cartesia / FishAudio / Sakura(ずんだもん) / ZakiCorp(自前クローンボイス, β版。ローカルPCのQwen3-TTSを `https://tts.zakicorp.com` で公開)。
 - **インフラ**: RnDアカウントのToyTalker資源はCDK（`infra/`）のスタック `ToyTalker-rnd` の管理下。APIキー類の正本はSSM `/toytalker/<key>` で、Lambdaが実行時に読む（環境変数に鍵は無い）。テーブル名はCDKが配る `TABLE_SUFFIX` から `backend/shared/tables.mjs` で組む。
 - **Lambdaログ**: 会話経路の各Lambdaが1リクエスト1行のJSONを出す（`backend/shared/trace.mjs`）。**会話の文章（発話・返答・検索語・相槌）はログに書かない**（正本は `chat-logs`）。新しいログを足すときも文章を入れない。項目と見方は [infra/README](infra/README.md) の「Lambdaログの見方」。
