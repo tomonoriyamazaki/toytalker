@@ -109,7 +109,7 @@ const common = {
   region: "ap-northeast-1",
   opsEmail: "exodjp@gmail.com",
   zakicorpTtsUrl: "https://tts.zakicorp.com",
-  sonioxModel: "stt-rt-v6",
+  sonioxModel: "stt-rt-v4", // = v5。v6 は話し始めから最初の文字まで約0.35秒遅かったので v5 に留める（2026-11-07 実測、ロードマップ18）。v5 は 2026-12-15 に v6 へ自動で振り替わる
   cartesiaDefaultVoiceId: "c7eafe22-8b71-40cd-850b-c5a3bbd8f8d2",
   architecture: "x86_64",
   wallet: { stopAtZero: true },

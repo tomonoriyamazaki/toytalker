@@ -639,6 +639,11 @@ export default function Chat() {
 
     let bytesSent = 0;
     let gotServerMsg = false;
+    // 計測（2026-11-07、ロードマップ18）: 最初の音声を送ってから最初の文字が届くまで。STT モデルの比較用
+    let firstAudioSentAt = 0;
+    let firstTextSeen = false;
+    let speechAt = 0; // マイクの RMS が SPEECH_RMS を超えた最初の時刻（話し始めの近似）
+    const SPEECH_RMS = 400;
 
     // 先行接続済みWSがあれば再利用
     const preWs = preconnectedWsRef.current;
@@ -680,8 +685,15 @@ export default function Chat() {
         try {
           const ab = base64ToArrayBuffer(b64);
           const chunk = new Uint8Array(ab);
+          if (!speechAt && ab.byteLength >= 2) {
+            const v = new Int16Array(ab, 0, Math.floor(ab.byteLength / 2));
+            let sum = 0;
+            for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
+            if (Math.sqrt(sum / v.length) >= SPEECH_RMS) speechAt = Date.now();
+          }
           if (wsReady && ws.readyState === 1) {
             ws.send(chunk);
+            if (!firstAudioSentAt) firstAudioSentAt = Date.now();
           } else {
             audioBuffer.push(chunk);
           }
@@ -747,6 +759,7 @@ export default function Chat() {
           for (const chunk of audioBuffer) {
             ws.send(chunk);
           }
+          if (!firstAudioSentAt) firstAudioSentAt = Date.now();
           audioBuffer.length = 0;
         }
         wsReady = true;
@@ -790,6 +803,13 @@ export default function Chat() {
         sonioxNonFinalBufRef.current = nonFinalCurrent;
         const fullText = sonioxFinalBufRef.current + nonFinalCurrent;
         if (fullText.trim()) {
+          if (!firstTextSeen) {
+            firstTextSeen = true;
+            const now = Date.now();
+            const line = `⏱️ STT first text: +${speechAt ? now - speechAt : -1}ms after speech (rms≥${SPEECH_RMS}), +${firstAudioSentAt ? now - firstAudioSentAt : -1}ms after first audio (audio_proc=${data.total_audio_proc_ms ?? "?"}ms, model=${SONIOX_MODEL})`;
+            console.log(line);
+            if (DEBUG_TIME) setLog((L) => [...L, line]);
+          }
           setPartial(fullText);
 
           // 相槌トリガー: 有効 & 5文字以上 & まだ発火していない
