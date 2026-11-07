@@ -26,6 +26,10 @@ import AudioRecord from "react-native-audio-record";
 import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system";
+import Sound from "react-native-sound";
+import { Buffer } from "buffer";
+import { VOICE_EFFECTS, applyVoiceEffect, decodeWav, encodeWav, type VoiceEffectId } from "../../lib/voiceEffects";
+import { fetchTtsAudio } from "../../lib/ttsOnly";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
@@ -347,6 +351,8 @@ export default function Settings() {
     setCvRecording(false);
     cvWavPathRef.current = "";
     setCvUploadedFile(null);
+    setCvStep("record");
+    setCvCreated(null);
     navigateTo("custom-voice-record");
   };
 
@@ -404,9 +410,16 @@ export default function Settings() {
   cvRecordingRef.current = cvRecording;
   const stopCvRecordingRef = useRef(stopCvRecording);
   stopCvRecordingRef.current = stopCvRecording;
+  // 声の候補の片付け（下で定義する cleanupCvFiles / stopCvSound を後から入れる）
+  const cleanupCvFilesRef = useRef<() => void>(() => {});
+  const stopCvSoundRef = useRef<() => void>(() => {});
   const resetToMain = useCallback(() => {
     if (cvRecordingRef.current) stopCvRecordingRef.current();
     setCvUploadedFile(null);
+    // 作りかけの声の候補・試聴の音声は消す（作ったボイスは一覧に残る）
+    cleanupCvFilesRef.current();
+    setCvStep("record");
+    setCvCreated(null);
     slideAnim.setValue(0);
     setScreen("main");
   }, [slideAnim]);
@@ -414,6 +427,7 @@ export default function Settings() {
     useCallback(() => () => {
       if (KEEP_ON_TAB_LEAVE.includes(screenRef.current)) {
         if (cvRecordingRef.current) stopCvRecordingRef.current();
+        stopCvSoundRef.current();
         return;
       }
       resetToMain();
@@ -424,17 +438,126 @@ export default function Settings() {
     [navigation, resetToMain]
   );
 
+  // ---- 録音 → 声の候補をえらぶ → クローンを作って試聴 → 登録 / 作り直し ----
+  // 候補と試聴の音声はスマホ内（cache）だけに置き、登録完了・キャンセル・録り直しで消す
+  const CV_TMP_DIR = `${FileSystem.cacheDirectory}voice-candidates/`;
+  const CV_PREVIEW_TEXT = "こんにちは！この声、どうかな？今日もいっしょに、たくさんお話ししようね。";
+  const [cvStep, setCvStep] = useState<"record" | "pick" | "preview">("record");
+  const [cvCandidates, setCvCandidates] = useState<{ id: VoiceEffectId; uri: string }[]>([]);
+  const [cvPicked, setCvPicked] = useState<VoiceEffectId>("raw");
+  const [cvPreparing, setCvPreparing] = useState(false);
+  const [cvCreated, setCvCreated] = useState<{ voice_id: string; label: string; provider?: string } | null>(null);
+  const [cvPreviewUri, setCvPreviewUri] = useState<string | null>(null);
+  const [cvPreviewBusy, setCvPreviewBusy] = useState(false);
+  const [cvPlaying, setCvPlaying] = useState<string | null>(null);
+  const cvSoundRef = useRef<Sound | null>(null);
+
+  const stopCvSound = () => {
+    try { cvSoundRef.current?.stop(); cvSoundRef.current?.release(); } catch {}
+    cvSoundRef.current = null;
+    setCvPlaying(null);
+  };
+
+  const playCvSound = async (uri: string, key: string) => {
+    stopCvSound();
+    try { await Audio.setAudioModeAsync({ allowsRecordingIOS: false, playsInSilentModeIOS: true }); } catch {}
+    Sound.setCategory("Playback");
+    const snd = new Sound(uri.replace("file://", ""), "", (err) => {
+      if (err) { cvSoundRef.current = null; setCvPlaying(null); Alert.alert("エラー", "再生に失敗しました"); return; }
+      cvSoundRef.current = snd;
+      setCvPlaying(key);
+      snd.play(() => {
+        snd.release();
+        if (cvSoundRef.current === snd) { cvSoundRef.current = null; setCvPlaying(null); }
+      });
+    });
+  };
+
+  // 候補・試聴の音声と元の録音を消す（声のデータを端末にも残さない）
+  const cleanupCvFiles = () => {
+    stopCvSound();
+    FileSystem.deleteAsync(CV_TMP_DIR, { idempotent: true }).catch(() => {});
+    if (cvWavPathRef.current) {
+      const p = cvWavPathRef.current.startsWith("file://") ? cvWavPathRef.current : `file://${cvWavPathRef.current}`;
+      FileSystem.deleteAsync(p, { idempotent: true }).catch(() => {});
+    }
+    // アップロードしたファイルの端末内コピー（DocumentPicker が cache に置いたもの）も消す
+    if (cvUploadedFile && /\/cache/i.test(cvUploadedFile.uri)) FileSystem.deleteAsync(cvUploadedFile.uri, { idempotent: true }).catch(() => {});
+    setCvCandidates([]);
+    setCvPreviewUri(null);
+  };
+  cleanupCvFilesRef.current = cleanupCvFiles;
+  stopCvSoundRef.current = stopCvSound;
+
+  const recordingUri = () =>
+    cvWavPathRef.current.startsWith("file://") ? cvWavPathRef.current : `file://${cvWavPathRef.current}`;
+  const uploadUri = () =>
+    !cvUploadedFile ? "" : cvUploadedFile.uri.startsWith("file://") ? cvUploadedFile.uri : `file://${cvUploadedFile.uri}`;
+  // 加工できるのは録音と wav のファイルだけ（mp3 / m4a などは JS で PCM に戻せない）
+  const canApplyEffects = !cvUploadedFile || /\.wav$/i.test(cvUploadedFile.name) || /wav/i.test(cvUploadedFile.mimeType);
+
+  // 録音から加工した声の候補を作る（JS の計算だけ。数十ms 程度）
+  const prepareCandidates = async () => {
+    if (!cvWavPathRef.current && !cvUploadedFile) { Alert.alert("エラー", "まず録音するかファイルを選択してください"); return; }
+    setCvPreparing(true);
+    try {
+      await FileSystem.deleteAsync(CV_TMP_DIR, { idempotent: true });
+      await FileSystem.makeDirectoryAsync(CV_TMP_DIR, { intermediates: true });
+      const b64 = await FileSystem.readAsStringAsync(cvUploadedFile ? uploadUri() : recordingUri(), { encoding: FileSystem.EncodingType.Base64 });
+      const pcm = decodeWav(new Uint8Array(Buffer.from(b64, "base64")));
+      const list: { id: VoiceEffectId; uri: string }[] = [];
+      for (const fx of VOICE_EFFECTS) {
+        const uri = `${CV_TMP_DIR}${fx.id}.wav`;
+        const wav = encodeWav(applyVoiceEffect(pcm, fx.id));
+        await FileSystem.writeAsStringAsync(uri, Buffer.from(wav).toString("base64"), { encoding: FileSystem.EncodingType.Base64 });
+        list.push({ id: fx.id, uri });
+      }
+      setCvCandidates(list);
+      setCvPicked("raw");
+      setCvStep("pick");
+    } catch (e: any) {
+      Alert.alert("エラー", `声の候補を作れませんでした: ${e?.message ?? e}`);
+    } finally {
+      setCvPreparing(false);
+    }
+  };
+
+  // 出来上がったボイスでサンプル文を読ませて再生する
+  const playCvPreview = async (voiceId: string) => {
+    if (cvPreviewUri) { playCvSound(cvPreviewUri, "preview"); return; }
+    setCvPreviewBusy(true);
+    try {
+      const { buf, format, fallback } = await fetchTtsAudio({ text: CV_PREVIEW_TEXT, voice_id: voiceId, owner_id: ownerId ?? undefined });
+      // 作った声が混み合っていて別の声（ずんだもん）で返ってきたときは、試聴にならないので知らせる（保存もしない）
+      if (fallback) {
+        Alert.alert("混み合っています", "いまは作った声で読めませんでした。少し待ってから ▶ をもう一度押してください。");
+        return;
+      }
+      await FileSystem.makeDirectoryAsync(CV_TMP_DIR, { intermediates: true }).catch(() => {});
+      const uri = `${CV_TMP_DIR}preview-${Date.now()}.${format}`;
+      await FileSystem.writeAsStringAsync(uri, Buffer.from(new Uint8Array(buf)).toString("base64"), { encoding: FileSystem.EncodingType.Base64 });
+      setCvPreviewUri(uri);
+      playCvSound(uri, "preview");
+    } catch (e: any) {
+      Alert.alert("エラー", `試聴の音声を作れませんでした: ${e?.message ?? e}`);
+    } finally {
+      setCvPreviewBusy(false);
+    }
+  };
+
+  // 選んだ声（アップロードならそのファイル）でクローンを作り、試聴へ進む
   const registerCustomVoice = async () => {
     if (!cvName.trim()) { Alert.alert("エラー", "ボイス名を入力してください"); return; }
     if (!cvWavPathRef.current && !cvUploadedFile) { Alert.alert("エラー", "まず録音するかファイルを選択してください"); return; }
 
     setCvRegistering(true);
+    stopCvSound();
     try {
-      const fileUri = cvUploadedFile
-        ? (cvUploadedFile.uri.startsWith("file://") ? cvUploadedFile.uri : `file://${cvUploadedFile.uri}`)
-        : (cvWavPathRef.current.startsWith("file://") ? cvWavPathRef.current : `file://${cvWavPathRef.current}`);
+      const picked = cvCandidates.find(c => c.id === cvPicked);
+      // 候補をえらんだならその wav、なければアップロードしたファイル（加工なし）か録音そのもの
+      const fileUri = picked?.uri ?? (cvUploadedFile ? uploadUri() : recordingUri());
       const audioBase64 = await FileSystem.readAsStringAsync(fileUri, { encoding: FileSystem.EncodingType.Base64 });
-      const mimeType = cvUploadedFile?.mimeType || "audio/wav";
+      const mimeType = picked ? "audio/wav" : cvUploadedFile?.mimeType || "audio/wav";
 
       const res = await apiFetch(`/custom-voices`, {
         method: "POST",
@@ -446,13 +569,45 @@ export default function Settings() {
         throw new Error(err.error ?? `HTTP ${res.status}`);
       }
       const result = await res.json();
-      const engine = result.provider ?? "ZakiCorp";
-      const timing = result.extraction_time_ms ? ` / ${result.extraction_time_ms}ms` : "";
-      Alert.alert("登録完了", `「${result.label}」のボイスを作成しました！\n(${engine}${timing})`);
-      navigateTo("custom-voice-list", "back");
-      loadCustomVoices();
+      setCvCreated({ voice_id: result.voice_id, label: result.label, provider: result.provider });
+      setCvPreviewUri(null);
+      setCvStep("preview");
+      playCvPreview(result.voice_id);
     } catch (e: any) {
-      Alert.alert("エラー", `ボイス登録に失敗しました: ${e?.message ?? e}`);
+      Alert.alert("エラー", `ボイス作成に失敗しました: ${e?.message ?? e}`);
+    } finally {
+      setCvRegistering(false);
+    }
+  };
+
+  // 試聴して OK → 登録完了（ボイスは作った時点で一覧に入っている。端末の音声を消して一覧へ）
+  const finishCustomVoice = () => {
+    const label = cvCreated?.label;
+    cleanupCvFiles();
+    setCvCreated(null);
+    setCvUploadedFile(null);
+    setCvStep("record");
+    navigateTo("custom-voice-list", "back");
+    loadCustomVoices();
+    if (label) Alert.alert("登録完了", `「${label}」のボイスを登録しました！`);
+  };
+
+  // 試聴してだめ → 作ったボイスを消して、声えらびに戻る（アップロードなら最初の画面へ）
+  const redoCustomVoice = async () => {
+    if (!cvCreated) return;
+    stopCvSound();
+    setCvRegistering(true);
+    try {
+      const res = await apiFetch(`/custom-voices/${encodeURIComponent(cvCreated.voice_id)}`, {
+        method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ owner_id: ownerId }),
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setCvCreated(null);
+      if (cvPreviewUri) FileSystem.deleteAsync(cvPreviewUri, { idempotent: true }).catch(() => {});
+      setCvPreviewUri(null);
+      setCvStep(cvCandidates.length ? "pick" : "record");
+    } catch (e: any) {
+      Alert.alert("エラー", `作ったボイスを消せませんでした（一覧から消せます）: ${e?.message ?? e}`);
     } finally {
       setCvRegistering(false);
     }
@@ -500,6 +655,8 @@ export default function Settings() {
       setCvRecordSeconds(0);
       setCvRecording(false);
       cvWavPathRef.current = "";
+      setCvStep("record");
+      setCvCreated(null);
       navigateTo("custom-voice-record");
     } catch (e: any) {
       Alert.alert("エラー", `ファイル選択に失敗しました: ${e?.message ?? e}`);
@@ -607,15 +764,110 @@ export default function Settings() {
     const isUpload = !!cvUploadedFile;
     const progress = cvRecordSeconds / CV_DURATION;
     const canRegister = isUpload || cvRecordSeconds >= CV_DURATION;
+
+    // 戻る: 声えらびなら録音画面へ（録音は残す）。それ以外は一覧へ戻り、端末の音声を消す（作ったボイスは一覧に残る）
+    const leaveCvRecord = () => {
+      if (cvRecording) stopCvRecording();
+      if (cvStep === "pick") {
+        stopCvSound();
+        FileSystem.deleteAsync(CV_TMP_DIR, { idempotent: true }).catch(() => {});
+        setCvCandidates([]);
+        setCvStep("record");
+        return;
+      }
+      const created = !!cvCreated;
+      cleanupCvFiles();
+      setCvUploadedFile(null);
+      setCvCreated(null);
+      setCvStep("record");
+      navigateTo("custom-voice-list", "back");
+      if (created) loadCustomVoices();
+    };
+
+    const renderCvPick = () => (
+      <ScrollView contentContainerStyle={[s.wrap, { paddingTop: 24 }]}>
+        <Text style={{ fontSize: 15, color: "#555", lineHeight: 22 }}>
+          ▶ で聞きくらべて、ボイスにしたい声をえらんでね。えらんだ声のままで、キャラクターがおしゃべりします。
+        </Text>
+        {VOICE_EFFECTS.map((fx) => {
+          const c = cvCandidates.find(x => x.id === fx.id);
+          const selected = cvPicked === fx.id;
+          const playing = cvPlaying === fx.id;
+          return (
+            <TouchableOpacity
+              key={fx.id}
+              onPress={() => setCvPicked(fx.id)}
+              style={{ flexDirection: "row", alignItems: "center", padding: 14, borderRadius: 12, borderWidth: 2,
+                borderColor: selected ? "#007AFF" : "#e5e5e5", backgroundColor: selected ? "#E5F0FF" : "#fff", gap: 12 }}
+            >
+              <TouchableOpacity
+                onPress={() => (playing ? stopCvSound() : c && playCvSound(c.uri, fx.id))}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: playing ? "#FF9500" : "#007AFF", justifyContent: "center", alignItems: "center" }}
+              >
+                <Text style={{ color: "#fff", fontSize: 18 }}>{playing ? "■" : "▶"}</Text>
+              </TouchableOpacity>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontSize: 17, fontWeight: selected ? "700" : "500", color: "#333" }}>{fx.label}</Text>
+                <Text style={{ fontSize: 13, color: "#888", marginTop: 2 }}>{fx.note}</Text>
+              </View>
+              {selected && <Text style={{ fontSize: 20, color: "#007AFF" }}>✓</Text>}
+            </TouchableOpacity>
+          );
+        })}
+        <View style={{ flexDirection: "row", alignItems: "center", gap: 10, marginTop: 8 }}>
+          <Text style={{ fontSize: 16, fontWeight: "600", color: "#333" }}>ボイス名</Text>
+          <TextInput style={[s.input, { flex: 1, marginTop: 0, fontSize: 18 }]} placeholder="例: パパ、ママ" value={cvName} onChangeText={setCvName} />
+        </View>
+        <TouchableOpacity
+          style={[s.button, { marginTop: 8, backgroundColor: cvRegistering ? "#ccc" : "#007AFF" }]}
+          onPress={registerCustomVoice}
+          disabled={cvRegistering}
+        >
+          {cvRegistering ? <ActivityIndicator color="#fff" /> : <Text style={s.buttonText}>この声でボイスを作る</Text>}
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => { cleanupCvFiles(); cvWavPathRef.current = ""; setCvRecordSeconds(0); setCvStep("record"); }} style={{ alignItems: "center", paddingVertical: 8 }}>
+          <Text style={{ color: "#007AFF", fontSize: 15 }}>録音しなおす</Text>
+        </TouchableOpacity>
+      </ScrollView>
+    );
+
+    const renderCvPreview = () => {
+      const fxLabel = cvCandidates.length ? VOICE_EFFECTS.find(f => f.id === cvPicked)?.label : "ファイルの声";
+      return (
+        <ScrollView contentContainerStyle={[s.wrap, { alignItems: "center", paddingTop: 32 }]}>
+          <Text style={{ fontSize: 22, fontWeight: "700", color: "#333" }}>「{cvCreated?.label}」ができたよ！</Text>
+          <Text style={{ fontSize: 14, color: "#888" }}>{fxLabel}・{cvCreated?.provider ?? cvProvider}</Text>
+          <View style={{ backgroundColor: "#f0f7ff", borderRadius: 16, padding: 20, width: "100%", marginTop: 12 }}>
+            <Text style={{ fontSize: 15, color: "#555", lineHeight: 24 }}>{CV_PREVIEW_TEXT}</Text>
+          </View>
+          <TouchableOpacity
+            onPress={() => (cvPlaying === "preview" ? stopCvSound() : cvCreated && playCvPreview(cvCreated.voice_id))}
+            disabled={cvPreviewBusy || !cvCreated}
+            style={{ width: 80, height: 80, borderRadius: 40, backgroundColor: cvPlaying === "preview" ? "#FF9500" : "#007AFF", justifyContent: "center", alignItems: "center", marginVertical: 16 }}
+          >
+            {cvPreviewBusy ? <ActivityIndicator color="#fff" /> : <Text style={{ color: "#fff", fontSize: 28 }}>{cvPlaying === "preview" ? "■" : "▶"}</Text>}
+          </TouchableOpacity>
+          <Text style={{ fontSize: 13, color: "#999", marginBottom: 12 }}>{cvPreviewBusy ? "声を作っています…" : "▶ でもう一度きけます"}</Text>
+          <TouchableOpacity style={[s.button, { width: "100%", backgroundColor: cvRegistering ? "#ccc" : "#34C759" }]} onPress={finishCustomVoice} disabled={cvRegistering}>
+            <Text style={s.buttonText}>これで登録する！</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={[s.button, { width: "100%", backgroundColor: "#fff", borderWidth: 1, borderColor: "#ddd" }]} onPress={redoCustomVoice} disabled={cvRegistering}>
+            {cvRegistering ? <ActivityIndicator /> : <Text style={[s.buttonText, { color: "#FF3B30" }]}>{cvCandidates.length ? "ちがう声にする（この声を消す）" : "やめる（この声を消す）"}</Text>}
+          </TouchableOpacity>
+        </ScrollView>
+      );
+    };
     return (
       <SafeAreaView style={s.root}>
         <Animated.View style={[s.flex, { transform: [{ translateX: slideAnim }] }]}>
           <View style={s.header}>
-            <TouchableOpacity onPress={() => { if (cvRecording) stopCvRecording(); setCvUploadedFile(null); navigateTo("custom-voice-list", "back"); }} hitSlop={{ top: 12, bottom: 12, left: 12, right: 24 }}>
+            <TouchableOpacity onPress={leaveCvRecord} hitSlop={{ top: 12, bottom: 12, left: 12, right: 24 }}>
               <Text style={s.back}>←</Text>
             </TouchableOpacity>
-            <Text style={s.headerTitle}>{isUpload ? "ファイルからボイス作成" : "ボイスを録音"}</Text>
+            <Text style={s.headerTitle}>{cvStep === "pick" ? "声をえらぶ" : cvStep === "preview" ? "できた声をきく" : isUpload ? "ファイルからボイス作成" : "ボイスを録音"}</Text>
           </View>
+          {cvStep === "pick" ? renderCvPick() : cvStep === "preview" ? renderCvPreview() : (
           <ScrollView contentContainerStyle={[s.wrap, { alignItems: "center", paddingTop: 32 }]}>
             {isUpload ? (
               <>
@@ -690,24 +942,25 @@ export default function Settings() {
               </TouchableOpacity>
             ) : canRegister ? (
               <TouchableOpacity
-                style={[s.button, { width: "100%", marginBottom: 16, backgroundColor: cvRegistering ? "#ccc" : "#007AFF" }]}
-                onPress={registerCustomVoice}
-                disabled={cvRegistering}
+                style={[s.button, { width: "100%", marginBottom: 16, backgroundColor: cvRegistering || cvPreparing ? "#ccc" : "#007AFF" }]}
+                onPress={canApplyEffects ? prepareCandidates : registerCustomVoice}
+                disabled={cvRegistering || cvPreparing}
               >
-                {cvRegistering ? (
+                {cvRegistering || cvPreparing ? (
                   <ActivityIndicator color="#fff" />
                 ) : (
-                  <Text style={s.buttonText}>このボイスで登録する</Text>
+                  <Text style={s.buttonText}>{canApplyEffects ? "いろんな声にしてみる →" : "このファイルでボイスを作る"}</Text>
                 )}
               </TouchableOpacity>
             ) : null}
 
             {!isUpload && cvRecordSeconds >= CV_DURATION && !cvRegistering && (
-              <TouchableOpacity onPress={() => { setCvRecordSeconds(0); cvWavPathRef.current = ""; }}>
+              <TouchableOpacity onPress={() => { cleanupCvFiles(); setCvRecordSeconds(0); cvWavPathRef.current = ""; }}>
                 <Text style={{ color: "#007AFF", fontSize: 15 }}>もう一度録音する</Text>
               </TouchableOpacity>
             )}
           </ScrollView>
+          )}
         </Animated.View>
       </SafeAreaView>
     );
