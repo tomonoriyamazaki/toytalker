@@ -106,7 +106,7 @@ aws backup describe-restore-job --restore-job-id <RestoreJobId>                 
 
 SSM `/toytalker/<key>` の値（必須11本・任意2本）は AWS にしかない（ZakiCorp の2本だけサーバー側 `.env` にも同値がある）。アカウントを失ったら全部を発行元で作り直す。値はどこにも書かない。名前の正本は `infra/lib/secrets.ts`、各社へのログインは exodjp@gmail.com（Gmail が要石、脅威モデル#7）。
 
-入れ替えの共通手順（無停止）: (1) 発行元で新しい鍵を作る（古い鍵はまだ消さない） → (2) `cd infra && printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts rnd <NAME> --overwrite` → (3) 稼働中の Lambda は5分を過ぎた次の呼び出しで取り直す。会話1回か CloudWatch の `[secrets] loaded` で確認 → (4) 発行元で古い鍵を消す。deploy は要らない。
+入れ替えの共通手順（無停止）: (1) 発行元で新しい鍵を作る（古い鍵はまだ消さない） → (2) `cd infra && printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts rnd <NAME> --overwrite` → (3) 稼働中の Lambda は容器が入れ替わるときに読む（AWS が約2時間で入れ替える。7日のログで最長2.4時間。定期的な読み直しは KMS の無料枠超えのため 2026-11-07 に廃止）。急ぐなら `cdk deploy` か、Lambda の設定を1つ触って容器を入れ替える。CloudWatch の `[secrets] loaded` で確認 → (4) 発行元で古い鍵を消す。
 
 | SSM名（`secrets.ts` の名前） | 発行元 | 注意 |
 |---|---|---|

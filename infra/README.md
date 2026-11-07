@@ -63,7 +63,7 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 - 任意: OpenAI/Anthropicの管理キー（月次レポートが各社の請求を取るときだけ）
 - 1件入れる: `printf '%s' "$VALUE" | npx tsx scripts/put-secret.ts <stage> OPENAI_API_KEY`
 - Lambdaは実行時にSSMから読み、メモリに保持する（`backend/shared/secrets.mjs`）。環境変数には鍵を置かず、関数ごとの対象名だけを `SECRET_PARAMS` で渡す。どの関数がどの鍵を読めるかは `lib/toytalker-stack.ts` の `secrets`
-- 鍵を入れ替えるときはSSMを変えるだけ。稼働中のLambdaは5分を過ぎた次の呼び出しで取り直す（deploy不要）
+- 鍵を入れ替えるときはSSMを変えるだけ。稼働中のLambdaは容器が入れ替わるとき（約2時間ごと）に読む。急ぐなら deploy か設定変更で容器を入れ替える
 - 鍵を発行元で作り直す手順（値は書かない）は [docs/security-review-2026-10-25.md](../docs/security-review-2026-10-25.md) の「鍵の再発行手順」
 - Lambdaに鍵を新しく使わせるとき: `lib/secrets.ts` に名前を足し、その関数の `secrets` に加え、コードでは `secret("名前")` で読む
 - **例外は外部IdP（ロードマップ4）の秘密2件**（Google のクライアントシークレット、Apple の秘密鍵。`lib/secrets.ts` の `IDP_SECRETS`）。Cognito の IdP は deploy 時に値が要り、CloudFormation の `ssm-secure` が Cognito に対応していないので Secrets Manager（`toytalker/google-oauth-client-secret`、`toytalker/apple-signin-private-key`）に置き、`{{resolve:secretsmanager}}` で読む。登録手順は [docs/auth.md](../docs/auth.md)。`stages.ts` の `auth.google` / `auth.apple` が無い環境では参照しない
