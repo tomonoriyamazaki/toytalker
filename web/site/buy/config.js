@@ -5,5 +5,5 @@ window.TOYTALKER_BUY_CONFIG = {
   COGNITO_DOMAIN: "https://toytalker-auth-rnd.auth.ap-northeast-1.amazoncognito.com",
   COGNITO_CLIENT_ID: "hutd0daovcemu15i63v89lv6f",
   // 最終確認画面と同意文の版（backend/shared/billing.mjs の CONSENT_VERSION と同じ値。違うと API が 409 を返す）
-  CONSENT_VERSION: "2026-11-03",
+  CONSENT_VERSION: "2026-11-07",
 };

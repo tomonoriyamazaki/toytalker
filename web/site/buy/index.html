@@ -65,6 +65,61 @@
           <button id="cancel" class="link">やめる</button>
         </div>
       </section>
+
+      <h2>オートチャージ（自動で買い足す）</h2>
+      <p>残高が決めた額を下回ったら、保存したカードで決めた額を自動で購入します。使わない月は請求されません。月の上限を決められ、いつでも止められます。</p>
+      <div class="card">
+        <p id="auto-status">—</p>
+        <p class="muted small" id="auto-detail"></p>
+        <div class="buttons" id="auto-buttons">
+          <button id="auto-open" class="primary">申し込む</button>
+          <button id="auto-stop" class="link" hidden>止める</button>
+          <button id="auto-stop-confirm" class="primary" hidden>本当に止める（次の買い足しから止まります）</button>
+          <button id="auto-stop-cancel" class="link" hidden>やめる</button>
+        </div>
+      </div>
+
+      <section id="auto-form" hidden>
+        <h3>条件と金額を選ぶ</h3>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr><th>残高がいくらを下回ったら</th><td><select id="auto-below"></select></td></tr>
+              <tr><th>1回に買い足す額</th><td><select id="auto-amount"></select></td></tr>
+              <tr><th>月の上限（これを超えて自動では買いません）</th><td><select id="auto-cap"></select></td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="muted small">1回に買い足す額は「下回ったら」の額より大きく、月の上限は1回の額以上にしてください。</p>
+        <div class="buttons">
+          <button id="auto-review" class="primary">確認へ進む</button>
+          <button id="auto-form-cancel" class="link">やめる</button>
+        </div>
+      </section>
+
+      <section id="auto-confirm" hidden>
+        <h3>オートチャージの内容の確認</h3>
+        <p>以下の内容をご確認のうえ、「同意してカードの登録へ進む」を押してください。カードの登録画面（Stripe）に移ります。設定を変えるときも、変更後の内容で同意のうえ、カードを登録し直していただきます。</p>
+        <div class="table-wrap">
+          <table>
+            <tbody>
+              <tr><th>内容</th><td>残高が <strong><span class="auto-below"></span>円</strong>を下回るたびに、ToyTalker ポイント <strong><span class="auto-amount"></span>円分</strong>（1ポイント＝1円。税込）を自動で購入します</td></tr>
+              <tr><th>月の上限</th><td>1か月（日本時間の暦月）に自動で購入する合計は <strong><span class="auto-cap"></span>円</strong>まで。上限に達したその月は自動では購入しません（購入ページから手動で購入できます）</td></tr>
+              <tr><th>お支払い方法</th><td>この後の画面で登録するカード（カード情報は Stripe が保管し、当方は保持しません）</td></tr>
+              <tr><th>お支払い時期</th><td>残高が上の額を下回ったとき、その都度（確認の画面は出ません。1回の購入から1時間は続けて購入しません）</td></tr>
+              <tr><th>ポイントの付与時期</th><td>お支払い完了後、ただちに残高に加わります</td></tr>
+              <tr><th>有効期限</th><td>最後にポイントを使った日（または購入した日）から1年間</td></tr>
+              <tr><th>止め方</th><td>この購入ページの「止める」でいつでも止められます。止めた後の自動購入はありません。購入済みのポイントはそのまま使えます</td></tr>
+              <tr><th>返品・返金</th><td>自動で購入したポイントも、購入後の返金は原則できません（<a href="/buy/terms.html">利用規約</a>）。カードの期限切れなどで購入できなかったときは自動購入を止め、このページでお知らせします</td></tr>
+              <tr><th>販売事業者</th><td>ZakiCorp（<a href="/buy/terms.html">特定商取引法に基づく表示</a>）</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="buttons">
+          <button id="auto-setup" class="primary">同意してカードの登録へ進む</button>
+          <button id="auto-confirm-cancel" class="link">やめる</button>
+        </div>
+      </section>
     </section>
   </main>
   <footer>© 2026 ZakiCorp</footer>

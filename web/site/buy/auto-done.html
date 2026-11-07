@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src https://*.zakicorp.com https://*.amazoncognito.com; base-uri 'none'; form-action 'none'; frame-ancestors 'none'">
+  <meta name="robots" content="noindex">
+  <title>オートチャージの登録完了 - ToyTalker</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="site">
+    <nav>
+      <a class="brand" href="/">ToyTalker</a>
+    </nav>
+  </header>
+  <main>
+    <h1>カードを登録しました</h1>
+    <div class="card">
+      <p id="status">設定を確認しています…</p>
+      <p class="muted small" id="detail"></p>
+    </div>
+    <p>残高が決めた額を下回ると、登録したカードで自動で買い足します。領収書はそのたびに Stripe からメールで届きます。止めるときは購入ページの「止める」を押してください。</p>
+    <p><a href="/buy/index.html">購入ページへ戻る</a></p>
+  </main>
+  <footer>© 2026 ZakiCorp</footer>
+  <script src="/buy/config.js"></script>
+  <script src="/buy/auth.js"></script>
+  <script src="/buy/auto-done.js"></script>
+</body>
+</html>

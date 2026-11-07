@@ -702,6 +702,20 @@ export class ToyTalkerStack extends cdk.Stack {
     });
     opsSchedule.applyRemovalPolicy(RETAIN);
 
+    // ---- 課金: オートチャージの買い足し（5分ごと。docs/pricing-and-cost-model.md 11.10 段階3b） ----
+    // Streams でなくポーリング（条件の最小値 100円は1時間近い会話に当たり、5分の遅れで困らない。手元から同じ入力で呼んで試せる）。
+    // 有効期限の毎日の処理（段階3c）は { task: "expire" } で同じ関数に足す
+    if (!importPhase) {
+      new scheduler.Schedule(this, "BillingAutoChargeSchedule", {
+        scheduleName: `toytalker-billing-auto-charge-${config.stage}`,
+        description: "ToyTalker auto-charge: buy points off-session when a wallet falls below its threshold",
+        schedule: scheduler.ScheduleExpression.rate(cdk.Duration.minutes(5)),
+        target: new schedulerTargets.LambdaInvoke(functions.get("billing-worker")!, {
+          input: scheduler.ScheduleTargetInput.fromObject({ task: "auto-charge" }),
+        }),
+      });
+    }
+
     this.acknowledgeNagFindings();
   }
 
@@ -722,6 +736,8 @@ export class ToyTalkerStack extends cdk.Stack {
       "クローンボイスの speaker embedding を保存・削除する。バケット1つに限定");
     ack("AwsSolutions-IAM5[Resource::<OpsMonthlyCC65D2A5.Arn>:*]",
       "EventBridge Scheduler が月次Lambdaのバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
+    ack("AwsSolutions-IAM5[Resource::<BillingWorker6FBDD3C9.Arn>:*]",
+      "EventBridge Scheduler（オートチャージの5分ごと）が課金 worker のバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
     ack("AwsSolutions-IAM5[Resource::*]",
       "月次Lambdaの logs:GetQueryResults / logs:StopQuery。資源単位の指定ができない操作で、問い合わせIDを知っている自分の問い合わせしか読めない。どのロググループを読むかは logs:StartQuery の側で5本に絞っている");
     ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup]",

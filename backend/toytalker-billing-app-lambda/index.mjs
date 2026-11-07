@@ -2,6 +2,10 @@
 //
 //   GET  /billing                 残高・有効期限・カード・オートチャージの状態（Cognito のトークン必須。RnD でも必須）
 //   POST /billing/checkout        単発の購入。{ amount_jpy } は 500 / 1,000 / 3,000 のどれか。Stripe Checkout の URL を返す
+//   POST /billing/auto-charge/setup  オートチャージの申し込みと設定の変更（段階3b）。{ below_jpy, amount_jpy, monthly_cap_jpy }。
+//                                 Checkout の setup モード（カードの保存、3-D セキュアあり）の URL を返す。設定は Stripe の metadata に載せ、
+//                                 worker が checkout.session.completed で billing に書く（上げる・下げるのどちらも保存し直し。11.7）
+//   PUT  /billing/auto-charge     止めるだけ { enabled: false }（保存し直し無し）
 //   POST /billing/webhook         Stripe の Webhook。署名を確かめ、イベント ID だけを SQS に入れる（中身の処理は billing-worker）
 //
 // 守り: この Lambda は台帳に書けず、off-session の請求もできない（鍵は Checkout と Customer だけの restricted key）。
@@ -10,7 +14,10 @@
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { getWallet } from "../shared/wallet.mjs";
-import { getBilling, updateBilling, describeBilling, BUY_AMOUNTS, CONSENT_VERSION, CHECKOUT_MIN_INTERVAL_MS } from "../shared/billing.mjs";
+import {
+  getBilling, updateBilling, describeBilling, parseAutoSettings,
+  BUY_AMOUNTS, AUTO_BELOW_OPTIONS, AUTO_AMOUNT_OPTIONS, AUTO_CAP_OPTIONS, AUTO_CAP_DEFAULT, CONSENT_VERSION, CHECKOUT_MIN_INTERVAL_MS,
+} from "../shared/billing.mjs";
 import { stripeClient, verifyWebhook, rawBodyOf } from "../shared/stripe.mjs";
 import { startTrace, describeClient } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
@@ -110,14 +117,18 @@ async function api(method, path, event, trace) {
       last_used_at: wallet.lastUsedAt,
       expires_at: wallet.expiresAt,
       buy_amounts: BUY_AMOUNTS,
+      auto_options: { below: AUTO_BELOW_OPTIONS, amount: AUTO_AMOUNT_OPTIONS, cap: AUTO_CAP_OPTIONS, cap_default: AUTO_CAP_DEFAULT },
       consent_version: CONSENT_VERSION,
       ...describeBilling(billing),
     });
   }
 
-  if (method === "POST" && path === "/billing/checkout") {
-    let body = {};
+  let body = {};
+  if (method === "POST" || method === "PUT") {
     try { body = JSON.parse(rawBodyOf(event) || "{}"); } catch { body = {}; }
+  }
+
+  if (method === "POST" && path === "/billing/checkout") {
     const amount = Number(body.amount_jpy);
     if (!BUY_AMOUNTS.includes(amount)) {
       trace.set({ reason: "bad_amount" });
@@ -148,8 +159,90 @@ async function api(method, path, event, trace) {
     return response(200, { url: session.url });
   }
 
+  if (method === "POST" && path === "/billing/auto-charge/setup") {
+    const settings = parseAutoSettings(body);
+    if (!settings) {
+      trace.set({ reason: "bad_settings" });
+      return response(400, { error: "bad_settings" });
+    }
+    if (body.consent_version !== CONSENT_VERSION) {
+      trace.set({ reason: "consent_outdated" });
+      return response(409, { error: "consent_outdated" });
+    }
+    const current = await getBilling(ownerId);
+    if (current?.auto_status === "stopped_by_dispute") {
+      // チャージバックが来た家庭は自動の請求を再開させない（運用者が billing の auto_status を直すまで）
+      trace.set({ reason: "auto_blocked" });
+      return response(403, { error: "auto_blocked" });
+    }
+    const throttled = await throttleCheckout(ownerId);
+    if (throttled) {
+      trace.set({ reason: "too_many_checkouts" });
+      return response(429, { error: "too_many_checkouts" });
+    }
+    const stripe = stripeClient(secret("STRIPE_KEY_APP"), (s, info) => trace.ext(s, info));
+    let session;
+    try {
+      const customerId = await ensureCustomer(stripe, ownerId, identity);
+      trace.mark("customer");
+      session = await createSetupCheckout(stripe, { ownerId, identity, settings, customerId });
+    } catch (e) {
+      await updateBilling(ownerId, { last_checkout_at: null }).catch(() => {});
+      throw e;
+    }
+    trace.set({ auto_below: settings.below, auto_amount: settings.amount, auto_cap: settings.cap });
+    trace.mark("checkout");
+    return response(200, { url: session.url });
+  }
+
+  if (method === "PUT" && path === "/billing/auto-charge") {
+    if (body.enabled !== false) {
+      // 有効にする・設定を変えるのは保存し直し（POST /billing/auto-charge/setup）だけ。ここでは止めることしかできない
+      trace.set({ reason: "bad_request" });
+      return response(400, { error: "bad_request" });
+    }
+    const row = await getBilling(ownerId);
+    if (!row?.auto_enabled) {
+      trace.set({ reason: "not_enabled" });
+      return response(200, { ...describeBilling(row), changed: false });
+    }
+    // 請求中の予約は消さない（出した請求の結果は Webhook で台帳に書く）。止めたら次の買い足しから止まる（11.7）
+    const updated = await updateBilling(ownerId, { auto_enabled: false, auto_status: "stopped", auto_stopped_at: new Date().toISOString() });
+    trace.set({ auto_stopped: true });
+    return response(200, { ...describeBilling(updated), changed: true });
+  }
+
   trace.set({ reason: "not_found" });
   return response(404, { error: "not_found" });
+}
+
+/**
+ * オートチャージの申し込み・設定変更の Checkout セッション（setup モード）。カードを off-session 用に保存し、3-D セキュアを通す。
+ * 設定（条件・額・上限）はクライアントの値を検査した上でセッションの metadata に載せる。worker は Stripe から取り直したセッションの
+ * metadata を使う（クライアントが後から書き換える経路は無い）。同意文の版と同意した人（sub）も一緒に残す。
+ */
+function createSetupCheckout(stripe, { ownerId, identity, settings, customerId }) {
+  const metadata = {
+    owner_id: ownerId, sub: identity.sub, kind: "auto_setup",
+    below_jpy: String(settings.below), amount_jpy: String(settings.amount), monthly_cap_jpy: String(settings.cap),
+    consent_version: CONSENT_VERSION,
+  };
+  const yen = (n) => n.toLocaleString("ja-JP");
+  return stripe.post("/checkout/sessions", {
+      mode: "setup",
+      customer: customerId,
+      locale: "ja",
+      currency: "jpy",
+      metadata,
+      // Checkout の setup モードは usage=off_session の SetupIntent を作る（worker が usage を確かめる）
+      setup_intent_data: { metadata },
+      custom_text: {
+        submit: { message: `残高が${yen(settings.below)}円を下回るたびに、このカードで${yen(settings.amount)}円分を自動で購入します（月${yen(settings.cap)}円まで）。購入ページでいつでも止められます。` },
+      },
+      ...(LIVEMODE ? { consent_collection: { terms_of_service: "required" } } : {}),
+      success_url: `${BUY_PAGE_URL}/auto-done.html`,
+      cancel_url: `${BUY_PAGE_URL}/index.html`,
+  });
 }
 
 /** 単発購入の Checkout セッション。額はサーバーが決めた値だけ */

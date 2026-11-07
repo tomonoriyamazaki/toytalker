@@ -16,6 +16,10 @@ export class StripeError extends Error {
     this.code = err.code ?? null;
     this.type = err.type ?? null;
     this.param = err.param ?? null;
+    /** card_error のとき（カードの拒否理由。insufficient_funds など） */
+    this.declineCode = err.decline_code ?? null;
+    /** 請求の失敗（402）に添えられる PaymentIntent の ID（off-session の買い足しで、どの請求が落ちたか） */
+    this.paymentIntentId = err.payment_intent?.id ?? null;
   }
 }
 
