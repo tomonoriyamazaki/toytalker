@@ -31,7 +31,7 @@
     <ul>
       <li><strong>話しかけた声</strong>: 文字に変換するため、音声認識サービス（Soniox）へ直接送ります。運営者のサーバーには録音を保存しません。</li>
       <li><strong>会話の文章</strong>: 声を文字にしたものと、キャラクターの返答の文章を保存します。会話の流れを保つため、また不具合の調査とサービスの改善のために使います。</li>
-      <li><strong>声の登録（任意）</strong>: キャラクターの声として自分の声などを登録する機能を使った場合、登録した録音を音声合成サービスへ送り、声の特徴を表すデータを作って保存します。</li>
+      <li><strong>声の登録（任意）</strong>: キャラクターの声として自分の声などを登録する機能を使った場合、登録する録音（アプリで高さなどを加工した場合は加工した録音）を、選んだ音声合成サービス（Cartesia（米国）または運営者自身の音声合成サーバー（日本））へ送り、声の特徴を表すデータを作って保存します。録音そのものは運営者のサーバーにもアプリにも残しません。登録できるのは、ご自身の声か、本人の許可を得た声だけです。Cartesia で作った声は、削除すると Cartesia 側の声のデータも削除します。</li>
     </ul>
 
     <h3>機器と利用状況の情報</h3>
@@ -62,7 +62,7 @@
           <tr><td>ログイン</td><td>Google、Apple</td><td>ログインの手続き</td></tr>
           <tr><td>音声認識</td><td>Soniox</td><td>話しかけた声</td></tr>
           <tr><td>返答の文章の生成</td><td>Google（Gemini）、OpenAI、Anthropic のうち設定したもの</td><td>会話の文章、キャラクターの設定</td></tr>
-          <tr><td>音声合成</td><td>Google、OpenAI、ElevenLabs、Cartesia、Fish Audio、さくらインターネット、運営者自身の音声合成サーバーのうち設定したもの</td><td>返答の文章。声の登録を使った場合は登録した録音</td></tr>
+          <tr><td>音声合成</td><td>Google、OpenAI、ElevenLabs、Cartesia、Fish Audio、さくらインターネット、運営者自身の音声合成サーバーのうち設定したもの</td><td>返答の文章。声の登録を使った場合は登録する録音</td></tr>
           <tr><td>ウェブ検索</td><td>Brave Software</td><td>返答に検索が必要なときの検索語</td></tr>
         </tbody>
       </table>
@@ -90,7 +90,7 @@
       <p>運営者: ZakiCorp<br>
       連絡先: <a href="mailto:support@zakicorp.com">support@zakicorp.com</a></p>
     </div>
-    <p>制定: 2026年10月31日</p>
+    <p>制定: 2026年10月31日<br>改定: 2026年11月7日（声の登録の説明を追加）</p>
   </main>
   <footer>© 2026 ZakiCorp</footer>
 </body>

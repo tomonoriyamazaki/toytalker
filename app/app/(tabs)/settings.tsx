@@ -13,6 +13,7 @@ import {
   Animated,
   Dimensions,
   Switch,
+  Linking,
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -33,6 +34,7 @@ import { fetchTtsAudio } from "../../lib/ttsOnly";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
+const PRIVACY_URL = "https://toytalker.zakicorp.com/privacy.html";
 type SettingsScreen = "main" | "account" | "stt-select" | "character-list" | "character-edit" | "voice-select" | "llm-select" | "version" | "usage" | "usage-detail" | "custom-voice-list" | "custom-voice-record";
 const KEEP_ON_TAB_LEAVE: SettingsScreen[] = ["character-edit", "voice-select", "llm-select", "custom-voice-record"];
 
@@ -353,6 +355,7 @@ export default function Settings() {
     setCvUploadedFile(null);
     setCvStep("record");
     setCvCreated(null);
+    setCvConsent(false);
     navigateTo("custom-voice-record");
   };
 
@@ -450,6 +453,8 @@ export default function Settings() {
   const [cvPreviewUri, setCvPreviewUri] = useState<string | null>(null);
   const [cvPreviewBusy, setCvPreviewBusy] = useState(false);
   const [cvPlaying, setCvPlaying] = useState<string | null>(null);
+  // 声を外部（Cartesia は米国）へ送ることと、本人か許可を得た声であることの同意。ボイスを作るたびに確認する
+  const [cvConsent, setCvConsent] = useState(false);
   const cvSoundRef = useRef<Sound | null>(null);
 
   const stopCvSound = () => {
@@ -548,6 +553,7 @@ export default function Settings() {
   // 選んだ声（アップロードならそのファイル）でクローンを作り、試聴へ進む
   const registerCustomVoice = async () => {
     if (!cvName.trim()) { Alert.alert("エラー", "ボイス名を入力してください"); return; }
+    if (!cvConsent) { Alert.alert("確認", "声の送り先と、本人か許可を得た声であることを確認して、チェックを入れてください"); return; }
     if (!cvWavPathRef.current && !cvUploadedFile) { Alert.alert("エラー", "まず録音するかファイルを選択してください"); return; }
 
     setCvRegistering(true);
@@ -657,6 +663,7 @@ export default function Settings() {
       cvWavPathRef.current = "";
       setCvStep("record");
       setCvCreated(null);
+      setCvConsent(false);
       navigateTo("custom-voice-record");
     } catch (e: any) {
       Alert.alert("エラー", `ファイル選択に失敗しました: ${e?.message ?? e}`);
@@ -784,6 +791,29 @@ export default function Settings() {
       if (created) loadCustomVoices();
     };
 
+    // ボイスを作るボタンの上に置く同意のチェック（チェックするまでボタンは押せない）
+    const renderCvConsent = () => (
+      <View style={{ width: "100%", backgroundColor: "#FFF8E5", borderRadius: 12, padding: 14, gap: 10 }}>
+        <TouchableOpacity onPress={() => setCvConsent(v => !v)} style={{ flexDirection: "row", gap: 10, alignItems: "flex-start" }} accessibilityRole="checkbox" accessibilityState={{ checked: cvConsent }}>
+          <View style={{ width: 24, height: 24, borderRadius: 6, borderWidth: 2, borderColor: cvConsent ? "#007AFF" : "#bbb", backgroundColor: cvConsent ? "#007AFF" : "#fff", justifyContent: "center", alignItems: "center", marginTop: 1 }}>
+            {cvConsent && <Text style={{ color: "#fff", fontSize: 15, fontWeight: "700" }}>✓</Text>}
+          </View>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={{ fontSize: 14, color: "#333", lineHeight: 21 }}>・自分の声か、本人に許可をもらった声です</Text>
+            <Text style={{ fontSize: 14, color: "#333", lineHeight: 21 }}>
+              {cvProvider === "Cartesia"
+                ? "・この声を音声合成サービス Cartesia（米国の会社）へ送り、声のデータを作って保存することに同意します"
+                : "・この声を運営者の音声合成サーバー（日本）へ送り、声のデータを作って保存することに同意します"}
+            </Text>
+          </View>
+        </TouchableOpacity>
+        <Text style={{ fontSize: 12, color: "#888", lineHeight: 18 }}>
+          録音そのものは運営者のサーバーにもスマホにも残しません。作ったボイスは一覧からいつでも消せます{cvProvider === "Cartesia" ? "（Cartesia 側の声のデータも消えます）" : ""}。
+          <Text style={{ color: "#007AFF" }} onPress={() => Linking.openURL(PRIVACY_URL)}> プライバシーポリシー</Text>
+        </Text>
+      </View>
+    );
+
     const renderCvPick = () => (
       <ScrollView contentContainerStyle={[s.wrap, { paddingTop: 24 }]}>
         <Text style={{ fontSize: 15, color: "#555", lineHeight: 22 }}>
@@ -819,10 +849,11 @@ export default function Settings() {
           <Text style={{ fontSize: 16, fontWeight: "600", color: "#333" }}>ボイス名</Text>
           <TextInput style={[s.input, { flex: 1, marginTop: 0, fontSize: 18 }]} placeholder="例: パパ、ママ" value={cvName} onChangeText={setCvName} />
         </View>
+        {renderCvConsent()}
         <TouchableOpacity
-          style={[s.button, { marginTop: 8, backgroundColor: cvRegistering ? "#ccc" : "#007AFF" }]}
+          style={[s.button, { marginTop: 8, backgroundColor: cvRegistering || !cvConsent ? "#ccc" : "#007AFF" }]}
           onPress={registerCustomVoice}
-          disabled={cvRegistering}
+          disabled={cvRegistering || !cvConsent}
         >
           {cvRegistering ? <ActivityIndicator color="#fff" /> : <Text style={s.buttonText}>この声でボイスを作る</Text>}
         </TouchableOpacity>
@@ -941,10 +972,12 @@ export default function Settings() {
                 )}
               </TouchableOpacity>
             ) : canRegister ? (
+              <>
+              {!canApplyEffects && <View style={{ width: "100%", marginBottom: 12 }}>{renderCvConsent()}</View>}
               <TouchableOpacity
-                style={[s.button, { width: "100%", marginBottom: 16, backgroundColor: cvRegistering || cvPreparing ? "#ccc" : "#007AFF" }]}
+                style={[s.button, { width: "100%", marginBottom: 16, backgroundColor: cvRegistering || cvPreparing || (!canApplyEffects && !cvConsent) ? "#ccc" : "#007AFF" }]}
                 onPress={canApplyEffects ? prepareCandidates : registerCustomVoice}
-                disabled={cvRegistering || cvPreparing}
+                disabled={cvRegistering || cvPreparing || (!canApplyEffects && !cvConsent)}
               >
                 {cvRegistering || cvPreparing ? (
                   <ActivityIndicator color="#fff" />
@@ -952,6 +985,7 @@ export default function Settings() {
                   <Text style={s.buttonText}>{canApplyEffects ? "いろんな声にしてみる →" : "このファイルでボイスを作る"}</Text>
                 )}
               </TouchableOpacity>
+              </>
             ) : null}
 
             {!isUpload && cvRecordSeconds >= CV_DURATION && !cvRegistering && (
