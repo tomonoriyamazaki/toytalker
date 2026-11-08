@@ -69,6 +69,14 @@ export interface StageConfig {
    */
   readonly directFunctionUrls: boolean;
   /**
+   * デバイス鍵の初回登録を受け付けるか（backend/shared/auth.mjs の checkDeviceKey、ロードマップ6）。環境変数 DEVICE_KEY_ENROLL で Lambda へ渡す。
+   * true: devices の行に鍵のハッシュが無ければ、鍵付きの最初の要求のハッシュを保存する（TOFU）。鍵の無い要求（0.7.5 以前の旧ファーム）も通す。
+   * false: ハッシュの無い行への要求を 403 にする。ハッシュのある行は どちらでも一致を要求する。
+   * RnD は配布機2台が 0.7.6 以降になり、ログの device_key が全部 match になったら false（directFunctionUrls と同じ時）。
+   * 本番は製造時に鍵を登録する手順（ロードマップ4）が決まるまで true
+   */
+  readonly deviceKeyEnroll: boolean;
+  /**
    * 利用者認証（ロードマップ4、docs/auth.md）。Cognito ユーザープール `toytalker-auth-<環境>` を作り、Lambda が ID トークンを検証する
    * （backend/shared/auth.mjs）。
    * - required: トークン無しの要求を 401 で止めるか。本番は true。RnD は false（トークン無しも通し、ログに auth: "none"。
@@ -160,6 +168,7 @@ const common = {
   cartesiaDefaultVoiceId: "c7eafe22-8b71-40cd-850b-c5a3bbd8f8d2",
   architecture: "x86_64",
   wallet: { stopAtZero: true },
+  deviceKeyEnroll: true,
 } as const;
 
 export const stages: Record<StageName, StageConfig> = {

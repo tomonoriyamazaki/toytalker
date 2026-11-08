@@ -11,7 +11,7 @@ import { Agent, setGlobalDispatcher } from "undici";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
-import { deviceGate } from "../shared/auth.mjs";
+import { checkDeviceKey, deviceGate } from "../shared/auth.mjs";
 import { checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 import { BACKCHANNEL_LLM_MODEL, geminiThinkingConfig } from "../shared/llm.mjs";
 
@@ -90,7 +90,7 @@ async function resolveCharacterFromDevice(deviceId) {
     // ownerId は残高の確認に使う。キャラクターが無い（未設定・解決できない）ときも持ち主は返す
     const ownerId = device.owner_id ?? null;
     const char = device.character_id ? await resolveCharacter(device.character_id) : null;
-    return char ? { ...char, ownerId } : { ownerId, noCharacter: true };
+    return char ? { ...char, ownerId, deviceRow: device } : { ownerId, noCharacter: true, deviceRow: device };
   } catch (e) {
     console.error("[resolveCharacterFromDevice] error:", e);
     return null;
@@ -390,11 +390,13 @@ export const handler = async (event, context) => {
     // DynamoDB の失敗（null）は従来どおり続ける
     let registered = false;
     let ownerId = null;
+    let deviceRowForKey = null;
     if (deviceId) {
       const fromDevice = await resolveCharacterFromDevice(deviceId);
       if (fromDevice?.registered !== false) {
         registered = true;
         ownerId = fromDevice?.ownerId ?? null;
+        deviceRowForKey = fromDevice?.deviceRow ?? null;
         charConfig = fromDevice?.noCharacter ? null : fromDevice;
       }
     }
@@ -403,6 +405,15 @@ export const handler = async (event, context) => {
       if (gate) {
         trace.set({ status: gate.statusCode, reason: gate.error });
         return { statusCode: gate.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: gate.error }) };
+      }
+    }
+    // デバイス鍵（なりすまし防止。backend/shared/auth.mjs の checkDeviceKey）。行がある機器だけ照合する
+    if (deviceRowForKey) {
+      const key = await checkDeviceKey(event, deviceRowForKey);
+      trace.set(key.log);
+      if (key.gate) {
+        trace.set({ status: key.gate.statusCode, reason: key.gate.error });
+        return { statusCode: key.gate.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: key.gate.error }) };
       }
     }
     // 残高0なら相槌も返さない（本文が止める旨をしゃべる。docs/pricing-and-cost-model.md 11.3）。ファームは200以外を捨てる

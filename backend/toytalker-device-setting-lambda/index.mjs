@@ -9,7 +9,7 @@ import { tableName } from "../shared/tables.mjs";
 import { getBalance, listLedgerBetween } from "../shared/wallet.mjs";
 import { jstDate, jstDayRange } from "../shared/jst.mjs";
 import { startTrace, describeClient } from "../shared/trace.mjs";
-import { authenticate, authGate, describeAuth, resolveOwner, ownerGate, touchLogin, AUTH_REQUIRED } from "../shared/auth.mjs";
+import { authenticate, authGate, describeAuth, resolveOwner, ownerGate, publicDeviceRow, touchLogin, AUTH_REQUIRED } from "../shared/auth.mjs";
 
 const client = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(client);
@@ -346,7 +346,7 @@ async function route(method, path, event, body, identity, who, trace) {
         FilterExpression: "owner_id = :o",
         ExpressionAttributeValues: { ":o": owner_id },
       }));
-      return response(200, { devices: result.Items ?? [] });
+      return response(200, { devices: (result.Items ?? []).map(publicDeviceRow) }); // 鍵のハッシュは返さない
     }
 
     // ---- DELETE /devices/{device_id} ---- デバイス削除（所有者だけ。トークン無しのときも owner_id が必須。脅威モデル#2、2026-10-29）
@@ -377,7 +377,7 @@ async function route(method, path, event, body, identity, who, trace) {
       if (!result.Item) return response(404, { error: "Device not found" });
       const gate = ownerGate(identity, ownerId, result.Item);
       if (gate) return deny(gate);
-      return response(200, result.Item);
+      return response(200, publicDeviceRow(result.Item)); // 鍵のハッシュは返さない
     }
 
     // ---- PUT /devices/{device_id} ---- デバイス設定更新（character_id / device_name / backchannel_enabled / fw_channel / fw_target）

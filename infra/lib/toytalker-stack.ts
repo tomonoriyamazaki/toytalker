@@ -186,6 +186,8 @@ interface FunctionSpec {
 
 /** 認証トークンを載せるヘッダー（backend/shared/auth.mjs の TOKEN_HEADER、app/lib/api.ts）。Authorization は CloudFront の OAC が上書きするので別名 */
 const TOKEN_HEADER = "x-toytalker-token";
+/** ESP32 のデバイス鍵を載せるヘッダー（backend/shared/auth.mjs の DEVICE_KEY_HEADER、ファームの DeviceAuth.h） */
+const DEVICE_KEY_HEADER = "x-toytalker-device-key";
 
 // Function URLのCORS（ブラウザから呼ぶときだけ効く。アプリ・ESP32には関係ない）
 const CORS_GET_ONLY: lambda.CfnUrl.CorsProperty = {
@@ -209,8 +211,10 @@ const billingCors = (config: StageConfig): lambda.CfnUrl.CorsProperty => ({
 });
 
 const TTS_ENV = ["CARTESIA_DEFAULT_VOICE_ID", "ZAKICORP_TTS_URL"] as const;
-/** 利用者認証（backend/shared/auth.mjs）。アプリから呼ばれる Lambda に配る。ESP32 用は AUTH_REQUIRED だけ（未登録機の門） */
+/** 利用者認証（backend/shared/auth.mjs）。アプリから呼ばれる Lambda に配る。ESP32 用は ESP32_AUTH_ENV（未登録機の門とデバイス鍵） */
 const AUTH_ENV = ["AUTH_REQUIRED", "COGNITO_USER_POOL_ID", "COGNITO_CLIENT_ID"] as const;
+/** ESP32 だけから呼ばれる Lambda の認証（未登録機の門と、デバイス鍵の初回登録を受け付けるか。backend/shared/auth.mjs） */
+const ESP32_AUTH_ENV = ["AUTH_REQUIRED", "DEVICE_KEY_ENROLL"] as const;
 /** 前払いポイントの残高確認（backend/shared/wallet.mjs の checkBalance）。残高を確かめる Lambda に配る */
 const WALLET_ENV = ["WALLET_STOP_AT_ZERO"] as const;
 
@@ -246,7 +250,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 120,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, "AUTH_REQUIRED", ...WALLET_ENV],
+    env: [...TTS_ENV, ...ESP32_AUTH_ENV, ...WALLET_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-mcu" },
     warm: true,
@@ -298,7 +302,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 20,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, "AUTH_REQUIRED", ...WALLET_ENV],
+    env: [...TTS_ENV, ...ESP32_AUTH_ENV, ...WALLET_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY"],
     url: { invokeMode: "BUFFERED", route: "/backchannel-mcu" },
     warm: true,
@@ -314,7 +318,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 256, // 128ではコールドスタート時のSSM取得が約0.9秒（他は1〜2GBで約0.2秒）。256へ（ロードマップ9、2026-10-28）
     timeoutSeconds: 5, // OTA判定でS3のmanifestを読むため3→5（2026-09-16）
     format: "esm",
-    env: ["SONIOX_MODEL", "STT_OPTIONS", "FIRMWARE_BUCKET", ...AUTH_ENV],
+    env: ["SONIOX_MODEL", "STT_OPTIONS", "FIRMWARE_BUCKET", ...AUTH_ENV, "DEVICE_KEY_ENROLL"],
     secrets: ["SONIOX_API_KEY"],
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY, route: "/stt-token" },
     warm: true,
@@ -498,6 +502,7 @@ export class ToyTalkerStack extends cdk.Stack {
       BUY_PAGE_URL: config.billing.buyPageUrl,
       STRIPE_LIVEMODE: String(config.billing.stripeLivemode),
       AUTH_REQUIRED: String(config.auth.required),
+      DEVICE_KEY_ENROLL: String(config.deviceKeyEnroll),
       WALLET_STOP_AT_ZERO: String(config.wallet.stopAtZero),
       COGNITO_USER_POOL_ID: auth.userPool.userPoolId,
       COGNITO_CLIENT_ID: auth.client.userPoolClientId,
@@ -855,6 +860,7 @@ export class ToyTalkerStack extends cdk.Stack {
         "access-control-request-headers",
         "cloudfront-viewer-country",
         TOKEN_HEADER, // 認証トークン（ロードマップ4）。Authorization は OAC が上書きするので別名
+        DEVICE_KEY_HEADER, // ESP32 のデバイス鍵（ロードマップ6、backend/shared/auth.mjs の checkDeviceKey）。これで10個＝CloudFront の上限（1ポリシー10ヘッダー）
         "stripe-signature", // Stripe の Webhook の署名（課金 API /billing/webhook。11.10）
         // x-amz-content-sha256 は書けない（CloudFront が「not allowed」で拒否。OAC が署名用に自分で扱う。2026-10-29 deploy で判明）
       ),

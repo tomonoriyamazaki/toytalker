@@ -1,9 +1,10 @@
 #pragma once
-// AmazonRootCA.h — OTAダウンロード先(S3)の証明書検証に使うルート証明書。
+// AmazonRootCA.h — Amazon Trust Services のルート証明書。OTAダウンロード先(S3)と、Lambda（CloudFront の固定ドメイン）の検証に使う。
 // 公開情報。https://www.amazontrust.com/repository/ から2026-09-15に取得し、
 // openssl でS3 ap-northeast-1 のチェーンが検証できることを確認済み。
 // 1枚だけだとAmazonがルートを切り替えたときにOTAが止まるので4枚を持つ。
-// 用途はOTAだけ。Lambda本文・Soniox WSの接続は従来どおり検証なし。
+// 0.7.6 から会話・相槌・Soniox 鍵発行（api-rnd.zakicorp.com、ACM の Amazon RSA 2048 M01 ← Root CA 1。2026-11-08 openssl で確認）にも使う。
+// Soniox の WebSocket は Google Trust Services なので SonioxRootCA.h。
 
 static const char AMAZON_ROOT_CAS[] =
   // Amazon Root CA 1  SHA-256 8E:CD:E6:88:4F:3D:87:B1:12:5B:A3:1A:C3:FC:B1:3D:70:16:DE:7F:57:CC:90:4F:E1:CB:97:C6:AE:98:19:6E

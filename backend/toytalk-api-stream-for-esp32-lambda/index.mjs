@@ -14,7 +14,7 @@
 import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
   import { startTrace, describeClient, describePrevTurn, describeDevice, errorStatus } from "../shared/trace.mjs";
-import { deviceGate } from "../shared/auth.mjs";
+import { checkDeviceKey, deviceGate } from "../shared/auth.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
   // 会話の間が数秒空くとLLM/TTSへのTLS接続が閉じられ、次のターンで
@@ -594,7 +594,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       }));
       const device = deviceRes.Item;
       if (!device) return { registered: false }; // 未登録機。本番では拒む（deviceGate）
-      const partial = { registered: true, ownerId: device.owner_id ?? null, characterId: device.character_id ?? "default" };
+      const partial = { registered: true, deviceRow: device, ownerId: device.owner_id ?? null, characterId: device.character_id ?? "default" };
 
       let voiceId = null;
       let personalityPrompt = null;
@@ -715,6 +715,12 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     if (charConfig?.registered === false) {
       const gate = deviceGate(null);
       if (gate) return reject(gate);
+    }
+    // デバイス鍵（なりすまし防止。backend/shared/auth.mjs の checkDeviceKey）。行がある機器だけ照合する
+    if (charConfig?.deviceRow) {
+      const key = await checkDeviceKey(event, charConfig.deviceRow);
+      trace.set(key.log);
+      if (key.gate) return reject(key.gate);
     }
     if (deviceId) {
       if (charConfig?.provider) {

@@ -2,6 +2,8 @@
 // v0.5安定版・v0.6音量方式を保持。このフォルダには最新のソースだけを置き、配布した版は
 // git のタグ fw-<版> で残す（tools/publish-firmware.sh が付ける）。版は FirmwareVersion.h。
 // OTA: OtaUpdater.h / AmazonRootCA.h、起動時の更新確認（startNormalOperation）、LED_BLINK_OTA。
+// TLS は全接続で証明書を検証する（0.7.6、ロードマップ6）: Lambda（CloudFront）と OTA は AmazonRootCA.h、Soniox は SonioxRootCA.h。
+// デバイス鍵（DeviceAuth.h）を Lambda への全要求に添える。
 // NLP既定=AGGR（実機構成）。設計は docs/esp32-ota-settings-plan.md。
 // 受信(producer)とI2S再生(consumer)をFreeRTOSタスクで分離し、PSRAMリングバッファで吸収
 // LED制御はすべてdigitalWrite
@@ -35,6 +37,9 @@
 #include "FirmwareVersion.h"
 #include "OtaUpdater.h"
 #include "PowerSense.h"
+#include "AmazonRootCA.h"
+#include "SonioxRootCA.h"
+#include "DeviceAuth.h"
 #include <esp_arduino_version.h>
 #include <mbedtls/sha256.h>  // sha256Hex（CloudFront 経由の POST に本文ハッシュを添える）
 
@@ -285,7 +290,8 @@ int httpGetWithRetry(const String& url, String& body, int attempts) {
   int code = -1;
   for (int attempt = 1; attempt <= attempts; attempt++) {
     http.setTimeout(5000);
-    http.begin(url);
+    http.begin(url, AMAZON_ROOT_CAS);  // 証明書を検証する（CloudFront は Amazon Trust Services）
+    if (device_auth::available()) http.addHeader(device_auth::KEY_HEADER, device_auth::value());
     code = http.GET();
     if (code == 200) {
       body = http.getString();
@@ -299,12 +305,13 @@ int httpGetWithRetry(const String& url, String& body, int attempts) {
   return code;
 }
 
-// キーだけを取る軽い呼び出し（device_id 等を付けないので Lambda はデバイス報告も OTA 判定もしない）。
+// キーだけを取る軽い呼び出し。fw を付けないので Lambda は OTA 判定も版の記録もしない（last_seen だけ）。
+// device_id とデバイス鍵は付ける（0.7.6から。本番で「登録済みの機器か」と鍵を見るため。付けないとアプリ扱いでトークンを求められる）。
 // loop() からもワーカーからも呼ばれる。グローバルには触らず keyOut に返す。
 bool fetchSonioxKeyOnly(String& keyOut) {
   const uint32_t t0 = millis();
   String body;
-  if (httpGetWithRetry(String(SONIOX_LAMBDA_URL) + "?ttl=" + SONIOX_KEY_TTL_SEC, body, 2) != 200) {
+  if (httpGetWithRetry(String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress + "&ttl=" + SONIOX_KEY_TTL_SEC, body, 2) != 200) {
     Serial.println("[SONIOX_KEY] refresh failed: Lambda unreachable");
     return false;
   }
@@ -354,6 +361,12 @@ String sonioxStartMessageFor(const String& key) {
 
 String sonioxStartMessage() { return sonioxStartMessageFor(sonioxKey); }
 
+// Soniox の WebSocket を証明書の検証つきで設定する（接続は ws.loop() か先行接続ワーカーが行う）。
+// beginSSL は CA を渡さないと setInsecure になる（WebSocketsClient.cpp）ので、beginSslWithCA を使う
+void beginSonioxWs() {
+  ws.beginSslWithCA(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket", SONIOX_ROOT_CAS);
+}
+
 bool sonioxIsConnected() {
   return !sonioxPreconnect.ownsClient() && ws.isConnected();
 }
@@ -378,7 +391,7 @@ void prepareSonioxDuringPlayback() {
   finishSonioxPreconnect();
   if (sonioxPreconnect.ownsClient()) return;
   ws.disconnect();
-  ws.beginSSL(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket");
+  beginSonioxWs();
   ws.onEvent(webSocketEvent);
   ws.enableHeartbeat(15000, 3000, 2);
   sonioxPreconnectPending = true;
@@ -1704,9 +1717,10 @@ void fetchBackchannel(void* param) {
 
   {
     HTTPClient http;
-    http.begin(url);
+    http.begin(url, AMAZON_ROOT_CAS);  // 証明書を検証する
     http.addHeader("Content-Type", "application/json");
     http.addHeader("x-amz-content-sha256", sha256Hex(payload));
+    if (device_auth::available()) http.addHeader(device_auth::KEY_HEADER, device_auth::value());
     http.setTimeout(8000);
     const char* headerKeys[] = {"X-Backchannel-Text", "x-backchannel-text"};
     http.collectHeaders(headerKeys, 2);
@@ -1853,7 +1867,7 @@ void lambdaConnectAndSendTask(void* param) {
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   tls_memory::printStats("lambda_pre_connect");
-  p->client->setInsecure();
+  p->client->setCACert(AMAZON_ROOT_CAS);  // 証明書を検証する（0.7.5 までは setInsecure で検証なし）
   uint32_t connectStart = millis();
   bool connected = p->client->connect(LAMBDA_HOST, 443);
   Serial.printf("[LATENCY] lambda_connect_ms=%lu ok=%d\n",
@@ -1998,6 +2012,7 @@ void sendToLambdaAndPlay(const String& text) {
     "Host: " + LAMBDA_HOST + "\r\n"
     "Content-Type: application/json\r\n"
     "x-amz-content-sha256: " + sha256Hex(payload) + "\r\n"
+    + (device_auth::available() ? String(device_auth::KEY_HEADER) + ": " + device_auth::value() + "\r\n" : String("")) +
     "Accept: text/event-stream\r\n"
     "Connection: close\r\n"
     "Content-Length: " + payload.length() + "\r\n\r\n"
@@ -2395,7 +2410,7 @@ void startSTTRecording() {
       Serial.printf("⏱️ STT [%lums] WS still not connected, starting fresh\n", millis() - t0);
       sonioxPreconnectPending = false;
       refreshSonioxKeyIfOld("preconnect_failed");
-      ws.beginSSL(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket");
+      beginSonioxWs();
       ws.onEvent(webSocketEvent);
       ws.enableHeartbeat(15000, 3000, 2);
     }
@@ -2403,7 +2418,7 @@ void startSTTRecording() {
     // 起動直後など先行接続が存在しない場合は待たずに即接続（従来はここで5秒無駄待ちしていた）
     Serial.printf("⏱️ STT [%lums] No preconnect pending, connecting fresh\n", millis() - t0);
     refreshSonioxKeyIfOld("no_preconnect");
-    ws.beginSSL(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket");
+    beginSonioxWs();
     ws.onEvent(webSocketEvent);
     ws.enableHeartbeat(15000, 3000, 2);
   }
@@ -2505,6 +2520,9 @@ void tryConnectWiFiFromBLE(const String& ssid, const String& password) {
 void startNormalOperation() {
   Serial.println("🎯 Starting normal operation...");
   currentMode = MODE_NORMAL;
+
+  // デバイス鍵（初回はここで作る。Wi-Fi 接続後なので乱数は RF 由来）。失敗しても鍵なしで続ける
+  device_auth::ensure();
 
   // Sonioxキー取得（WiFi切替直後などの一時的な失敗に備えて3回リトライ）
   // fw/hw/ota/part はLambdaが記録し、更新の要否判定にも使う（docs/esp32-ota-settings-plan.md）

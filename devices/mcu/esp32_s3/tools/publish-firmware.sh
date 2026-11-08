@@ -21,6 +21,9 @@ BOARD="esp32s3"
 SKETCH_DIR="${SKETCH_DIR:-devices/mcu/esp32_s3/toytalker_mini_v0.7}"
 FQBN="esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=no_fs,CDCOnBoot=cdc"   # sketch.yaml の default_fqbn と同じ
 BUILD_DIR="${TMPDIR:-/tmp}/toytalker_publish_build"
+# Windows（Git Bash）では arduino-cli.exe とこのスクリプトが同じ場所を指すよう、C:/... の形にそろえる。
+# MSYS_NO_PATHCONV=1 で /tmp のまま渡すと exe 側は C:\tmp に書き、ここは古い .bin を読んで別の版の中身を発行してしまう（2026-11-08 に 0.7.6 の名前で 0.7.5 を発行した）
+if command -v cygpath >/dev/null 2>&1; then BUILD_DIR="$(cygpath -m "$BUILD_DIR")"; fi
 
 cd "$(dirname "$0")/../../../.."   # リポジトリルート
 
