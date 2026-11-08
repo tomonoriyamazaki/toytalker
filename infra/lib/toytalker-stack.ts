@@ -755,9 +755,11 @@ export class ToyTalkerStack extends cdk.Stack {
       mailFromBehaviorOnMxFailure: ses.MailFromBehaviorOnMxFailure.REJECT_MESSAGE,
     });
     const user = new iam.User(this, "SupportMailSmtpUser", { userName: `toytalker-ses-smtp-${this.config.stage}` });
+    // 資源は「この口座の識別子すべて」。sandbox の間は送信者のドメインだけでなく受信者（検証済みの宛先）の識別子も
+    // 許可に要るため（2026-11-08 に拒否で確認）。送信元は条件で addresses に限るので、できることは増えない。
     user.addToPolicy(new iam.PolicyStatement({
       actions: ["ses:SendRawEmail"],
-      resources: [identity.emailIdentityArn],
+      resources: [cdk.Stack.of(this).formatArn({ service: "ses", resource: "identity", resourceName: "*" })],
       conditions: { StringEquals: { "ses:FromAddress": [...mail.addresses] } },
     }));
     identity.dkimRecords.forEach((r, i) => {
@@ -786,6 +788,8 @@ export class ToyTalkerStack extends cdk.Stack {
       "EventBridge Scheduler が月次Lambdaのバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
     ack("AwsSolutions-IAM5[Resource::<BillingWorker6FBDD3C9.Arn>:*]",
       "EventBridge Scheduler（オートチャージの5分ごと・有効期限の毎日）が課金 worker のバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
+    ack("AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:<AWS::Region>:<AWS::AccountId>:identity/*]",
+      "サポートの返信の SMTP 用ユーザー。sandbox では受信者の識別子も要るため識別子全部を対象にするが、送信元は ses:FromAddress の条件で2つに限る");
     ack("AwsSolutions-IAM5[Resource::*]",
       "月次Lambdaの logs:GetQueryResults / logs:StopQuery。資源単位の指定ができない操作で、問い合わせIDを知っている自分の問い合わせしか読めない。どのロググループを読むかは logs:StartQuery の側で5本に絞っている");
     ack("AwsSolutions-IAM4[Policy::arn:<AWS::Partition>:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup]",
