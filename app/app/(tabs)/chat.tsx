@@ -581,6 +581,7 @@ export default function Chat() {
   /* === Soniox: リアルタイムWS === */
   const sonioxWsRef = useRef<WebSocket | null>(null);
   const sonioxListeningRef = useRef(false);
+  const sttStartingRef = useRef(false); // 開始処理の最中（録音器の start が終わる前）。二重起動を防ぐ印は同期的に立てる
   const micDataSubRef = useRef<{ remove: () => void } | null>(null); // AudioRecord.on("data") の購読。止めるときに外す
   const preconnectedWsRef = useRef<WebSocket | null>(null);
   const preconnectedChoiceRef = useRef(""); // 先行接続を開いた時の選択（sttChoiceKey）
@@ -652,11 +653,15 @@ export default function Chat() {
     const sttT0 = Date.now();
     if(DEBUG)setLog(L => [...L, "Soniox STT: start()"]);
 
-    // すでに起動中なら無視（多重起動防止）
-    if (sonioxListeningRef.current) {
-      setLog(L => [...L, "Soniox already listening – skip"]);
+    // すでに起動中か開始処理の最中なら無視（多重起動防止）。
+    // sonioxListeningRef は録音器の start が終わってから立つので、その数ミリ秒の間に2回目が通ると
+    // iOS 側で AudioQueue が2本できて1本が宙に浮く（2026-11-08 のログで 9ms 間隔の二重起動を確認）。印はここで同期的に立てる
+    if (sonioxListeningRef.current || sttStartingRef.current) {
+      console.log(`Soniox STT: already ${sonioxListeningRef.current ? "listening" : "starting"} – skip`);
       return;
     }
+    sttStartingRef.current = true;
+    try {
 
     // 権限チェック
     const okAndroid = await ensureMicPermissionAndroid();
@@ -1014,6 +1019,10 @@ export default function Chat() {
       releaseMic("chat");
       await restoreIOSPlayback();
     };
+
+    } finally {
+      sttStartingRef.current = false;
+    }
   };
 
 
