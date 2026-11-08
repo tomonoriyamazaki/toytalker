@@ -38,9 +38,11 @@
       const b = await A.api("GET", "/billing");
       $("balance").textContent = yen(b.balance_jpy);
       if (b.balance_jpy <= 0) $("balance").classList.add("empty");
-      $("expiry").textContent = b.expires_at
-        ? `有効期限: ${new Date(b.expires_at).toLocaleDateString("ja-JP")}（最後に使った日から1年。使うたびに延びます）`
-        : "有効期限: 最初にポイントを使った日（または購入した日）から1年";
+      $("expiry").textContent = b.expired_at
+        ? `${new Date(b.expired_at).toLocaleDateString("ja-JP")} に有効期限（最後に使った日から1年）が過ぎ、残っていたポイントは失効しました。購入するとまた使えます`
+        : b.expires_at
+          ? `有効期限: ${new Date(b.expires_at).toLocaleDateString("ja-JP")}（最後に使った日から1年。使うたびに延びます）`
+          : "有効期限: 最初にポイントを使った日（または購入した日）から1年";
       const amounts = $("amounts");
       amounts.replaceChildren();
       for (const amt of b.buy_amounts) {
@@ -105,6 +107,9 @@
       text = "停止中: カード会社からの支払い異議により止まっています。お問い合わせください（support@zakicorp.com）。";
     } else if (a && a.status === "stopped") {
       text = "止めています。";
+      sub = `以前の設定: ${settings}。再開するには申し込み直してください（カードの登録もやり直します）。`;
+    } else if (a && a.status === "stopped_by_expiry") {
+      text = "停止中: 1年使われなかったためポイントが失効し、オートチャージも止めました。";
       sub = `以前の設定: ${settings}。再開するには申し込み直してください（カードの登録もやり直します）。`;
     }
     st.textContent = text;

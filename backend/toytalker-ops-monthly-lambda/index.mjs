@@ -1,7 +1,8 @@
 // Node.js 18+ / ESM（index.mjs）
 // Handler: index.handler
 // 用途: 月1回の運用まとめ。為替の取得・保存、先月の記録実費の集計、各社請求との突き合わせ、
-//       単価行の点検を行い、結果を1通のメール（SNS）で送る。値の自動修正はしない。
+//       単価行の点検、前払いポイントの残高合計（資金決済法の基準日 3月末・9月末の目安）を行い、結果を1通のメール（SNS）で送る。
+//       値の自動修正はしない。
 // 起動: EventBridge Scheduler（毎月1日 09:00 JST）。手動実行時は event で対象月・送信有無を指定できる。
 // Event: { month?: "YYYY-MM"（集計対象月。既定は先月）, send?: boolean（既定true）, fx?: boolean（既定true） }
 // Env: OPS_SNS_TOPIC_ARN（必須）, FX_OVERWRITE（"true"で既存の為替行も上書き。既定は無い月だけ作成）,
@@ -12,6 +13,7 @@ import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
 import { CloudWatchLogsClient, StartQueryCommand, GetQueryResultsCommand, StopQueryCommand } from "@aws-sdk/client-cloudwatch-logs";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
+import { listWallets, describeWallet } from "../shared/wallet.mjs";
 
 const REGION = "ap-northeast-1";
 const ddb  = DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
@@ -54,6 +56,9 @@ const MANUAL_CHECK_URLS = {
   fishaudio:"https://fish.audio/",
   zakicorp: "(自前サーバー。電気代・ngrok費用のみ)",
 };
+
+// 資金決済法（docs/pricing-and-cost-model.md 11.7）: 基準日（3月末・9月末）の未使用残高がこれを超えたら届出が要る
+const PREPAID_REPORT_THRESHOLD_JPY = 10_000_000;
 
 // ---- 日付ユーティリティ（すべてUTC） ----
 function prevMonthOf(date = new Date()) {
@@ -220,6 +225,24 @@ async function fetchElevenLabsUsage() {
     characterCount: Number(j.character_count) || 0,
     characterLimit: Number(j.character_limit) || 0,
     resetAt: j.next_character_count_reset_unix ? new Date(j.next_character_count_reset_unix * 1000).toISOString().slice(0, 10) : null,
+  };
+}
+
+/**
+ * 前払いポイントの残高の合計（toytalker-wallets。11.10 段階3c）。毎月1日の朝に走るので「前月末の残高」の目安になる。
+ * 対象月が3月・9月なら資金決済法の基準日の値として見る（1,000万円を超えていれば2か月以内に届出）
+ */
+async function aggregateWallets() {
+  const wallets = (await listWallets()).map(describeWallet);
+  const positive = wallets.filter(w => w.balanceJpy > 0);
+  const now = Date.now();
+  return {
+    count: wallets.length,
+    positiveCount: positive.length,
+    totalJpy: positive.reduce((a, w) => a + w.balanceJpy, 0),
+    negativeJpy: wallets.filter(w => w.balanceJpy < 0).reduce((a, w) => a + w.balanceJpy, 0), // RnD（残高0で止めない）で出るマイナス
+    expiringSoon: positive.filter(w => w.expiresAt && Date.parse(w.expiresAt) - now < 30 * 24 * 60 * 60 * 1000).length,
+    noOrigin: positive.filter(w => !w.lastUsedAt).length, // 毎日の処理が起点を付けるので、普段は0
   };
 }
 
@@ -390,7 +413,7 @@ async function aggregateTtsTraces(month, { budgetMs = 120_000 } = {}) {
 const fmtJst = (ms) => new Date(ms + 9 * 3600_000).toISOString().slice(0, 16).replace("T", " ");
 
 // ---- 6. レポート組み立て ----
-function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing, staleDays, notes, tts }) {
+function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing, staleDays, notes, tts, wallets }) {
   const L = [];
   L.push(`ToyTalker 月次コスト確認レポート（対象月: ${month}）`);
   L.push(`生成: ${new Date().toISOString()}  マージン: ${margin}`);
@@ -483,6 +506,19 @@ function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing
   }
   L.push("");
 
+  L.push("■ 前払いポイントの残高（toytalker-wallets、生成時点）");
+  if (wallets.status === "error") {
+    L.push(`  取得失敗（${wallets.error}）`);
+  } else {
+    const w = wallets;
+    const baseDay = /-(03|09)$/.test(month);
+    L.push(`  残高合計: ${fmtJpy(w.totalJpy)} / 残高のある財布 ${w.positiveCount} / 財布の数 ${w.count}${baseDay ? "  ← 資金決済法の基準日（3月末・9月末）の目安" : ""}`);
+    if (w.totalJpy > PREPAID_REPORT_THRESHOLD_JPY) L.push(`  ※ 合計が ${fmtJpy(PREPAID_REPORT_THRESHOLD_JPY)} を超えています。基準日の値なら2か月以内に財務局へ届出（docs/pricing-and-cost-model.md 11.7）`);
+    if (w.negativeJpy < 0) L.push(`  マイナスの財布の合計: ${fmtJpy(w.negativeJpy)}（残高0で止めない環境の消費）`);
+    L.push(`  30日以内に失効する財布: ${w.expiringSoon}${w.noOrigin ? ` / 起点（最終利用日）の無い財布: ${w.noOrigin}` : ""}`);
+  }
+  L.push("");
+
   L.push("■ 点検");
   const missingKeys = Object.entries(missing);
   if (missingKeys.length) {
@@ -529,12 +565,13 @@ export const handler = async (event = {}) => {
   const stale = checkStalePrices(prices, staleDays);
   const missing = await findMissingPriceWarnings(month);
   const tts = await safe(() => aggregateTtsTraces(month));
+  const wallets = await safe(() => aggregateWallets());
 
   // 対象月の為替行の有無（無ければ本文Lambdaは150円で計算していた）
   const monthRate = (await ddb.send(new GetCommand({ TableName: EXCHANGE_RATES_TABLE, Key: { month, currency: "JPY" } }))).Item;
   if (!monthRate) notes.push(`${month} の為替行が無く、その月の記録は既定の ${FX_FALLBACK_RATE} 円で計算されています`);
 
-  const report = buildReport({ month, fx, prices, margin, usage, actuals: { openai, anthropic, elevenlabs }, stale, missing, staleDays, notes, tts });
+  const report = buildReport({ month, fx, prices, margin, usage, actuals: { openai, anthropic, elevenlabs }, stale, missing, staleDays, notes, tts, wallets });
   console.log(report);
 
   let published = false;

@@ -17,6 +17,8 @@ CDK 管理の外（RnD アカウント、環境に属さない）。本番づく
 ## 反映
 
 ```sh
-aws s3 sync web/site s3://toytalker-web --delete
-aws cloudfront create-invalidation --distribution-id <配信ID> --paths "/*"
+aws s3 sync web/site s3://toytalker-web --delete --cache-control "no-cache"
+aws cloudfront create-invalidation --distribution-id E335QPFK5DELJ0 --paths "/*"
 ```
+
+`--cache-control "no-cache"` は必ず付ける（`sync` は変わったファイルしか送らないので、メタデータだけ直したいときは `aws s3 cp web/site s3://toytalker-web --recursive --cache-control "no-cache"`。2026-11-08 に全ファイルへ付けた）。無いとブラウザが JS を自分の判断で長く保持し、公開しても古い画面のまま開く（2026-11-08 に購入ページで起きた。CloudFront の invalidation ではブラウザ側のキャッシュは消せない）。`no-cache` でも ETag で毎回確認するだけなので、ログイン（sessionStorage のトークン）には影響しない。

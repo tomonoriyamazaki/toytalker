@@ -116,6 +116,7 @@ async function api(method, path, event, trace) {
       balance_jpy: Math.round(wallet.balanceJpy * 1000) / 1000,
       last_used_at: wallet.lastUsedAt,
       expires_at: wallet.expiresAt,
+      expired_at: wallet.expiredAt, // 失効して残高が0になった時刻（その後に使っていれば null）
       buy_amounts: BUY_AMOUNTS,
       auto_options: { below: AUTO_BELOW_OPTIONS, amount: AUTO_AMOUNT_OPTIONS, cap: AUTO_CAP_OPTIONS, cap_default: AUTO_CAP_DEFAULT },
       consent_version: CONSENT_VERSION,

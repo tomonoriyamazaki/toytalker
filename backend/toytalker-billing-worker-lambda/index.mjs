@@ -1,12 +1,16 @@
 // 課金の処理（内向き。URL は無い。docs/pricing-and-cost-model.md 11.10）。入口は3つ:
 //   1. SQS: billing-app が署名を確かめて入れた Stripe のイベント ID。中身は信じず、ID で Stripe から取り直してから処理する
 //   2. スケジュール { task: "auto-charge" }（5分ごと。段階3b）: 残高が条件を下回った家庭の買い足し
-//   3. スケジュール { task: "expire" }（毎日。段階3c）: 有効期限
+//   3. スケジュール { task: "expire" }（毎日。段階3c）: 有効期限（最後に使った日から1年。335日で予告の記録、365日で失効）
 // この Lambda だけが台帳に purchase / refund / dispute / expire を書き、off-session の請求を出す。
 import { randomUUID } from "node:crypto";
 import { SNSClient, PublishCommand } from "@aws-sdk/client-sns";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
-import { recordStripeRow, getBalance } from "../shared/wallet.mjs";
+import {
+  recordStripeRow, getBalance, listWallets, describeWallet, stampLastUsedAt, recordExpiryWarning, recordExpire,
+  EXPIRY_DAYS, EXPIRY_WARN_DAYS,
+} from "../shared/wallet.mjs";
+import { jstDate } from "../shared/jst.mjs";
 import {
   getBilling, updateBilling, listAutoEnabled, parseAutoSettings,
   BUY_AMOUNTS, AUTO_AMOUNT_OPTIONS, AUTO_COOLDOWN_MS, AUTO_RESERVATION_STALE_MS,
@@ -22,11 +26,7 @@ export const handler = async (event, context) => {
   await ensureSecrets();
   if (Array.isArray(event?.Records) && event.Records[0]?.eventSource === "aws:sqs") return handleQueue(event, context);
   if (event?.task === "auto-charge") return handleAutoCharge(context);
-  if (event?.task === "expire") {
-    // 段階3c で実装。スケジュールだけ先に置いても何もしない
-    console.log(JSON.stringify({ kind: "billing-worker", task: event.task, status: "not_implemented" }));
-    return { ok: true };
-  }
+  if (event?.task === "expire") return handleExpire(context, { dryRun: event.dry_run === true });
   console.warn("[billing-worker] unknown event:", JSON.stringify(event).slice(0, 200));
   return { ok: false };
 };
@@ -160,6 +160,91 @@ async function charge(stripe, row, reservation, amount, log) {
     // 通信の失敗や 5xx。予約は残し、次の5分で同じ冪等キーで出し直す
     throw e;
   }
+}
+
+// ---- 有効期限（毎日。11.10 段階3c） ----
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 財布を全部見て、最後に使った日（last_used_at）から 335日で予告を記録し、365日で台帳に expire を書いて残高を0にする。
+ * 最終利用日が無い財布（段階3より前からあるもの）には、この処理が最初に見た日を起点として付ける（= 段階3を出した日から数える）。
+ * 残高が0以下の財布は予告も失効もしない（失うものが無い）。1家庭の失敗は他に波及させない。失効させた家庭があれば運用者へ1通メール。
+ * 失効させる前にオートチャージを止める（残高が0になると条件を満たし、1年使っていない家庭のカードに5分以内に請求が走るため。
+ * 止める → 失効の順で、間に買い足しが入らないようにする。再開は購入ページから申し込み直し）。
+ * 手元から `aws lambda invoke --payload '{"task":"expire"}'` で1回だけ走らせられる。`"dry_run": true` を付けると読むだけで何も書かない
+ */
+async function handleExpire(context, { dryRun = false } = {}) {
+  const trace = startTrace("billing-worker", { context });
+  trace.set({ task: "expire", dry_run: dryRun });
+  const counts = { seen: 0, stamped: 0, warned: 0, expired: 0, changed: 0, skipped: 0, failed: 0, auto_stopped: 0 };
+  const expiredOwners = [];
+  try {
+    const now = Date.now();
+    const date = jstDate(new Date(now).toISOString());
+    const stampAt = new Date(now).toISOString();
+    const rows = await listWallets();
+    counts.seen = rows.length;
+    for (const row of rows) {
+      const ownerId = row.owner_id;
+      const log = (status, extra = {}) => console.log(JSON.stringify({ kind: "billing-worker", task: "expire", owner_id: ownerId, status, dry_run: dryRun, ...extra }));
+      try {
+        const w = describeWallet(row);
+        if (!w.lastUsedAt) {
+          // 起点が無い財布。今日を起点にする（残高が無くても付けて、以後の計算を1本にする）
+          if (!dryRun) await stampLastUsedAt(ownerId, stampAt);
+          counts.stamped++;
+          log("stamped", { balance_jpy: w.balanceJpy });
+          continue;
+        }
+        if (!(w.balanceJpy > 0)) { counts.skipped++; continue; }
+        const ageDays = Math.floor((now - Date.parse(w.lastUsedAt)) / DAY_MS);
+        if (ageDays >= EXPIRY_DAYS) {
+          const autoStopped = dryRun ? false : await stopAutoChargeForExpiry(ownerId);
+          if (autoStopped) counts.auto_stopped++;
+          const r = dryRun ? "expired" : await recordExpire({ ownerId, date, balanceRaw: w.balanceRaw, lastUsedAt: w.lastUsedAt });
+          counts[r === "duplicate" ? "skipped" : r]++;
+          log(r, { balance_jpy: w.balanceJpy, last_used_at: w.lastUsedAt, age_days: ageDays, date, auto_stopped: autoStopped });
+          if (r === "expired") expiredOwners.push({ owner_id: ownerId, balance_jpy: w.balanceJpy, last_used_at: w.lastUsedAt });
+          continue;
+        }
+        if (ageDays >= EXPIRY_WARN_DAYS) {
+          if (w.expiryWarned) { counts.skipped++; continue; } // この起点に対する予告は記録済み
+          const ok = dryRun ? true : await recordExpiryWarning(ownerId, w.lastUsedAt);
+          counts[ok ? "warned" : "changed"]++;
+          log(ok ? "warned" : "changed", { balance_jpy: w.balanceJpy, last_used_at: w.lastUsedAt, age_days: ageDays, expires_at: w.expiresAt });
+          continue;
+        }
+        counts.skipped++;
+      } catch (e) {
+        counts.failed++;
+        console.error("[billing-worker] expire error:", ownerId, e?.name ?? e, e?.message ?? "");
+      }
+    }
+    if (expiredOwners.length > 0 && !dryRun) {
+      await notifyOps("points_expired", { date, count: expiredOwners.length, total_jpy: expiredOwners.reduce((a, o) => a + o.balance_jpy, 0), wallets: expiredOwners });
+    }
+    trace.set({ status: "done", ...counts });
+    return { ok: true, date, ...counts };
+  } catch (e) {
+    trace.error("expire", e);
+    trace.set({ status: "error", ...counts });
+    throw e;
+  } finally {
+    trace.finish();
+  }
+}
+
+/**
+ * 失効の前にオートチャージを止める。有効なら auto_enabled: false・auto_status: stopped_by_expiry（カードと設定は残す。再開は申し込み直し）。
+ * 失効の書き込みが「財布が動いていた」で見送られた場合も止めたままにする（365日放置した財布がその瞬間に使われるのは稀で、再開は利用者がすぐできる）
+ * @returns {Promise<boolean>} 止めたら true
+ */
+async function stopAutoChargeForExpiry(ownerId) {
+  const billing = await getBilling(ownerId);
+  if (!billing?.auto_enabled) return false;
+  await updateBilling(ownerId, { auto_enabled: false, auto_status: "stopped_by_expiry", auto_stopped_at: new Date().toISOString() });
+  return true;
 }
 
 /** SQS は1件ずつ（batchSize 1）だが、形は複数件に対応しておく。失敗した件だけ再試行させる（reportBatchItemFailures） */
