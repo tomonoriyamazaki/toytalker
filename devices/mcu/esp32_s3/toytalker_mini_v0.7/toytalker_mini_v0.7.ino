@@ -34,6 +34,7 @@
 #include "SonioxPreconnect.h"
 #include "FirmwareVersion.h"
 #include "OtaUpdater.h"
+#include "PowerSense.h"
 #include <esp_arduino_version.h>
 #include <mbedtls/sha256.h>  // sha256Hex（CloudFront 経由の POST に本文ハッシュを添える）
 
@@ -117,11 +118,16 @@ String sonioxModel = "stt-rt-v4";  // 起動時に1回だけ設定。以後は�
 #define PIN_LED      40
 #define PIN_BUTTON   35
 
-// ==== 電源・温度・充電（v0.2基板新設。Step 2bで読み取り実装予定） ====
+// ==== 電源・温度・充電（v0.2基板新設。読み取りは PowerSense.h） ====
 #define PIN_VBAT_ADC   1   // 470k×2分圧: 実電圧=読み値×2。ADC1系なのでWiFi中も測定可
 #define PIN_BOARD_TEMP 2   // TH2分圧(基板温度)
 #define PIN_CHG_STAT1  13  // BQ25185 STAT1(100kプルアップ済みオープンドレイン)
 #define PIN_CHG_STAT2  14  // BQ25185 STAT2
+// 録音中（待機側）に読んで覚え、会話の要求の "device" に添える。送る時に読まないのは要求を遅らせないため
+const uint32_t POWER_SENSE_INTERVAL_MS = 30000;
+static PowerReading powerReading;
+static bool powerReadingValid = false;
+static uint32_t powerReadMs = 0;
 
 // LED状態（PWMなし、digitalWriteのみ）
 enum LEDMode {
@@ -211,7 +217,26 @@ String partialText = "";
 String sonioxFinalBuf = "";
 String lastFinalText = "";
 unsigned long lastPartialMs = 0;
-const unsigned long END_SILENCE_MS = 800;
+// 話し終わりの猶予（2026-11-08、ロードマップ6。アプリの「ふつう」と同じ動き: app/app/(tabs)/chat.tsx）。
+// Soniox の終端（<end>）が来ても STT_GRACE_MS 待ち、その間に声（ブロックRMS ≥ STT_GRACE_SPEECH_RMS）か
+// 新しい文字が出たら同じ発話として聞き続ける（Soniox は同じ WS で続きを文字にし、次の <end> を送る）。
+// 声が物音だっただけなら次の <end> が来ないので、STT_GRACE_RESUME_MAX_MS 新しい文字が無ければ送る。
+// 以前の「途中結果が 800ms 更新されなければ送る」予備判定（END_SILENCE_MS）は、Soniox の待ちと関係なく
+// 小さい子の言葉の切れ目で送ってしまうので外した。サーバーから値を受け取る形はロードマップ25（OTA）。
+const unsigned long STT_GRACE_MS = 600;             // 0 なら <end> ですぐ送る（Soniox の既定のまま）
+const unsigned long STT_GRACE_RESUME_MAX_MS = 3000;
+const uint32_t STT_GRACE_SPEECH_RMS = 1200;         // 暫定。[GRACE] の speech_peak_rms / grace_peak_rms を見て詰める
+// 救済: Soniox が <end> を送らないまま黙ったとき（通常は Soniox の最大待ちで <end> が来る）
+const unsigned long STT_STALL_MS = 4000;
+struct SttGraceState {
+  unsigned long firstEndMs = 0;   // 最初の <end>（0 = まだ）
+  unsigned long graceStartMs = 0; // 猶予中（0 = 猶予していない）
+  unsigned long resumeStartMs = 0;// 猶予中に声が出てからの待ち（0 = 待っていない）
+  uint32_t resumes = 0;
+  uint32_t speechPeakRms = 0;     // 録音開始から最初の <end> までのブロックRMS最大（しきい値の目安）
+  uint32_t gracePeakRms = 0;      // 猶予中のブロックRMS最大
+};
+static SttGraceState sttGrace;
 bool armed = false;
 bool isRecording = false;
 bool endpointDetected = false;
@@ -294,6 +319,7 @@ bool fetchSonioxKeyOnly(String& keyOut) {
 }
 
 String sonioxStartMessageFor(const String& key);
+void finishUtterance(const char* why);
 
 // 先行接続ワーカー（Core 0）で接続前に走る。古ければ取り直し、新しいキーで開始メッセージを作る。
 // sonioxKey と sonioxKeyFetchedMs は loop() のものなので書かない（finishSonioxPreconnect が写す）。
@@ -1334,6 +1360,16 @@ static int32_t statRssiCount = 0;
 static int statRssiMin = 0;  // RSSIは負値。0は未計測の意味
 static uint32_t statLastRssiMs = 0;
 
+// 電池・温度・充電を読んで覚える（PowerSense.h）。起動時と、録音中 POWER_SENSE_INTERVAL_MS ごと
+void updatePowerReading() {
+  powerReading = powerSenseRead(PIN_VBAT_ADC, PIN_BOARD_TEMP, PIN_CHG_STAT1, PIN_CHG_STAT2);
+  powerReadingValid = true;
+  powerReadMs = millis();
+  Serial.printf("[POWER] vbat_mv=%lu board_temp_c=%.1f chip_temp_c=%.1f chg_stat1=%d chg_stat2=%d\n",
+                (unsigned long)powerReading.vbatMv, powerReading.boardTempC, powerReading.chipTempC,
+                powerReading.chgStat1, powerReading.chgStat2);
+}
+
 void statsReset() {
   statUnderruns = 0;
   statUnderrunPending = false;
@@ -1951,6 +1987,8 @@ void sendToLambdaAndPlay(const String& text) {
     "\"owner_id\":\"" + deviceMacAddress + "\","
     "\"fw\":\"" TOYTALKER_FW_VERSION "\","
     "\"backchannel_fired\":" + (backchannelForReply ? "true" : "false") + ","
+    // 本体の状態（電池・温度・充電）。Lambda がログの device に写す。文章は入れない
+    + (powerReadingValid ? String("\"device\":{") + powerSenseJsonFields(powerReading) + "}," : String("")) +
     "\"messages\":" + messagesJson + "}";
 
   Serial.printf("📝 History count: %d\n", historyCount);
@@ -2222,6 +2260,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       if (msg.indexOf("\"tokens\"") >= 0) {
         String nonFinalCurrent = "";
         bool foundEndToken = false;
+        bool newTextSeen = false;
         int searchPos = msg.indexOf("\"tokens\"");
         while (true) {
           int textPos = msg.indexOf("\"text\":\"", searchPos);
@@ -2238,12 +2277,22 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
           if (token == "\\u003cend\\u003e") {
             foundEndToken = true;
-          } else if (isFinal) {
-            sonioxFinalBuf += token;
           } else {
-            nonFinalCurrent += token;
+            if (token.length() > 0) newTextSeen = true;
+            if (isFinal) sonioxFinalBuf += token;
+            else nonFinalCurrent += token;
           }
           searchPos = textEnd + 1;
+        }
+
+        // 猶予の最中か、猶予中に声が出た後に新しい文字が来たら、同じ発話の続き。次の <end> を待つ
+        if (newTextSeen && (sttGrace.graceStartMs || sttGrace.resumeStartMs)) {
+          if (sttGrace.graceStartMs) {
+            sttGrace.resumes++;
+            Serial.printf("[GRACE] text resumed +%lums after first end\n", millis() - sttGrace.firstEndMs);
+          }
+          sttGrace.graceStartMs = 0;
+          sttGrace.resumeStartMs = 0;
         }
 
         String fullText = sonioxFinalBuf + nonFinalCurrent;
@@ -2388,6 +2437,7 @@ void startSTTRecording() {
   lastFinalText = "";
   armed = false;
   endpointDetected = false;
+  sttGrace = SttGraceState{};
   clearBackchannelCache();
   Serial.printf("⏱️ STT [%lums] startSTTRecording done\n", millis() - t0);
 }
@@ -2539,6 +2589,9 @@ void setup() {
   // LED初期化（digitalWriteのみ、PWMなし）
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, HIGH);
+
+  powerSenseBegin(PIN_CHG_STAT1, PIN_CHG_STAT2);
+  updatePowerReading();
 
   // LEDアニメーション用ハードウェアタイマー
   ledTimer = timerBegin(1000000);
@@ -2702,11 +2755,30 @@ void loop() {
       }
       int samples = n / sizeof(int32_t);
       sttMicFilter.convert(raw, pcm, samples);
+      int64_t squares = 0;
       for (int i = 0; i < samples; i++) {
         uint32_t a = pcm[i] >= 0 ? int32_t(pcm[i]) : -int32_t(pcm[i]);
         if (a > micPeak) micPeak = a;
         if (raw[i] < rawMin) rawMin = raw[i];
         if (raw[i] > rawMax) rawMax = raw[i];
+        squares += (int64_t)pcm[i] * pcm[i];
+      }
+      // 話し終わりの猶予（STT_GRACE_MS）。猶予中に声が出たら同じ発話として聞き続ける
+      // 録音開始直後の DC 補正の過渡は除く（最初のブロック。[STT_INPUT] と同じ扱い）
+      if (samples > 0 && !sttInputFirstBlock) {
+        const uint32_t blockRms = (uint32_t)sqrt((double)squares / samples);
+        if (!sttGrace.firstEndMs) {
+          if (blockRms > sttGrace.speechPeakRms) sttGrace.speechPeakRms = blockRms;
+        } else if (sttGrace.graceStartMs) {
+          if (blockRms > sttGrace.gracePeakRms) sttGrace.gracePeakRms = blockRms;
+          if (blockRms >= STT_GRACE_SPEECH_RMS) {
+            sttGrace.graceStartMs = 0;
+            sttGrace.resumes++;
+            sttGrace.resumeStartMs = millis();
+            Serial.printf("[GRACE] speech resumed +%lums after first end (rms=%lu)\n",
+                          millis() - sttGrace.firstEndMs, (unsigned long)blockRms);
+          }
+        }
       }
       if (samples > 0) rawSample = (uint32_t)raw[0];
       bool ok = ws.sendBIN((uint8_t*)pcm, samples * sizeof(int16_t));
@@ -2741,6 +2813,7 @@ void loop() {
       }
       lastSend = millis();
     }
+    if (millis() - powerReadMs >= POWER_SENSE_INTERVAL_MS) updatePowerReading();
     if (millis() - lastStats > 5000) {
       statsRecordRssi();  // 録音中(待機側)のRSSIも記録
       Serial.printf("[STT] send ok=%d fail=%d peak=%d rawMin=%ld rawMax=%ld raw0=0x%08lX RSSI=%d heap=%d\n",
@@ -2751,25 +2824,39 @@ void loop() {
     }
   }
 
-  // Sonioxエンドポイント検出
-  if (endpointDetected && partialText.length() > 0) {
-    if (partialText != lastFinalText) {
-      lastFinalText = partialText;
-      sendToLambdaAndPlay(partialText);
-    }
+  // Sonioxエンドポイント検出 → 猶予（STT_GRACE_MS）。猶予が 0 ならすぐ送る
+  if (endpointDetected) {
     endpointDetected = false;
-    armed = false;
-    partialText = "";
-    sonioxFinalBuf = "";
-  }
-  // 無音検出フォールバック
-  else if (armed && partialText.length() > 0 && (millis() - lastPartialMs) >= END_SILENCE_MS) {
-    if (partialText != lastFinalText) {
-      lastFinalText = partialText;
-      sendToLambdaAndPlay(partialText);
+    if (partialText.length() > 0) {
+      const unsigned long now = millis();
+      if (!sttGrace.firstEndMs) sttGrace.firstEndMs = now;
+      sttGrace.resumeStartMs = 0;
+      if (STT_GRACE_MS == 0) finishUtterance("no grace");
+      else if (!sttGrace.graceStartMs) sttGrace.graceStartMs = now;
     }
-    armed = false;
-    partialText = "";
-    sonioxFinalBuf = "";
+  }
+  if (armed && partialText.length() > 0) {
+    const unsigned long now = millis();
+    if (sttGrace.graceStartMs && now - sttGrace.graceStartMs >= STT_GRACE_MS) finishUtterance("quiet");
+    else if (sttGrace.resumeStartMs && now - sttGrace.resumeStartMs >= STT_GRACE_RESUME_MAX_MS) finishUtterance("no new text");
+    else if (!sttGrace.graceStartMs && !sttGrace.resumeStartMs && now - lastPartialMs >= STT_STALL_MS) finishUtterance("stall");
+  }
+}
+
+// 発話を Lambda へ送る（猶予の判定から）。[GRACE] の行はしきい値と猶予の長さを詰めるための計測
+void finishUtterance(const char* why) {
+  const SttGraceState g = sttGrace;
+  sttGrace = SttGraceState{};
+  Serial.printf("[GRACE] sent +%ldms after first end (%s, resumed=%lu, grace=%lums, speech_peak_rms=%lu, grace_peak_rms=%lu, threshold=%lu)\n",
+                g.firstEndMs ? (long)(millis() - g.firstEndMs) : -1L, why, (unsigned long)g.resumes,
+                STT_GRACE_MS, (unsigned long)g.speechPeakRms, (unsigned long)g.gracePeakRms,
+                (unsigned long)STT_GRACE_SPEECH_RMS);
+  String text = partialText;
+  armed = false;
+  partialText = "";
+  sonioxFinalBuf = "";
+  if (text != lastFinalText) {
+    lastFinalText = text;
+    sendToLambdaAndPlay(text);
   }
 }

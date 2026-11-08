@@ -79,6 +79,29 @@ export function describePrevTurn(prev) {
 }
 
 /**
+ * ESP32 本体の状態（2026-11-08、ロードマップ6）。本文要求の body.device（ファームの PowerSense.h）。
+ * 文章は入らない数値だけ。知らない項目は捨てる（本体側の計測を足すときはここに項目を足す）。
+ *   vbat_mv: 電池電圧（mV、未校正。電池なしなら 0 付近）
+ *   board_temp_c / chip_temp_c: 基板温度（サーミスタ TH2）/ ESP32 内蔵の温度（℃。読めなければ null）
+ *   chg_stat1 / chg_stat2: 充電IC BQ25185 の STAT1/STAT2 のピンの値（1=High, 0=Low）。意味の割り当ては未確認なのでそのまま
+ */
+export function describeDevice(dev) {
+  if (!dev || typeof dev !== "object") return null;
+  const num = (v, min, max, digits) => {
+    if (!Number.isFinite(v) || v < min || v > max) return null;
+    const p = 10 ** digits;
+    return Math.round(v * p) / p;
+  };
+  return {
+    vbat_mv: num(dev.vbat_mv, 0, 10000, 0),
+    board_temp_c: num(dev.board_temp_c, -40, 150, 1),
+    chip_temp_c: num(dev.chip_temp_c, -40, 150, 1),
+    chg_stat1: dev.chg_stat1 === 0 || dev.chg_stat1 === 1 ? dev.chg_stat1 : null,
+    chg_stat2: dev.chg_stat2 === 0 || dev.chg_stat2 === 1 ? dev.chg_stat2 : null,
+  };
+}
+
+/**
  * @param {string} kind  "turn"（本文）| "backchannel"（相槌）| "stt-token"（Soniox鍵）| "read-aloud"（読み上げ）
  * @param {{ event?: object, context?: object, t0?: number }} p
  */

@@ -85,6 +85,7 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 | `segments` | 本文のTTS 1文ごと。`text_at`（LLMから文が揃った時刻）、`tts_ms`、`first_chunk_ms`（ZakiCorpのストリーミングだけ）、`bytes`、`trim_ms`（無音を削った量）、`sent_at`（音声を書き終えた時刻）、`attempts`、`fallback`、`error` |
 | `errors` | `where`、`status`、`message`（160字まで。外部サービスのエラー本文に入力文が混ざることがあるため短く切る） |
 | `prev_turn` | 本文だけ（2026-11-08）。**前のターン**をクライアントが受け取って鳴らしたか。サーバーは「送り終えた」までしか分からないので、クライアントが次の要求に添える。`request_at`（前のターンの turn ログと結びつける）、`attempts` `segments` `tts` `played` `play_failed` `stalls`（回数。`stalls` は再生の見張りが動いた回数）、`done` `loaded` `bc_received` `bc_played` `bc_error`（真偽）、`error`（network / timeout / http:<status> / parse）。送らない版（アプリ 0.8.7 以前、ESP32 の今の版）は null。`segments` が 0 なら受信できていない（通信側）、受けたのに `played` が 0 や `stalls` > 0 なら鳴らす側（アプリ） |
+| `device` | ESP32 の本文だけ（2026-11-08、ファーム 0.7.4 より後）。本体の状態: `vbat_mv`（電池電圧 mV、未校正）、`board_temp_c` / `chip_temp_c`（基板温度・ESP32 内蔵の温度 ℃、読めなければ null）、`chg_stat1` / `chg_stat2`（充電IC STAT ピンの値 1/0。意味は未確認）。送らない版は null。`filter device.vbat_mv < 3500` のように引ける |
 | `total_ms` `container_age_s` | 合計と、容器が起きてからの秒数（小さければコールドスタート直後） |
 
 Logs Insights の例。遅かったターンを探す:
