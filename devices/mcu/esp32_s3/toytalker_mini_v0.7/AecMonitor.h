@@ -48,6 +48,45 @@ class AecMonitor {
     uint64_t micEnergy = 0, outEnergy = 0;
   };
  public:
+  // 1ターン分の割り込み判定の材料（会話の要求の device.prev に添える。ロードマップ6）。
+  // 値は判定と同じ AC RMS（gateMicRms / gateOutRms）。sustained は「4フレーム続けて超えた最大の値」で、
+  // AEC_BARGE_RMS と比べれば、割り込めなかったターンで声がしきい値にどれだけ届かなかったかが分かる。
+  // monitor タスクが止まった後（stopVoiceMonitor の後）に loop から読む。
+  struct Report {
+    bool valid = false, fired = false;
+    uint32_t armedFrames = 0, outPeak = 0, outSustained = 0, micSustained = 0;
+    uint32_t residualRejects = 0, clipFrames = 0, recoveryFrames = 0, ageRejects = 0, missing = 0;
+    uint32_t refPeak = 0;                     // 参照（アンプへ送った実波形）の RMS の最大。TTS ごとの音量差も含む
+    uint32_t triggerOut = 0, triggerMic = 0;  // 発火した4フレームの最小（fired のときだけ）
+    uint32_t triggerRef = 0;                  // 発火したフレームの参照 RMS
+    double retainedPct = NAN;                 // 発火時の残り具合（out/mic、%）
+  };
+  Report report() const {
+    Report r;
+    if (!handle_ || !turnStarted_) return r;
+    r.valid = true;
+    r.fired = bargeGate_.fired();
+    r.armedFrames = gateOutLevels_.armedFrames();
+    r.outPeak = gateOutLevels_.peakRms();
+    r.outSustained = gateOutLevels_.sustainedRms();
+    r.micSustained = gateMicLevels_.sustainedRms();
+    r.residualRejects = bargeGate_.residualRejects();
+    r.clipFrames = bargeGate_.clipFrames();
+    r.recoveryFrames = bargeGate_.recoveryFrames();
+    r.ageRejects = bargeGate_.ageRejects();
+    r.missing = stats_.missing;
+    r.refPeak = refPeak_;
+    if (r.fired) {
+      r.triggerOut = r.triggerMic = UINT32_MAX;
+      for (uint32_t i = 0; i < AEC_BARGE_HOLD_FRAMES; ++i) {
+        if (bargeGate_.outFrame(i) < r.triggerOut) r.triggerOut = bargeGate_.outFrame(i);
+        if (bargeGate_.micFrame(i) < r.triggerMic) r.triggerMic = bargeGate_.micFrame(i);
+      }
+      r.retainedPct = retainedPercent();
+      r.triggerRef = triggerRef_;
+    }
+    return r;
+  }
   bool init() {
     if (!AEC_ENABLED) { Serial.println("[AEC] disabled; raw level monitor only"); return false; }
     uint32_t internalBefore = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
@@ -118,7 +157,8 @@ class AecMonitor {
     history_->reset(); pending_->head = pending_->tail = 0;
     rxClock_.reset(); txClock_.reset(); lowPass_.reset();
     micLevels_.reset(); outLevels_.reset(); stats_ = Stats{};
-    bargeGate_.reset(); triggerAudioAgeMs_ = 0;
+    gateMicLevels_.reset(); gateOutLevels_.reset();
+    bargeGate_.reset(); triggerAudioAgeMs_ = 0; refPeak_ = triggerRef_ = 0;
     dcReady_ = false; firstAudioUs_ = 0; processedSequence_ = 0;
     generation_ = generation; lastLog_ = millis(); summaryPending_ = false;
     windowMicEnergy_ = windowOutEnergy_ = 0; windowMicMax_ = windowOutMax_ = 0;
@@ -271,7 +311,10 @@ class AecMonitor {
     // NAN means no valid reference-active comparison; zero output is finite-clamped.
     return mic ? 10.0 * log10(double(mic) / double(out ? out : 1)) : NAN;
   }
-  void breakLevels() { micLevels_.breakRun(); outLevels_.breakRun(); bargeGate_.breakRun(); }
+  void breakLevels() {
+    micLevels_.breakRun(); outLevels_.breakRun(); bargeGate_.breakRun();
+    gateMicLevels_.breakRun(); gateOutLevels_.breakRun();
+  }
   void drainTx() {
     while (const auto* b = tx_.peek()) {
       if (!txClock_.observe(b->sequence, b->endUs, 42625)) {
@@ -343,7 +386,9 @@ class AecMonitor {
     ++stats_.paired; stats_.clips += mic.clips;
     bool armed = firstAudioUs_ && mic.endUs - 32000 >= firstAudioUs_ + int64_t(AEC_BARGE_WARMUP_MS) * 1000;
     micLevels_.feed(stats_.micRms, armed); outLevels_.feed(stats_.outRms, armed);
+    gateMicLevels_.feed(stats_.gateMicRms, armed); gateOutLevels_.feed(stats_.gateOutRms, armed);
     if (armed) {
+      if (stats_.refRms > refPeak_) refPeak_ = stats_.refRms;
       if (stats_.micRms > windowMicMax_) windowMicMax_ = stats_.micRms;
       if (stats_.outRms > windowOutMax_) windowOutMax_ = stats_.outRms;
       // Reduction is only over reference-active, warmed-up frames, not silent gaps.
@@ -357,7 +402,7 @@ class AecMonitor {
     if (armed && stats_.outRms >= AEC_BARGE_RMS && stats_.gateOutRms < AEC_BARGE_RMS)
       ++stats_.dcRejectedFrames;
     const bool triggered = bargeGate_.feed(stats_.gateMicRms, stats_.gateOutRms, armed, mic.clips, ageMs);
-    if (triggered) triggerAudioAgeMs_ = ageMs;
+    if (triggered) { triggerAudioAgeMs_ = ageMs; triggerRef_ = stats_.refRms; }
     uint32_t elapsed = uint32_t(finishedUs - started);
     if (elapsed > stats_.cpuMaxUs) stats_.cpuMaxUs = elapsed;
     if (elapsed > 32000) ++stats_.slowFrames;
@@ -375,8 +420,10 @@ class AecMonitor {
   aec_signal::SampleClock rxClock_, txClock_;
   aec_signal::LowPass24k lowPass_;
   VoiceLevelMeter<4> micLevels_, outLevels_;
+  VoiceLevelMeter<AEC_BARGE_HOLD_FRAMES> gateMicLevels_, gateOutLevels_;  // 判定と同じ AC RMS（Report 用）
   AecBargeGate bargeGate_;
   uint32_t triggerAudioAgeMs_ = 0;
+  uint32_t refPeak_ = 0, triggerRef_ = 0;
   Stats stats_;
   uint32_t generation_ = 0, lastLog_ = 0, processedSequence_ = 0;
   uint32_t windowMicMax_ = 0, windowOutMax_ = 0;

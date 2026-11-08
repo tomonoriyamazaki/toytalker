@@ -37,6 +37,7 @@
 #include "FirmwareVersion.h"
 #include "OtaUpdater.h"
 #include "PowerSense.h"
+#include "TurnReport.h"
 #include "AmazonRootCA.h"
 #include "SonioxRootCA.h"
 #include "DeviceAuth.h"
@@ -242,6 +243,12 @@ struct SttGraceState {
   uint32_t gracePeakRms = 0;      // 猶予中のブロックRMS最大
 };
 static SttGraceState sttGrace;
+// 本体側の計測（TurnReport.h）。聞き取りの途中の値。finishUtterance で sttReport へ写して次の要求に添える
+static SttReport sttProgress, sttReport;
+static uint32_t sttRecordStartMs = 0;    // 録音開始（startSTTRecording）
+static bool sttWsWaitPending = false;    // 録音開始時に Soniox が未接続だった（繋がった時刻を ws_wait_ms に）
+static uint32_t lastTextChangeMs = 0;    // 途中結果の文字が最後に変わった時刻
+static uint32_t sonioxDisconnects = 0, sonioxErrors = 0;  // 前の要求から数える
 bool armed = false;
 bool isRecording = false;
 bool endpointDetected = false;
@@ -265,6 +272,8 @@ bool ttsAudioQueued = false;
 bool ttsGapPending = false;
 static std::atomic<uint32_t> ttsTurnStartMs{0};
 static std::atomic<bool> ttsFirstWriteLogged{false};
+static std::atomic<uint32_t> ttsFirstWriteAtMs{0};  // 返答の音声を最初に I2S へ渡した時刻（再生タスクが書く）
+static uint32_t ttsPcmBytes = 0, ttsSegments = 0;   // loopのみ。このターンに受けた返答の音声バイト数・区切り数
 static bool ttsFirstPcmLogged = false;  // loopのみ
 static uint32_t ttsRingWaitMs = 0;      // producerのみ
 static uint32_t sonioxServiceMaxMs = 0;
@@ -424,6 +433,7 @@ void serviceSoniox(const char* stage) {
 
 void logFirstTtsWrite() {
   if (!ttsFirstWriteLogged.exchange(true)) {
+    ttsFirstWriteAtMs.store(millis());
     Serial.printf("[LATENCY] first_tts_i2s_ms=%lu (copy completion, not acoustic start)\n",
                   (unsigned long)(millis() - ttsTurnStartMs.load()));
   }
@@ -542,6 +552,8 @@ struct TurnEndTiming {
   uint32_t firstReadMs = 0;
 };
 static TurnEndTiming turnEndTiming;
+// このターンの記録（loopのみ）と、次の要求に添える前のターンの記録（TurnReport.h）
+static TurnReport turnReport, lastTurnReport;
 
 void printTurnEndTiming(uint32_t firstSendMs) {
   if (!turnEndTiming.pending) return;
@@ -1335,6 +1347,7 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
     if (sizePos >= 0) {
       sizePos += 7;
       currentPcmSize = json.substring(sizePos, json.indexOf("}", sizePos)).toInt();
+      ttsSegments++;
       Serial.printf("[TTS_START] id=%d, size=%d\n", curSegmentId, currentPcmSize);
       Serial.printf("[LATENCY] segment=%d tts_header_ms=%lu\n", curSegmentId,
                     (unsigned long)(millis() - ttsTurnStartMs.load()));
@@ -1588,8 +1601,10 @@ bool processPCM(WiFiClientSecure& client, uint32_t length) {
     uint32_t readStart = millis();
     size_t bytesRead = readBytesAcrossChunks(client, pcmData, chunkSize);
     readMs += millis() - readStart;
+    ttsPcmBytes += bytesRead;
     if (bytesRead > 0 && !ttsFirstPcmLogged) {
       ttsFirstPcmLogged = true;
+      turnReport.firstAudioMs = millis() - ttsTurnStartMs.load();
       Serial.printf("[LATENCY] first_pcm_chunk_ms=%lu bytes=%u\n",
                     (unsigned long)(millis() - ttsTurnStartMs.load()), (unsigned)bytesRead);
     }
@@ -1857,6 +1872,10 @@ struct LambdaConnectParams {
   std::atomic<bool> connected;
   std::atomic<bool> sent;
   std::atomic<bool> failed;
+  // 計測（TurnReport）。sent / failed を立てる前に書くので、loop はそれを見てから読む
+  uint32_t connectStartMs;
+  uint32_t connectMs;
+  uint32_t sendMs;
 };
 
 void lambdaConnectAndSendTask(void* param) {
@@ -1869,7 +1888,9 @@ void lambdaConnectAndSendTask(void* param) {
   tls_memory::printStats("lambda_pre_connect");
   p->client->setCACert(AMAZON_ROOT_CAS);  // 証明書を検証する（0.7.5 までは setInsecure で検証なし）
   uint32_t connectStart = millis();
+  p->connectStartMs = connectStart;
   bool connected = p->client->connect(LAMBDA_HOST, 443);
+  p->connectMs = millis() - connectStart;
   Serial.printf("[LATENCY] lambda_connect_ms=%lu ok=%d\n",
                 (unsigned long)(millis() - connectStart), connected);
   tls_memory::printStats(connected ? "lambda_connected" : "lambda_failed");
@@ -1893,6 +1914,7 @@ void lambdaConnectAndSendTask(void* param) {
   uint32_t sendStart = millis();
   size_t expected = p->request->length();
   size_t written = p->client->print(*(p->request));
+  p->sendMs = millis() - sendStart;
   Serial.printf("[LATENCY] lambda_send_ms=%lu written=%u expected=%u\n",
                 (unsigned long)(millis() - sendStart), (unsigned)written, (unsigned)expected);
   if (written != expected) {
@@ -1905,14 +1927,59 @@ void lambdaConnectAndSendTask(void* param) {
   vTaskDelete(NULL);
 }
 
+// このターンの記録を締めて、次の要求に添える記録にする（TurnReport.h）
+void finishTurnReport(const char* stop, uint32_t t0) {
+  turnReport.valid = true;
+  turnReport.stop = stop;
+  turnReport.playEndMs = millis() - t0;
+  const uint32_t firstWrite = ttsFirstWriteAtMs.load();
+  if (firstWrite) turnReport.playStartMs = firstWrite - t0;
+  turnReport.audioMs = ttsPcmBytes / (SAMPLE_RATE_TTS * 2 / 1000);
+  turnReport.underruns = statUnderruns;
+  turnReport.segments = ttsSegments;
+  turnReport.bc = backchannelFired;
+  turnReport.rssiAvg = statRssiCount ? (int)(statRssiSum / statRssiCount) : 0;
+  turnReport.rssiMin = statRssiMin;
+  turnReport.wsMaxBlockMs = sonioxServiceMaxMs;
+  lastTurnReport = turnReport;
+  Serial.printf("[TURN_REPORT] {%s}\n", turnReportJson(turnReport).c_str());  // 次の要求の device.prev と同じ中身
+}
+
+// 要求の "device":{…}。電池・温度・充電（PowerSense.h）、いまの電波とメモリ、前のターンとこの発話の計測（TurnReport.h）
+String deviceStatusJson(const TurnReport& prev) {
+  char buf[200];
+  const int rssi = WiFi.RSSI();
+  snprintf(buf, sizeof(buf),
+           "\"rssi\":%d,\"heap_free\":%lu,\"heap_min\":%lu,\"max_blk\":%lu,\"psram_free\":%lu,\"uptime_s\":%lu",
+           rssi < 0 ? rssi : 0,
+           (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned long)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+           (unsigned long)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+           (unsigned long)(millis() / 1000));
+  String out = "\"device\":{";
+  if (powerReadingValid) out += powerSenseJsonFields(powerReading) + ",";
+  out += buf;
+  if (prev.valid) out += "," + turnReportJson(prev);
+  if (sttReport.valid) out += "," + sttReportJson(sttReport);
+  out += "}";
+  return out;
+}
+
 // ==== Lambda に送信 & SSE 受信 ====
 void sendToLambdaAndPlay(const String& text) {
   unsigned long t0 = millis();
   ttsTurnStartMs.store(t0);
   ttsFirstWriteLogged.store(false);
   ttsFirstPcmLogged = false;
+  ttsFirstWriteAtMs.store(0);
+  ttsPcmBytes = 0;
+  ttsSegments = 0;
   ttsRingWaitMs = 0;
   sonioxServiceMaxMs = 0;
+  // 前のターンの記録はこの要求に添える（下の payload）。このターンの記録を新しく始める
+  const TurnReport prevReport = lastTurnReport;
+  turnReport = TurnReport{};
   Serial.println("🚀 Sending to Lambda: " + text);
   Serial.printf("💾 Free heap: %d bytes\n", ESP.getFreeHeap());
   responseText = "";
@@ -1923,6 +1990,7 @@ void sendToLambdaAndPlay(const String& text) {
   turnEndTiming = TurnEndTiming{};
   dmaTailTiming = DmaTailTiming{};
   turnEndTiming.turn = ++turnTimingSequence;
+  turnReport.turn = turnEndTiming.turn;
   lastI2sWriteMs.store(0, std::memory_order_relaxed);
 
   if (isRecording) isRecording = false;
@@ -1949,6 +2017,7 @@ void sendToLambdaAndPlay(const String& text) {
   // I2S切り替え
   // 比較モードではRXを停止/解放。Monitorモードでは監視タスクへ引き継ぐ。
   if (!pauseMicForPlaybackTest()) {
+    finishTurnReport("i2s_failed", t0);
     clearBackchannelCache();
     startSTTRecording();
     return;
@@ -1956,6 +2025,7 @@ void sendToLambdaAndPlay(const String& text) {
   Serial.printf("[VOICE_TEST] playback rx_paused=%d rx_released=%d raw_detect_only=%d aec_detect_only=%d\n",
                 micPausedForPlayback, micReleasedForPlayback, VOICE_BARGE_DETECT_ONLY, AEC_BARGE_DETECT_ONLY);
   if (!setupI2SPlay()) {
+    finishTurnReport("i2s_failed", t0);
     clearBackchannelCache();
     resetMicAfterPlaybackTest();
     startSTTRecording();
@@ -2001,8 +2071,9 @@ void sendToLambdaAndPlay(const String& text) {
     "\"owner_id\":\"" + deviceMacAddress + "\","
     "\"fw\":\"" TOYTALKER_FW_VERSION "\","
     "\"backchannel_fired\":" + (backchannelForReply ? "true" : "false") + ","
-    // 本体の状態（電池・温度・充電）。Lambda がログの device に写す。文章は入れない
-    + (powerReadingValid ? String("\"device\":{") + powerSenseJsonFields(powerReading) + "}," : String("")) +
+    // 本体の状態（電池・温度・充電・電波・メモリ）と計測（前のターン・この発話の聞き取り）。
+    // Lambda がログの device に写す（TurnReport.h）。文章は入れない
+    + deviceStatusJson(prevReport) + "," +
     "\"messages\":" + messagesJson + "}";
 
   Serial.printf("📝 History count: %d\n", historyCount);
@@ -2020,7 +2091,7 @@ void sendToLambdaAndPlay(const String& text) {
 
   // Lambda SSL接続+送信をCore 0でバックグラウンド
   WiFiClientSecure client;
-  LambdaConnectParams connParams = { &client, &req, false, false, false };
+  LambdaConnectParams connParams = { &client, &req, false, false, false, 0, 0, 0 };
   TaskHandle_t connTaskHandle = NULL;
   if (xTaskCreatePinnedToCore(lambdaConnectAndSendTask, "lambda_conn", 16384, &connParams, 1, &connTaskHandle, 0) != pdPASS) {
     connParams.failed = true;
@@ -2050,8 +2121,16 @@ void sendToLambdaAndPlay(const String& text) {
   while (!connParams.sent && !connParams.failed) delay(1);
   Serial.printf("⏱️ [%lums] Lambda request sent (ok=%d)\n", millis() - t0, !connParams.failed);
 
+  if (connParams.connectStartMs) {
+    turnReport.preMs = connParams.connectStartMs - t0;
+    turnReport.tlsMs = connParams.connectMs;
+    turnReport.tlsOk = connParams.connected;
+    turnReport.sendMs = connParams.sendMs;
+  }
   if (connParams.failed) {
     stopVoiceMonitor();
+    turnReport.aec = aecMonitor.report();
+    finishTurnReport("connect_failed", t0);
     bargeInRequested = false;
     Serial.printf("💾 Free heap at failure: %d\n", ESP.getFreeHeap());
     setLEDMode(LED_OFF);
@@ -2068,6 +2147,7 @@ void sendToLambdaAndPlay(const String& text) {
   uint32_t headerStart = millis();
   bool headersOk = readLambdaResponseHeaders(client);
   bool responseFailed = !headersOk && !bargeInRequested;
+  if (headersOk) turnReport.headersMs = millis() - t0;
 
   Serial.printf("[LATENCY] headers_ms=%lu turn_elapsed_ms=%lu interrupted=%d\n",
                 (unsigned long)(millis() - headerStart), millis() - t0, (bool)bargeInRequested);
@@ -2136,6 +2216,8 @@ void sendToLambdaAndPlay(const String& text) {
     digitalWrite(PIN_AMP_SD, LOW);
     if (responseFailed) Serial.println("[STREAM_ERROR] dropping response and returning to recording");
     else Serial.println("🔘 Barge-in: skipping buffer flush");
+    // 止めた時点で鳴らしていない分（リングは 24kHz stereo 16bit = 96 バイト/ms）
+    if (playRing) turnReport.unplayedMs = playRingAvail() / 96;
     playerStop();  // 再生タスク即時停止＋リング破棄
     client.stop();
     turnEndTiming.parkedMs = millis();
@@ -2213,6 +2295,16 @@ void sendToLambdaAndPlay(const String& text) {
                 responseFailed ? "stream_error" : bargeInRequested ?
                 (voiceTriggerMs.load() ? "aec_level" : "button") : "completed",
                 (unsigned long)sonioxServiceMaxMs);
+  turnReport.recvEndMs = tEnd - t0;
+  turnReport.aec = aecMonitor.report();
+  if (bargeInRequested) {
+    const uint32_t triggerMs = voiceTriggerMs.load();
+    const int64_t pressedUs = bargeInRequested.buttonTiming().pressedUs;
+    if (triggerMs) turnReport.bargeMs = triggerMs - t0;
+    else if (pressedUs) turnReport.bargeMs = (uint32_t)(pressedUs / 1000) - t0;  // millis() と同じ時計（esp_timer）
+  }
+  finishTurnReport(responseFailed ? "stream_error" : bargeInRequested ?
+                   (voiceTriggerMs.load() ? "aec" : "button") : "done", t0);
   Serial.printf("⏱️ end+[%lums] Amp off\n", millis() - tEnd);
   statsPrint();  // このターンのWiFi/再生品質サマリ
 
@@ -2243,6 +2335,10 @@ void sonioxConnectionReady() {
     Serial.printf("⏱️ STT [%lums] WS ready (from restart)\n", millis() - sttRestartMs);
   }
   Serial.println("✅ Connected to Soniox!");
+  if (sttWsWaitPending) {
+    sttWsWaitPending = false;
+    sttProgress.wsWaitMs = millis() - sttRecordStartMs;
+  }
   logLoopStack("soniox_ready");
   Serial.println("📤 Sent start message to Soniox");
   sonioxPreconnectPending = false;
@@ -2271,6 +2367,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
       if (msg.indexOf("\"error_code\"") >= 0) {
         // 期限切れのキーなどで Soniox が拒否したとき。この後 Soniox が切断し、録音は止まる。
         Serial.printf("[STT] soniox error: %s\n", msg.c_str());
+        sonioxErrors++;
       }
       if (msg.indexOf("\"tokens\"") >= 0) {
         String nonFinalCurrent = "";
@@ -2312,6 +2409,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
         String fullText = sonioxFinalBuf + nonFinalCurrent;
         if (fullText.length() > 0) {
+          if (fullText != partialText) lastTextChangeMs = millis();
           partialText = fullText;
           lastPartialMs = millis();
           armed = true;
@@ -2332,6 +2430,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
     case WStype_DISCONNECTED:
       Serial.println("✅ Soniox disconnected");
+      sonioxDisconnects++;
       isRecording = false;
       sonioxPreconnectPending = false;
       break;
@@ -2345,6 +2444,9 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 void startSTTRecording() {
   unsigned long t0 = millis();
   sttRestartMs = t0;
+  sttRecordStartMs = t0;
+  sttProgress = SttReport{};
+  sttWsWaitPending = false;
   sonioxPlaybackPhase = false;
   finishSonioxPreconnect();
   statsReset();  // このターンの品質計測を開始
@@ -2423,6 +2525,8 @@ void startSTTRecording() {
     ws.enableHeartbeat(15000, 3000, 2);
   }
   isRecording = true;
+  if (sonioxIsConnected()) sttProgress.wsWaitMs = millis() - t0;
+  else sttWsWaitPending = true;  // sonioxConnectionReady で埋める
   const auto buttonTiming = bargeInRequested.buttonTiming();
   if (buttonTiming.pressedUs != 0) {
     const int64_t recordUs = esp_timer_get_time();
@@ -2847,7 +2951,10 @@ void loop() {
     endpointDetected = false;
     if (partialText.length() > 0) {
       const unsigned long now = millis();
-      if (!sttGrace.firstEndMs) sttGrace.firstEndMs = now;
+      if (!sttGrace.firstEndMs) {
+        sttGrace.firstEndMs = now;
+        if (lastTextChangeMs) sttProgress.lastTextToEndMs = now - lastTextChangeMs;
+      }
       sttGrace.resumeStartMs = 0;
       if (STT_GRACE_MS == 0) finishUtterance("no grace");
       else if (!sttGrace.graceStartMs) sttGrace.graceStartMs = now;
@@ -2865,6 +2972,19 @@ void loop() {
 void finishUtterance(const char* why) {
   const SttGraceState g = sttGrace;
   sttGrace = SttGraceState{};
+  // この発話の聞き取りを次の要求に添える（TurnReport.h の SttReport）
+  sttReport = sttProgress;
+  sttReport.valid = true;
+  sttReport.listenMs = millis() - sttRecordStartMs;
+  sttReport.endToSendMs = g.firstEndMs ? millis() - g.firstEndMs : 0;
+  sttReport.resumes = g.resumes;
+  sttReport.speechPeakRms = g.speechPeakRms;
+  sttReport.gracePeakRms = g.gracePeakRms;
+  sttReport.disconnects = sonioxDisconnects;
+  sttReport.errors = sonioxErrors;
+  sttReport.why = why;  // 呼び出し側は文字列リテラルだけ
+  sonioxDisconnects = sonioxErrors = 0;
+  Serial.printf("[STT_REPORT] {%s}\n", sttReportJson(sttReport).c_str());  // この要求の device.stt と同じ中身
   Serial.printf("[GRACE] sent +%ldms after first end (%s, resumed=%lu, grace=%lums, speech_peak_rms=%lu, grace_peak_rms=%lu, threshold=%lu)\n",
                 g.firstEndMs ? (long)(millis() - g.firstEndMs) : -1L, why, (unsigned long)g.resumes,
                 STT_GRACE_MS, (unsigned long)g.speechPeakRms, (unsigned long)g.gracePeakRms,

@@ -79,26 +79,80 @@ export function describePrevTurn(prev) {
 }
 
 /**
- * ESP32 本体の状態（2026-11-08、ロードマップ6）。本文要求の body.device（ファームの PowerSense.h）。
- * 文章は入らない数値だけ。知らない項目は捨てる（本体側の計測を足すときはここに項目を足す）。
+ * ESP32 本体の状態と計測（2026-11-08、ロードマップ6）。本文要求の body.device（ファームの PowerSense.h と TurnReport.h）。
+ * 文章は入らない数値と決まった語だけ。知らない項目は捨て、範囲外の値は null にする。
  *   vbat_mv: 電池電圧（mV、未校正。電池なしなら 0 付近）
  *   board_temp_c / chip_temp_c: 基板温度（サーミスタ TH2）/ ESP32 内蔵の温度（℃。読めなければ null）
  *   chg_stat1 / chg_stat2: 充電IC BQ25185 の STAT1/STAT2 のピンの値（1=High, 0=Low）。意味の割り当ては未確認なのでそのまま
+ *   rssi / heap_free / heap_min / max_blk / psram_free / uptime_s: 要求時の電波（dBm）、内部RAMの空き・起動以来の最低・最大の連続領域、
+ *     PSRAM の空き（バイト）、起動からの秒（小さければ再起動の直後で、prev は無い）
+ *   prev: 前のターン（0.7.7 から）。時刻はそのターンの開始（本体が送信を決めた時）からの ms、0 は「起きなかった」。
+ *     stop: done / aec / button / stream_error / connect_failed / i2s_failed
+ *     pre_ms → tls_ms → send_ms → headers_ms → first_audio_ms → play_start_ms → recv_end_ms → play_end_ms、barge_ms（割り込みの判定）
+ *     audio_ms（受けた音声の長さ）/ unplayed_ms（止めたとき鳴らしていなかった分）/ underruns / segments / bc / rssi_avg / rssi_min / ws_max_block_ms
+ *     aec_*: 声の割り込み判定の材料（AC RMS）。aec_out_sustained < aec_threshold なら、4フレーム続けてしきい値を超えた場面が無い
+ *   stt: この要求の発話の聞き取り（0.7.7 から）。時刻は録音開始からの ms。
+ *     ws_wait_ms / listen_ms / last_text_to_end_ms（Soniox の話し終わり判定の待ち）/ end_to_send_ms（猶予）/ resumes /
+ *     speech_peak_rms / grace_peak_rms / disconnects / errors / why（quiet / no new text / stall / no grace）
  */
+const DEVICE_PREV_MS = [
+  "pre_ms", "tls_ms", "send_ms", "headers_ms", "first_audio_ms", "play_start_ms", "recv_end_ms", "play_end_ms",
+  "barge_ms", "audio_ms", "unplayed_ms", "ws_max_block_ms",
+];
+const DEVICE_PREV_COUNTS = [
+  "turn", "underruns", "segments",
+  "aec_threshold", "aec_armed_frames", "aec_out_peak", "aec_out_sustained", "aec_mic_sustained",
+  "aec_residual_rejects", "aec_clip_frames", "aec_recovery_frames", "aec_age_rejects", "aec_missing",
+  "aec_trigger_out", "aec_trigger_mic", "aec_ref_peak", "aec_trigger_ref",
+];
+const DEVICE_PREV_FLAGS = ["tls_ok", "bc", "aec_fired"];
+const DEVICE_PREV_STOPS = ["done", "aec", "button", "stream_error", "connect_failed", "i2s_failed"];
+const DEVICE_STT_MS = ["ws_wait_ms", "listen_ms", "last_text_to_end_ms", "end_to_send_ms"];
+const DEVICE_STT_COUNTS = ["resumes", "speech_peak_rms", "grace_peak_rms", "disconnects", "errors"];
+const DEVICE_STT_WHY = ["quiet", "no new text", "stall", "no grace"];
+const DAY_MS = 24 * 3600 * 1000;
+
 export function describeDevice(dev) {
   if (!dev || typeof dev !== "object") return null;
-  const num = (v, min, max, digits) => {
+  const num = (v, min, max, digits = 0) => {
     if (!Number.isFinite(v) || v < min || v > max) return null;
     const p = 10 ** digits;
     return Math.round(v * p) / p;
   };
-  return {
-    vbat_mv: num(dev.vbat_mv, 0, 10000, 0),
+  const oneOf = (v, list) => (list.includes(v) ? v : null);
+  const flag = (v) => (v === 0 || v === 1 ? v : null);
+  const out = {
+    vbat_mv: num(dev.vbat_mv, 0, 10000),
     board_temp_c: num(dev.board_temp_c, -40, 150, 1),
     chip_temp_c: num(dev.chip_temp_c, -40, 150, 1),
-    chg_stat1: dev.chg_stat1 === 0 || dev.chg_stat1 === 1 ? dev.chg_stat1 : null,
-    chg_stat2: dev.chg_stat2 === 0 || dev.chg_stat2 === 1 ? dev.chg_stat2 : null,
+    chg_stat1: flag(dev.chg_stat1),
+    chg_stat2: flag(dev.chg_stat2),
+    rssi: num(dev.rssi, -127, 0),
+    heap_free: num(dev.heap_free, 0, 64 * 1024 * 1024),
+    heap_min: num(dev.heap_min, 0, 64 * 1024 * 1024),
+    max_blk: num(dev.max_blk, 0, 64 * 1024 * 1024),
+    psram_free: num(dev.psram_free, 0, 64 * 1024 * 1024),
+    uptime_s: num(dev.uptime_s, 0, 10 * 365 * 24 * 3600),
   };
+  const prev = dev.prev;
+  if (prev && typeof prev === "object") {
+    const p = { stop: oneOf(prev.stop, DEVICE_PREV_STOPS) };
+    for (const k of DEVICE_PREV_MS) p[k] = num(prev[k], 0, DAY_MS);
+    for (const k of DEVICE_PREV_COUNTS) p[k] = num(prev[k], 0, 0xffffffff);
+    for (const k of DEVICE_PREV_FLAGS) p[k] = flag(prev[k]);
+    p.rssi_avg = num(prev.rssi_avg, -127, 0);
+    p.rssi_min = num(prev.rssi_min, -127, 0);
+    p.aec_retained_pct = num(prev.aec_retained_pct, 0, 100000, 1);
+    out.prev = p;
+  }
+  const stt = dev.stt;
+  if (stt && typeof stt === "object") {
+    const s = { why: oneOf(stt.why, DEVICE_STT_WHY) };
+    for (const k of DEVICE_STT_MS) s[k] = num(stt[k], 0, DAY_MS);
+    for (const k of DEVICE_STT_COUNTS) s[k] = num(stt[k], 0, 0xffffffff);
+    out.stt = s;
+  }
+  return out;
 }
 
 /**

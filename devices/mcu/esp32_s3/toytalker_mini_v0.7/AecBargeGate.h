@@ -30,6 +30,7 @@ class AecBargeGate {
   constexpr uint32_t residualRejects() const { return residualRejects_; }
   constexpr uint32_t clipFrames() const { return clipFrames_; }
   constexpr uint32_t recoveryFrames() const { return recoveryFrames_; }
+  constexpr uint32_t ageRejects() const { return ageRejects_; }
   constexpr uint64_t micEnergy() const { return micEnergy_; }
   constexpr uint64_t outEnergy() const { return outEnergy_; }
   constexpr uint32_t micFrame(uint32_t i) const { return mic_[(next_ + i) % AEC_BARGE_HOLD_FRAMES]; }
@@ -42,7 +43,7 @@ class AecBargeGate {
       recoverySamples_ = 16000 * AEC_BARGE_CLIP_RECOVERY_MS / 1000;
       breakRun(); return false;
     }
-    if (ageMs > AEC_BARGE_MAX_AGE_MS) { breakRun(); return false; }
+    if (ageMs > AEC_BARGE_MAX_AGE_MS) { ++ageRejects_; breakRun(); return false; }
     if (recoverySamples_) {
       recoverySamples_ = recoverySamples_ > AEC_BARGE_FRAME_SAMPLES ?
                          recoverySamples_ - AEC_BARGE_FRAME_SAMPLES : 0;
@@ -70,6 +71,6 @@ class AecBargeGate {
   uint32_t mic_[AEC_BARGE_HOLD_FRAMES] = {}, out_[AEC_BARGE_HOLD_FRAMES] = {};
   uint64_t micEnergy_ = 0, outEnergy_ = 0;
   uint32_t used_ = 0, next_ = 0, recoverySamples_ = 0;
-  uint32_t residualRejects_ = 0, clipFrames_ = 0, recoveryFrames_ = 0;
+  uint32_t residualRejects_ = 0, clipFrames_ = 0, recoveryFrames_ = 0, ageRejects_ = 0;
   bool fired_ = false;
 };
