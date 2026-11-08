@@ -17,6 +17,11 @@ const DEVICES_TABLE = tableName("devices");
 // デバイス行の fw_channel で beta、fw_target で版固定）が指す版と違えば、S3の署名付きURLを返す。
 // バイナリはLambdaを通さず本体がS3から直接取る。本体側はホスト固定・CA検証・SHA-256で守る。
 const FIRMWARE_BUCKET = process.env.FIRMWARE_BUCKET || "toytalker-firmware";
+// アプリの設定画面「音声認識」の選択肢（CDK が infra/config/stages.ts の sttOptions を JSON で渡す）。壊れていたら返さない（アプリは組み込みで動く）
+const STT_OPTIONS = (() => {
+  try { return process.env.STT_OPTIONS ? JSON.parse(process.env.STT_OPTIONS) : null; }
+  catch (e) { console.warn(`[STT_OPTIONS] invalid JSON: ${e.message}`); return null; }
+})();
 const FIRMWARE_MANIFEST_KEY = "esp32s3/manifest.json";
 const FIRMWARE_URL_TTL_SEC = 600;
 // Soniox一時キーの寿命。既定は1時間（起動時の1回しか取らない古いファーム・アプリのため変えない）。
@@ -206,6 +211,8 @@ export const handler = async (event, context) => {
 
     const result = { ok: true, ...data };
     result.stt_model = process.env.SONIOX_MODEL || "stt-rt-v4";
+    // アプリの設定画面「音声認識」の選択肢（infra/config/stages.ts の sttOptions）。ESP32 には返さない（応答を読む JSON の大きさが決まっている）
+    if (!deviceId && STT_OPTIONS) result.stt_options = STT_OPTIONS;
     if (deviceSettings?.Item) {
       result.backchannel_enabled = deviceSettings.Item.backchannel_enabled !== false;
       trace.set({ device_registered: true, backchannel_enabled: result.backchannel_enabled });

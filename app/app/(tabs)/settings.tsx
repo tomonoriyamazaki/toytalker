@@ -32,8 +32,8 @@ import { Buffer } from "buffer";
 import { VOICE_EFFECTS, applyVoiceEffect, decodeWav, encodeWav, type VoiceEffectId } from "../../lib/voiceEffects";
 import { fetchTtsAudio } from "../../lib/ttsOnly";
 import {
-  DEFAULT_STT_CHOICE, STT_MODEL_OPTIONS, STT_MODEL_STORAGE_KEY, STT_WAIT_OPTIONS, STT_WAIT_STORAGE_KEY,
-  loadSttChoice, type SttChoice,
+  DEFAULT_STT_CHOICE, STT_MODEL_STORAGE_KEY, STT_WAIT_OPTIONS, STT_WAIT_STORAGE_KEY,
+  loadSttChoice, loadSttOptions, sttModelOptions, type SttChoice, type SttOptions,
 } from "../../lib/sttModel";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
@@ -99,6 +99,7 @@ export default function Settings() {
   // STT設定
   const [sttMode, setSttMode] = useState<"local" | "soniox">("soniox");
   const [sttChoice, setSttChoice] = useState<SttChoice>(DEFAULT_STT_CHOICE);
+  const [sttOptions, setSttOptions] = useState<SttOptions | null>(null); // サーバーが配った選択肢（app/lib/sttModel.ts）
 
   // 相槌設定
   const [backchannelEnabled, setBackchannelEnabled] = useState(true);
@@ -143,6 +144,7 @@ export default function Settings() {
     (async () => {
       const saved = await AsyncStorage.getItem("sttMode");
       if (saved === "local" || saved === "soniox") setSttMode(saved);
+      setSttOptions(await loadSttOptions());
       setSttChoice(await loadSttChoice());
       const bcSaved = await AsyncStorage.getItem("backchannelEnabled");
       if (bcSaved === "false") setBackchannelEnabled(false);
@@ -259,6 +261,15 @@ export default function Settings() {
     await AsyncStorage.setItem("sttMode", value);
     navigateTo("main", "back");
   };
+
+  // 音声認識の画面を開くたびに読み直す（一覧はチャット画面が一時キーを取ったときに更新される）
+  useEffect(() => {
+    if (screen !== "stt-select") return;
+    (async () => {
+      setSttOptions(await loadSttOptions());
+      setSttChoice(await loadSttChoice());
+    })();
+  }, [screen]);
 
   // Soniox のモデル・話し終わりの待ち。画面に留まる（続けて別の選択肢と聞き比べるため）。次の発話から効く
   const handleSttChoiceChange = async (next: SttChoice) => {
@@ -1507,7 +1518,7 @@ export default function Settings() {
               })}
 
               <Text style={s.sttSectionTitle}>Soniox のモデル</Text>
-              {STT_MODEL_OPTIONS.map((opt) => {
+              {sttModelOptions(sttOptions).map((opt) => {
                 const selected = sttChoice.model === opt.value;
                 return (
                   <TouchableOpacity

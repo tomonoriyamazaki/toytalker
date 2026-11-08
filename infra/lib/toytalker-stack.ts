@@ -313,7 +313,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 256, // 128ではコールドスタート時のSSM取得が約0.9秒（他は1〜2GBで約0.2秒）。256へ（ロードマップ9、2026-10-28）
     timeoutSeconds: 5, // OTA判定でS3のmanifestを読むため3→5（2026-09-16）
     format: "esm",
-    env: ["SONIOX_MODEL", "FIRMWARE_BUCKET", ...AUTH_ENV],
+    env: ["SONIOX_MODEL", "STT_OPTIONS", "FIRMWARE_BUCKET", ...AUTH_ENV],
     secrets: ["SONIOX_API_KEY"],
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY, route: "/stt-token" },
     warm: true,
@@ -504,6 +504,7 @@ export class ToyTalkerStack extends cdk.Stack {
       CARTESIA_DEFAULT_VOICE_ID: config.cartesiaDefaultVoiceId,
       ZAKICORP_TTS_URL: config.zakicorpTtsUrl,
       SONIOX_MODEL: config.sonioxModel,
+      STT_OPTIONS: JSON.stringify(config.sttOptions),
       FIRMWARE_BUCKET: config.firmwareBucketName,
       OPS_SNS_TOPIC_ARN: opsTopic.topicArn,
       RECORDING_LOG_GROUPS: JSON.stringify(RECORDING_FUNCTION_KEYS.map((k) => `/aws/lambda/${nameOf(k).name}`)),

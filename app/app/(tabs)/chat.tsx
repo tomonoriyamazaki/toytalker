@@ -31,7 +31,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { APP_VERSION } from "../../lib/appVersion";
 import { API_BASE_URL, apiFetch, requestHeaders } from "../../lib/api";
-import { DEFAULT_STT_CHOICE, loadSttChoice, sonioxModelConfig, sttChoiceKey, sttGraceMs, type SttChoice } from "../../lib/sttModel";
+import { DEFAULT_STT_CHOICE, loadSttChoice, rememberSttOptions, sonioxModelConfig, sttChoiceKey, sttGraceMs, type SttChoice } from "../../lib/sttModel";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
 import ReadAloud from "../../components/ReadAloud";
@@ -62,6 +62,7 @@ const fetchSonioxTempKey = async (): Promise<string> => {
   const js = await res.json();
   if (!res.ok || !js?.api_key) throw new Error("Failed to get Soniox temp key");
   if (js.stt_model) SONIOX_MODEL = js.stt_model;
+  rememberSttOptions(js.stt_options); // 設定画面の選択肢と待ちの中身（app/lib/sttModel.ts）
   return js.api_key as string;
 };
 
@@ -686,7 +687,7 @@ export default function Chat() {
     // 終端の猶予（app/lib/sttModel.ts の sttGraceMs）。<end> が来ても graceMs 待ち、その間に声が出たら
     // 同じ発話として聞き続ける（Soniox は同じ WS で続きを文字にし、次の <end> を送る）。
     // 声が物音だっただけなら次の <end> が来ないので、RESUME_MAX_MS 新しい文字が無ければ送る。
-    const graceMs = sttGraceMs(sttChoice);
+    const graceMs = sttGraceMs(sttChoice, SONIOX_MODEL);
     const RESUME_MAX_MS = 3000;
     let firstEndAt = 0;
     let graceTimer: ReturnType<typeof setTimeout> | null = null;

@@ -3,6 +3,29 @@
 
 export type StageName = "rnd" | "stg" | "prd" | "prd-dg";
 
+/**
+ * アプリの設定画面「音声認識」の選択肢（ロードマップ18）。一時キーLambda（/stt-token）がアプリへ `stt_options` として配り、
+ * アプリ（app/lib/sttModel.ts）はモデル名も Soniox の設定値も持たない。モデルの追加・廃止や待ちの値の調整は
+ * ここを変えて deploy するだけで、アプリの更新は要らない。受け取れないときのアプリは「おすすめ」と組み込みの待ちで動く。
+ * ESP32 には配らない（応答を読む JSON の大きさが決まっているため）。
+ */
+export interface SttOptions {
+  /** 「おすすめ」以外に選べるモデル。廃止したモデルを消すと、それを選んでいた端末は「おすすめ」に戻る */
+  readonly models: readonly { readonly id: string; readonly label: string; readonly description?: string }[];
+  /**
+   * 「話し終わりの待ち」の中身。soniox は開始メッセージにそのまま足す値（アプリは解釈しない）、
+   * grace_ms は終端（<end>）の後にアプリが送らずに待つ時間（その間に声が出たら同じ発話としてつなぐ）
+   */
+  readonly waits: Readonly<Record<SttWait, SttWaitSetting>>;
+  /** モデルごとに待ちの中身を変えたいときだけ書く（モデル名 → 待ち → 中身）。無ければ waits */
+  readonly waits_by_model?: Readonly<Record<string, Partial<Record<SttWait, SttWaitSetting>>>>;
+}
+export type SttWait = "fast" | "normal" | "slow";
+export interface SttWaitSetting {
+  readonly soniox: Readonly<Record<string, number | boolean | string>>;
+  readonly grace_ms: number;
+}
+
 export interface StageConfig {
   readonly stage: StageName;
   /** AWSアカウントID。デプロイ前に呼び出し元の資格情報と一致するか確認する（bin/toytalker.ts） */
@@ -12,8 +35,10 @@ export interface StageConfig {
   readonly opsEmail: string;
   /** ZakiCorp TTS（クローンボイス）の公開URL。Cloudflare Tunnelで固定 */
   readonly zakicorpTtsUrl: string;
-  /** Soniox STTのモデル名 */
+  /** Soniox STTのモデル名（アプリの「おすすめ」と ESP32 が使う） */
   readonly sonioxModel: string;
+  /** アプリの設定画面「音声認識」の選択肢。一時キーLambdaがアプリへ配る（型と方針は SttOptions） */
+  readonly sttOptions: SttOptions;
   /** Cartesiaの既定ボイスID */
   readonly cartesiaDefaultVoiceId: string;
   /**
@@ -109,7 +134,21 @@ const common = {
   region: "ap-northeast-1",
   opsEmail: "exodjp@gmail.com",
   zakicorpTtsUrl: "https://tts.zakicorp.com",
-  sonioxModel: "stt-rt-v6", // 2026-11-08 に v5 から切替。アプリの「話し終わりの待ち」（app/lib/sttModel.ts）は v6 で調整した（ロードマップ18）
+  sonioxModel: "stt-rt-v6", // 2026-11-08 に v5 から切替。アプリの「話し終わりの待ち」は v6 で調整した（ロードマップ18）
+  sttOptions: {
+    // stt-rt-v5 は 2026-12-15 に廃止（以後 Soniox が v6 へ振り替える）。その後この行を消す
+    models: [
+      { id: "stt-rt-v6", label: "v6" },
+      { id: "stt-rt-v5", label: "v5", description: "2026-12-15 に廃止され v6 へ振り替わります。" },
+    ],
+    // 2026-11-08 に大人と4歳半の子で試して決めた（v6）。Soniox は文として終わって聞こえると設定に関係なく即座に区切るので、
+    // 子どもが言葉を切ってから続ける分は grace_ms で拾う。endpoint_sensitivity は -1.0〜1.0、max_endpoint_delay_ms は 500〜3000
+    waits: {
+      fast: { soniox: {}, grace_ms: 0 },
+      normal: { soniox: { endpoint_sensitivity: -0.3, max_endpoint_delay_ms: 2500 }, grace_ms: 600 },
+      slow: { soniox: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 }, grace_ms: 1200 },
+    },
+  },
   cartesiaDefaultVoiceId: "c7eafe22-8b71-40cd-850b-c5a3bbd8f8d2",
   architecture: "x86_64",
   wallet: { stopAtZero: true },
