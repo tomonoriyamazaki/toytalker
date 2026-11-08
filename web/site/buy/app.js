@@ -22,10 +22,11 @@
   };
   let billing = null;
 
-  function showError(msg) {
-    const el = $("error");
+  function showError(msg, id = "error") {
+    const el = $(id);
     el.textContent = msg;
     el.hidden = !msg;
+    if (msg) el.scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
 
   async function renderAccount() {
@@ -148,7 +149,8 @@
   let autoSettings = null;
   function reviewAuto() {
     const s = { below_jpy: Number($("auto-below").value), amount_jpy: Number($("auto-amount").value), monthly_cap_jpy: Number($("auto-cap").value) };
-    if (!(s.amount_jpy > s.below_jpy) || !(s.monthly_cap_jpy >= s.amount_jpy)) { showError(MESSAGES.bad_settings); return; }
+    if (!(s.amount_jpy >= s.below_jpy) || !(s.monthly_cap_jpy >= s.amount_jpy)) { showError(MESSAGES.bad_settings, "auto-error"); return; }
+    showError("", "auto-error");
     showError("");
     autoSettings = s;
     for (const el of document.querySelectorAll("#auto-confirm .auto-below")) el.textContent = yen(s.below_jpy);

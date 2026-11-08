@@ -25,7 +25,9 @@ export const CONSENT_VERSION = "2026-11-07";
 export const CHECKOUT_MIN_INTERVAL_MS = 60 * 1000;
 
 /**
- * オートチャージの設定（条件・1回の額・月の上限）を検査する。選択肢の中の値で、額 > 条件、上限 ≥ 額 のときだけ通す。
+ * オートチャージの設定（条件・1回の額・月の上限）を検査する。選択肢の中の値で、額 ≥ 条件、上限 ≥ 額 のときだけ通す。
+ * 額 = 条件（500円 / 500円）でも、買い足した直後の残高は条件以上になり（判定は「残高 ≥ 条件なら何もしない」）、5分後に続けて請求はしない。
+ * 残高がマイナスになり得る RnD は worker の1時間の cooldown が歯止め。
  * 利用者の入力（購入ページ）と Stripe の Checkout の metadata（worker。文字列で返る）の両方で使う
  * @returns {{ below: number, amount: number, cap: number } | null}
  */
@@ -34,7 +36,7 @@ export function parseAutoSettings(src) {
   const amount = Number(src?.amount_jpy);
   const cap = Number(src?.monthly_cap_jpy);
   if (!AUTO_BELOW_OPTIONS.includes(below) || !AUTO_AMOUNT_OPTIONS.includes(amount) || !AUTO_CAP_OPTIONS.includes(cap)) return null;
-  if (!(amount > below) || !(cap >= amount)) return null;
+  if (!(amount >= below) || !(cap >= amount)) return null;
   return { below, amount, cap };
 }
 
