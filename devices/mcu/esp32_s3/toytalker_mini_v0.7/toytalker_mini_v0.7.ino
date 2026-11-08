@@ -249,6 +249,7 @@ static uint32_t sttRecordStartMs = 0;    // 録音開始（startSTTRecording）
 static bool sttWsWaitPending = false;    // 録音開始時に Soniox が未接続だった（繋がった時刻を ws_wait_ms に）
 static uint32_t lastTextChangeMs = 0;    // 途中結果の文字が最後に変わった時刻
 static uint32_t sonioxDisconnects = 0, sonioxErrors = 0;  // 前の要求から数える
+static bool sonioxClosingOnPurpose = false;  // 自分で切るとき（再生中の先行接続の張り直し）。切断の回数に数えない
 bool armed = false;
 bool isRecording = false;
 bool endpointDetected = false;
@@ -399,7 +400,9 @@ void prepareSonioxDuringPlayback() {
   sonioxPlaybackPhase = true;
   finishSonioxPreconnect();
   if (sonioxPreconnect.ownsClient()) return;
+  sonioxClosingOnPurpose = true;   // disconnect() は DISCONNECTED を同じ呼び出しの中で出す
   ws.disconnect();
+  sonioxClosingOnPurpose = false;
   beginSonioxWs();
   ws.onEvent(webSocketEvent);
   ws.enableHeartbeat(15000, 3000, 2);
@@ -2230,6 +2233,8 @@ void sendToLambdaAndPlay(const String& text) {
         serviceSoniox("playback_drain");
         delay(10);
       }
+      // 受信を終えた後の出し切り中に割り込まれたときも、鳴らしていない分を数える（96 バイト/ms）
+      if (bargeInRequested) turnReport.unplayedMs = playRingAvail() / 96;
       playerStop();  // 正常時は既に停止済み、タイムアウト時の保険
       Serial.printf("⏱️ end+[%lums] Ring buffer drained\n", millis() - tEnd);
     }
@@ -2409,7 +2414,8 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
         String fullText = sonioxFinalBuf + nonFinalCurrent;
         if (fullText.length() > 0) {
-          if (fullText != partialText) lastTextChangeMs = millis();
+          // <end> と同じメッセージの確定（途中結果の差し替え）は数えない。数えると last_text_to_end_ms がいつも 0 付近になる
+          if (!foundEndToken && fullText != partialText) lastTextChangeMs = millis();
           partialText = fullText;
           lastPartialMs = millis();
           armed = true;
@@ -2430,7 +2436,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
 
     case WStype_DISCONNECTED:
       Serial.println("✅ Soniox disconnected");
-      sonioxDisconnects++;
+      if (!sonioxClosingOnPurpose) sonioxDisconnects++;
       isRecording = false;
       sonioxPreconnectPending = false;
       break;
