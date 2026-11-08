@@ -17,6 +17,7 @@ import * as scheduler from "aws-cdk-lib/aws-scheduler";
 import * as schedulerTargets from "aws-cdk-lib/aws-scheduler-targets";
 import * as cloudfront from "aws-cdk-lib/aws-cloudfront";
 import * as cognito from "aws-cdk-lib/aws-cognito";
+import * as ses from "aws-cdk-lib/aws-ses";
 import * as cw from "aws-cdk-lib/aws-cloudwatch";
 import * as cwActions from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
@@ -730,7 +731,40 @@ export class ToyTalkerStack extends cdk.Stack {
       });
     }
 
+    // ---- サポートの返信の送信元（SES。ロードマップ 7(d)）----
+    if (config.supportMail) this.createSupportMail(config.supportMail);
+
     this.acknowledgeNagFindings();
+  }
+
+  /**
+   * サポートの返信の送信元（2026-11-08）。`support@zakicorp.com` 宛のメールは Cloudflare の転送で Gmail に届き、返信は Gmail の
+   * 「別のアドレスから送信」が SES の SMTP（email-smtp.<region>.amazonaws.com:587）で送る。手元にメールボックスは持たない。
+   * - ドメインの検証は Easy DKIM（CNAME 3本を DNS に入れる）。MAIL FROM を mail.<domain>（MX と TXT の2本）にして SPF も揃える。
+   *   入れる記録はスタックの出力（SupportMailDns*）に出る。
+   * - SMTP の資格情報は IAM ユーザー `toytalker-ses-smtp-<stage>` のアクセスキー（長期鍵の唯一の例外。ロードマップ 8）。
+   *   キーは CDK では作らず手順で作る（infra/README「サポートの返信の送信元」）。権限は address からの SendRawEmail だけ。
+   * - 送れる相手の制限（sandbox）の解除は手作業で申請する。
+   */
+  private createSupportMail(mail: { readonly domain: string; readonly address: string }): void {
+    const identity = new ses.EmailIdentity(this, "SupportMailIdentity", {
+      identity: ses.Identity.domain(mail.domain),
+      dkimSigning: true,
+      dkimIdentity: ses.DkimIdentity.easyDkim(ses.EasyDkimSigningKeyLength.RSA_2048_BIT),
+      mailFromDomain: `mail.${mail.domain}`,
+      mailFromBehaviorOnMxFailure: ses.MailFromBehaviorOnMxFailure.REJECT_MESSAGE,
+    });
+    const user = new iam.User(this, "SupportMailSmtpUser", { userName: `toytalker-ses-smtp-${this.config.stage}` });
+    user.addToPolicy(new iam.PolicyStatement({
+      actions: ["ses:SendRawEmail"],
+      resources: [identity.emailIdentityArn],
+      conditions: { StringEquals: { "ses:FromAddress": mail.address } },
+    }));
+    identity.dkimRecords.forEach((r, i) => {
+      new cdk.CfnOutput(this, `SupportMailDnsDkim${i + 1}`, { value: `CNAME ${r.name} -> ${r.value}` });
+    });
+    new cdk.CfnOutput(this, "SupportMailDnsMailFromMx", { value: `MX mail.${mail.domain} -> 10 feedback-smtp.${this.region}.amazonses.com` });
+    new cdk.CfnOutput(this, "SupportMailDnsMailFromTxt", { value: `TXT mail.${mail.domain} -> "v=spf1 include:amazonses.com ~all"` });
   }
 
   /**

@@ -106,6 +106,12 @@ export interface StageConfig {
    */
   readonly billing: { readonly buyPageUrl: string; readonly stripeLivemode: boolean };
   /**
+   * サポートの返信の送信元（ロードマップ 7(d)、2026-11-08）。SES でドメインを検証し、Gmail の「別のアドレスから送信」が
+   * SES の SMTP で address から送る（受け取りは Cloudflare の転送のまま。手元にメールボックスは持たない）。
+   * SMTP 用の IAM ユーザー1つが長期鍵の唯一の例外で、address からの送信だけ許す。無い環境は SES を作らない。
+   */
+  readonly supportMail?: { readonly domain: string; readonly address: string };
+  /**
    * Organizations の組織ID。管理アカウントの環境（RnD）にだけ置く。これがある環境では
    * 組織全体で1つの資源（CloudTrail 組織トレイル）を持つスタック `toytalker-org` も合成する。
    */
@@ -177,6 +183,7 @@ export const stages: Record<StageName, StageConfig> = {
     },
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: false }, // Stripe は sandbox（2026-11-02 作成）
+    supportMail: { domain: "zakicorp.com", address: "support@zakicorp.com" }, // 2026-11-08。DNS は Cloudflare
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
       lambdaRoleArn: "arn:aws:iam::342082316736:role/toytalk-lambda-role-dev",
