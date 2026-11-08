@@ -6,6 +6,7 @@
  * stt-rt-v5 は 2026-12-15 に廃止され v6 へ自動で振り替わるので、その後は "v5" の選択肢を消す。
  *
  * 待ち: 小さい子は話の途中で間が空き、既定の終端検出だと置いていかれる（2026-11-08、4歳半の子で v5 でも）。
+ * 既定は「ふつう」（2026-11-08、大人と4歳半の子で試して決めた）。
  * 会話を区切るのは Soniox の終端（<end>）だけなので、Soniox の設定で区切りにくくする。
  * endpoint_sensitivity をマイナスにすると「文が終わった」と判断しにくくなり（-1.0〜0、v5・v6 とも可）、
  * max_endpoint_delay_ms はその上限（既定 2000、500〜3000）。値は仮で、子どもに話してもらって詰める。
@@ -14,10 +15,11 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export type SttModelChoice = "default" | "v5" | "v6";
-export type SttWaitChoice = "normal" | "slow" | "slower";
+export type SttWaitChoice = "fast" | "normal" | "slow";
 
 export const STT_MODEL_STORAGE_KEY = "sttModelChoice";
-export const STT_WAIT_STORAGE_KEY = "sttWaitChoice";
+// 2026-11-08 に「はやい / ふつう / ゆっくり」へ名前と中身を付け替えたので、以前の保存値（sttWaitChoice）は読まない
+export const STT_WAIT_STORAGE_KEY = "sttWait";
 
 export const STT_MODEL_OPTIONS: { value: SttModelChoice; label: string; description: string }[] = [
   { value: "default", label: "おすすめ", description: "サーバーが決めたモデルを使います。" },
@@ -26,9 +28,9 @@ export const STT_MODEL_OPTIONS: { value: SttModelChoice; label: string; descript
 ];
 
 export const STT_WAIT_OPTIONS: { value: SttWaitChoice; label: string; description: string }[] = [
-  { value: "normal", label: "ふつう", description: "話し終わったらすぐ返事をします。" },
-  { value: "slow", label: "ゆっくり", description: "少し待ってから返事をします。話の途中で間が空く子向け。" },
-  { value: "slower", label: "もっとゆっくり", description: "さらに待ちます。小さい子向け。返事は遅くなります。" },
+  { value: "fast", label: "はやい", description: "話し終わったらすぐ返事をします。話の途中で切れることがあります。" },
+  { value: "normal", label: "ふつう", description: "少し待ってから返事をします。おすすめ。" },
+  { value: "slow", label: "ゆっくり", description: "さらに待ちます。話の途中で間が空く小さい子向け。返事は遅くなります。" },
 ];
 
 const MODELS: Record<SttModelChoice, string | null> = {
@@ -38,9 +40,9 @@ const MODELS: Record<SttModelChoice, string | null> = {
 };
 
 const WAITS: Record<SttWaitChoice, Record<string, number>> = {
-  normal: {},
-  slow: { endpoint_sensitivity: -0.3, max_endpoint_delay_ms: 2500 },
-  slower: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 },
+  fast: {},
+  normal: { endpoint_sensitivity: -0.3, max_endpoint_delay_ms: 2500 },
+  slow: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 },
 };
 
 /**
@@ -48,7 +50,7 @@ const WAITS: Record<SttWaitChoice, Record<string, number>> = {
  * Soniox は文として終わって聞こえると設定に関係なく即座に区切るので（2026-11-08 実測、終端まで 19〜48ms の回があった）、
  * 子どもが言葉を切ってから続ける分はアプリで拾う。値は仮。
  */
-const GRACE_MS: Record<SttWaitChoice, number> = { normal: 0, slow: 600, slower: 1200 };
+const GRACE_MS: Record<SttWaitChoice, number> = { fast: 0, normal: 600, slow: 1200 };
 export const sttGraceMs = (c: SttChoice) => GRACE_MS[c.wait];
 
 export type SttChoice = { model: SttModelChoice; wait: SttWaitChoice };
