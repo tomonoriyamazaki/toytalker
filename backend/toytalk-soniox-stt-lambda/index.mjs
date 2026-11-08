@@ -92,20 +92,27 @@ async function buildFirmwareInfo(query, device, manifest) {
 }
 
 // 本体の報告を記録する。登録済みの行だけ更新し、未登録の device_id で行を作らない。
+// last_seen は device_id があれば毎回更新する（本体は起動時と3分ごとに必ずここを呼ぶので「最後に動いた時刻」になる。
+// 2026-11-08 まで機器設定 Lambda しか書いておらず「最後にアプリで設定を触った時刻」になっていた）。
+// ファーム版などは fw を報告する版（0.7.3 以降）だけが書く。
 function recordDeviceReport(deviceId, query) {
-  if (!deviceId || !query.fw) return Promise.resolve();
+  if (!deviceId) return Promise.resolve();
+  const now = new Date().toISOString();
+  const sets = ["last_seen = :t"];
+  const values = { ":t": now };
+  if (query.fw) {
+    sets.push("firmware_version = :fw", "hw_version = :hw", "ota_capable = :o", "running_partition = :p", "fw_reported_at = :t");
+    values[":fw"] = String(query.fw).slice(0, 32);
+    values[":hw"] = String(query.hw ?? "").slice(0, 16);
+    values[":o"] = query.ota === "1";
+    values[":p"] = String(query.part ?? "").slice(0, 16);
+  }
   return ddb.send(new UpdateCommand({
     TableName: DEVICES_TABLE,
     Key: { device_id: deviceId },
-    UpdateExpression: "SET firmware_version = :fw, hw_version = :hw, ota_capable = :o, running_partition = :p, fw_reported_at = :t",
+    UpdateExpression: `SET ${sets.join(", ")}`,
     ConditionExpression: "attribute_exists(device_id)",
-    ExpressionAttributeValues: {
-      ":fw": String(query.fw).slice(0, 32),
-      ":hw": String(query.hw ?? "").slice(0, 16),
-      ":o": query.ota === "1",
-      ":p": String(query.part ?? "").slice(0, 16),
-      ":t": new Date().toISOString(),
-    },
+    ExpressionAttributeValues: values,
   })).catch((err) => {
     if (err.name !== "ConditionalCheckFailedException") console.warn(`[OTA] report failed: ${err.message}`);
   });
