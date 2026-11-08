@@ -58,6 +58,27 @@ export function describeClient(event, body) {
 }
 
 /**
+ * 前のターンをクライアントが受け取って鳴らしたか（2026-11-08）。本文要求の body.prev_turn。
+ * サーバーのログは「送り終えた」までしか分からない（2026-11-07 15:01、返答を送り切ったのにアプリは無反応）ので、
+ * クライアントが次の要求に前のターンの結果を添え、ここで同名の項目として載せる。文章は入れない。
+ * 項目はアプリ（app/app/(tabs)/chat.tsx の TurnStats）と同じ。ESP32 も同じ名前で送れる。知らない項目は捨てる。
+ *   request_at: 前のターンの request_at（その turn ログと結びつける）
+ *   attempts / segments / tts / played / play_failed / stalls: 回数（試行、受けた文、受けた音声、鳴らし終えた音声、再生失敗、再生の見張りが動いた回数）
+ *   done / loaded / bc_received / bc_played / bc_error: 真偽（done を受けた、受信完了、相槌を受けた、相槌を鳴らした、相槌の取得失敗）
+ *   error: network / timeout / http:<status> / parse（無ければ null）
+ */
+export function describePrevTurn(prev) {
+  if (!prev || typeof prev !== "object") return null;
+  const out = {};
+  for (const k of ["request_at", "error"]) out[k] = typeof prev[k] === "string" ? prev[k].slice(0, 32) : null;
+  for (const k of ["attempts", "segments", "tts", "played", "play_failed", "stalls"]) {
+    out[k] = Number.isFinite(prev[k]) ? Math.max(0, Math.min(9999, Math.trunc(prev[k]))) : null;
+  }
+  for (const k of ["done", "loaded", "bc_received", "bc_played", "bc_error"]) out[k] = typeof prev[k] === "boolean" ? prev[k] : null;
+  return out;
+}
+
+/**
  * @param {string} kind  "turn"（本文）| "backchannel"（相槌）| "stt-token"（Soniox鍵）| "read-aloud"（読み上げ）
  * @param {{ event?: object, context?: object, t0?: number }} p
  */

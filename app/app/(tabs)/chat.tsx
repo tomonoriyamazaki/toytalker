@@ -114,6 +114,11 @@ function base64ToArrayBuffer(b64: string): ArrayBuffer {
 //   "steady": 返答の最初の音声が鳴ったら、以後の文は音声を待たず REVEAL_CHARS_PER_SEC の一定の速さで続けて出す（文字が声より先に進む）
 // 相槌はどちらでも音声が鳴り始めたときに出す。戻すときは "voice" にするだけ
 const REVEAL_MODE: "voice" | "steady" = "steady";
+// 再生の見張り（playLoop）。読み込みがこの時間で戻らない、または再生が「長さ＋余裕」で終わらないときは、文字だけ出して次へ進む。
+// 2026-11-07 15:01 の無反応（サーバーは送り終えていたが、アプリは相槌も返答も鳴らさず、文字も出ず、マイクも再開しなかった）の痛み止め。
+const PLAYBACK_LOAD_TIMEOUT_MS = 5000;
+const PLAYBACK_GRACE_MS = 3000;
+const PLAYBACK_UNKNOWN_DURATION_MS = 15000; // 長さが取れなかったときの上限
 const REVEAL_SPEED = 0.4;
 const REVEAL_CHARS_PER_SEC = 20;
 // 返答・相槌の1行。時刻 at から span ミリ秒かけて1字ずつ出す。
@@ -352,7 +357,30 @@ export default function Chat() {
   // 音声キュー
   const playingRef = useRef(false);
   // 文字は音声が鳴り始めたときに出す（画面の順番を鳴った順番に揃える）。uri の無い項目は文字だけ（音声が作れなかった文）
-  type Queued = { uri?: string; text?: string; notice?: string; kind?: "bc"; session: string };
+  // 前のターンの結果（文章は含めない）。次の本文要求に prev_turn として添え、Lambda のトレースに同名で載る。
+  // サーバーは「送り終えた」までしか分からないので、アプリが受け取って鳴らしたかをここで残す（2026-11-08。ESP32 も同じ項目を送れる）。
+  type TurnStats = {
+    request_at: string;      // そのターンの request_at（サーバーの turn ログと結びつける）
+    attempts: number;        // XHR の試行回数（再送を含む）
+    segments: number;        // 受けた文（segment イベント）
+    tts: number;             // 受けた音声（tts イベント）
+    done: boolean;           // done イベントを受けた
+    loaded: boolean;         // xhr.onload（受信完了）
+    error: string | null;    // network / timeout / http:<status> / parse
+    played: number;          // 鳴らし終えた音声
+    play_failed: number;     // 読み込み失敗・再生失敗
+    stalls: number;          // 再生の見張りが動いた回数（コールバックが戻らず飛ばした）
+    bc_received: boolean;    // 相槌の音声を受けた
+    bc_played: boolean;      // 相槌を鳴らし終えた
+    bc_error: boolean;       // 相槌の取得に失敗
+  };
+  const turnStatsRef = useRef<TurnStats | null>(null); // いまのターン（鳴らし終わるまで更新する）
+  const bcStatsRef = useRef({ bc_received: false, bc_error: false }); // 相槌は send より前に返ることがあるので、ここに溜めて send で写す
+  const noteBc = (k: "bc_received" | "bc_error") => {
+    if (sttFinishedRef.current && turnStatsRef.current) turnStatsRef.current[k] = true;
+    else bcStatsRef.current[k] = true;
+  };
+  type Queued = { uri?: string; text?: string; notice?: string; kind?: "bc"; session: string; stats?: TurnStats };
   const queueRef = useRef<Queued[]>([]);
   // steady 用。返答の最初の音声が鳴ったか / 一定速で出している文字が出し終わる時刻 / 音声待ちの文（send ごとに作り直す）
   const replyAudioStartedRef = useRef(false);
@@ -726,6 +754,7 @@ export default function Chat() {
         setPartial(""); setFinalText("");
         sonioxFinalBufRef.current = ""; sonioxNonFinalBufRef.current = "";
         backchannelFiredRef.current = false; backchannelAudioRef.current = null;
+        bcStatsRef.current = { bc_received: false, bc_error: false };
         sttFinishedRef.current = false;
         if(DEBUG)setLog(L => [...L, "AudioRecord started"]);
       } catch (e: any) {
@@ -859,6 +888,7 @@ export default function Chat() {
                 console.log("[BC] text=", data.text, "hasAudio=", !!data.audio, "sttDone=", sttFinishedRef.current);
                 if (data.text) pastBackchannelsRef.current.push(data.text);
                 if (data.audio) {
+                  noteBc("bc_received");
                   if (sttFinishedRef.current) {
                     console.log("[BC] playing now");
                     enqueueAudio(data.audio, `bc-${Date.now()}`, data.format || "wav", { text: data.text, kind: "bc" });
@@ -869,6 +899,7 @@ export default function Chat() {
                 }
               } catch (e: any) {
                 console.log("[BC] ERROR:", e?.message ?? e);
+                noteBc("bc_error");
               }
             })();
           }
@@ -1052,7 +1083,7 @@ export default function Chat() {
     await FileSystem.writeAsStringAsync(path, b64, {
       encoding: FileSystem.EncodingType.Base64,
     });
-    queueRef.current.push({ uri: path, ...show, session });
+    queueRef.current.push({ uri: path, ...show, session, stats: turnStatsRef.current ?? undefined });
     if (DEBUG) setLog(L => [...L, `before playLoop queue length: ${queueRef.current.length}`]);
     if (DEBUG) setLog(L => [...L, `before playLoop playingRef status: ${playingRef.current}`]);
     if (!playingRef.current) {
@@ -1082,12 +1113,37 @@ export default function Chat() {
         const path = item.uri.replace("file://", "");
         console.log(`🎵 dequeued (Sound): ${path}`);
         await new Promise<void>((resolve) => {
-          const s = new Sound(path, "", (error) => {
+          // 見張り: 読み込み・再生のコールバックが戻らないと、この文も後ろの文も出ず、マイクも再開しない。
+          // 期限が来たら文字だけ出して次へ進む（PLAYBACK_*）。回数は prev_turn.stalls でサーバーのログに残る。
+          let settled = false;
+          let shown = false;
+          let timer: ReturnType<typeof setTimeout> | null = null;
+          let s: Sound | null = null;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            if (timer) clearTimeout(timer);
+            currentSoundRef.current = null;
+            loopBeatRef.current = Date.now();
+            resolve();
+          };
+          const stall = (phase: "load" | "play") => {
+            if (settled) return;
+            console.log(`⏰ playback watchdog: ${phase} did not return, skipping:`, path);
+            if (item.stats) item.stats.stalls++;
+            if (!shown) showQueued(item, 0);
+            try { s?.stop(); s?.release(); } catch {}
+            finish();
+          };
+          timer = setTimeout(() => stall("load"), PLAYBACK_LOAD_TIMEOUT_MS);
+          s = new Sound(path, "", (error) => {
+            if (settled) { try { s?.release(); } catch {} return; } // 見張りが先に進めた後に戻ってきた
+            if (timer) clearTimeout(timer);
             if (error) {
               console.log("❌ Sound load error:", error);
+              if (item.stats) item.stats.play_failed++;
               showQueued(item, 0);
-              currentSoundRef.current = null;
-              resolve();
+              finish();
               return;
             }
             console.log("✅ Sound loaded:", path);
@@ -1097,14 +1153,21 @@ export default function Chat() {
             if (queueRef.current.length === 0 && sttMode === "soniox") {
               preconnectSonioxWs();
             }
-            showQueued(item, s.getDuration() * 1000);
-            s.play((success) => {
+            const durationMs = s!.getDuration() > 0 ? s!.getDuration() * 1000 : 0;
+            showQueued(item, durationMs);
+            shown = true;
+            timer = setTimeout(() => stall("play"), (durationMs || PLAYBACK_UNKNOWN_DURATION_MS) + PLAYBACK_GRACE_MS);
+            s!.play((success) => {
+              if (settled) { try { s?.release(); } catch {} return; }
               if (success) console.log("🏁 Finished playing:", path);
               else console.log("⚠️ Playback failed:", path);
-              s.release();
-              currentSoundRef.current = null;
-              loopBeatRef.current = Date.now();
-              resolve();
+              if (item.stats) {
+                if (!success) item.stats.play_failed++;
+                else if (item.kind === "bc") item.stats.bc_played = true;
+                else item.stats.played++;
+              }
+              s!.release();
+              finish();
             });
           });
         });
@@ -1193,6 +1256,16 @@ export default function Chat() {
     }
     sendingRef.current = true;
 
+    // 前のターンの結果を次の要求に添え、このターンの記録を新しく始める（文章は入れない。TurnStats）
+    const prevTurn = turnStatsRef.current;
+    const stats: TurnStats = {
+      request_at: "", attempts: 0, segments: 0, tts: 0, done: false, loaded: false, error: null,
+      played: 0, play_failed: 0, stalls: 0,
+      ...bcStatsRef.current, bc_played: false,
+    };
+    bcStatsRef.current = { bc_received: false, bc_error: false };
+    turnStatsRef.current = stats;
+
     if (DEBUG) setLog((L) => [...L, `→ POST ${t}`]);
     if (DEBUG_TIME) sendStartAtRef.current = Date.now();
     setMsg("");
@@ -1262,6 +1335,7 @@ export default function Chat() {
               const key = `tts:${String(id)}`;
               if (!printedIds.has(key)) {
                 printedIds.add(key);
+                stats.tts++;
                 const text = pendingTexts.get(String(id));
                 pendingTexts.delete(String(id));
                 // 切り替えの一言は、切り替わった文の前に出す（steady で文字がもう出ていれば、その後ろ）
@@ -1288,6 +1362,7 @@ export default function Chat() {
 
             if (!segKey || !printedIds.has(segKey)) {
               if (segKey) printedIds.add(segKey);
+              stats.segments++;
               if (text) {
                 if (REVEAL_MODE === "steady" && replyAudioStartedRef.current) showSteady(text);
                 else if (segId) pendingTexts.set(segId, text);
@@ -1301,10 +1376,12 @@ export default function Chat() {
           } else if (ev === "error") {
             setLog((L) => [...L, `Error: ${dataStr}`]);
           } else if (ev === "done") {
+            stats.done = true;
             flushPendingTexts();
             if (DEBUG_TIME) mtReport(setLog);
           }
         } catch (e: any) {
+          stats.error = "parse";
           setLog((L) => [...L, `ParseErr(${ev}): ${e?.message ?? e}`]);
         }
 
@@ -1360,6 +1437,7 @@ export default function Chat() {
           }, wait);
           return;
         }
+        stats.error = "network";
         setLog((L) => [
           ...L,
           receivedNothing
@@ -1371,6 +1449,7 @@ export default function Chat() {
       xhr.ontimeout = () => {
         flushPendingTexts();
         // 30s待った後なので再送しない
+        stats.error = "timeout";
         setLog((L) => [...L, "応答の受信が30秒以内に完了しなかったため、通信を終了しました。もう一度お試しください。"]);
         sendingRef.current = false;
       };
@@ -1385,6 +1464,7 @@ export default function Chat() {
             : reason === "not_owner" ? "このキャラクターは使えません（別のアカウントのものです）。キャラクターを選び直してください。"
             : reason === "no_balance" ? "ポイントがなくなりました。ポイントを追加すると、また話せます（残高は設定の利用状況で見られます）。"
             : `会話を始められませんでした（${xhr.status}${reason ? " " + reason : ""}）。`;
+          stats.error = `http:${xhr.status}`;
           setLog((L) => [...L, msg]);
           sendingRef.current = false;
           return;
@@ -1393,6 +1473,7 @@ export default function Chat() {
         const tail = text.slice(lastIndex);
         if (tail) processChunk(tail);
         flushPendingTexts();
+        stats.loaded = true;
         const out = accText.trim();
         if (DEBUG) setLog((L) => [...L, "=== stream done ==="]);
 
@@ -1418,6 +1499,9 @@ export default function Chat() {
         { role: "user", content: t },
       ];
 
+      const requestAt = new Date().toISOString();
+      if (attemptNo === 1) stats.request_at = requestAt;
+      stats.attempts = attemptNo;
       const payload = {
         character_id: selectedCharacterRef.current.character_id,
         messages: historyMessages,
@@ -1425,8 +1509,9 @@ export default function Chat() {
         owner_id: ownerId,
         device_id: "app",
         app_version: APP_VERSION, // Lambdaの切り分けログ用（どの版のアプリからの要求か）
-        request_at: new Date().toISOString(),
+        request_at: requestAt,
         backchannel_fired: backchannelFiredRef.current,
+        prev_turn: prevTurn, // 前のターンをアプリが受け取って鳴らしたか（TurnStats。文章は無い）。Lambda のログに同名で載る
       };
       console.log("🚀 payload to Lambda:", JSON.stringify(payload, null, 2), attemptNo > 1 ? `(attempt ${attemptNo})` : "");
       // CloudFront → Lambda の署名用に本文のハッシュと、ログイン中ならトークンを添える（app/lib/api.ts）

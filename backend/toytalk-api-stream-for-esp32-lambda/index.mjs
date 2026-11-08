@@ -13,7 +13,7 @@
   import { recordConsume, checkBalance } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
-  import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
+  import { startTrace, describeClient, describePrevTurn, errorStatus } from "../shared/trace.mjs";
 import { deviceGate } from "../shared/auth.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
@@ -675,6 +675,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       backchannel_fired: backchannelFired, history_messages: messages.length,
       user_chars: messages[messages.length - 1]?.content?.length ?? 0,
       ...describeClient(event, body),
+      prev_turn: describePrevTurn(body.prev_turn), // 前のターンをクライアントが受け取って鳴らしたか（送らない版は null）
     });
 
     function normalizeModelKey(k) {
