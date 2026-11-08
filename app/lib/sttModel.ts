@@ -43,6 +43,14 @@ const WAITS: Record<SttWaitChoice, Record<string, number>> = {
   slower: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 },
 };
 
+/**
+ * 終端（<end>）が来てからも送らずに待つ時間（アプリ側の猶予）。その間にまた声が出たら同じ発話としてつなぐ。
+ * Soniox は文として終わって聞こえると設定に関係なく即座に区切るので（2026-11-08 実測、終端まで 19〜48ms の回があった）、
+ * 子どもが言葉を切ってから続ける分はアプリで拾う。値は仮。
+ */
+const GRACE_MS: Record<SttWaitChoice, number> = { normal: 0, slow: 600, slower: 1200 };
+export const sttGraceMs = (c: SttChoice) => GRACE_MS[c.wait];
+
 export type SttChoice = { model: SttModelChoice; wait: SttWaitChoice };
 export const DEFAULT_STT_CHOICE: SttChoice = { model: "default", wait: "normal" };
 

@@ -31,7 +31,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { APP_VERSION } from "../../lib/appVersion";
 import { API_BASE_URL, apiFetch, requestHeaders } from "../../lib/api";
-import { DEFAULT_STT_CHOICE, loadSttChoice, sonioxModelConfig, sttChoiceKey, type SttChoice } from "../../lib/sttModel";
+import { DEFAULT_STT_CHOICE, loadSttChoice, sonioxModelConfig, sttChoiceKey, sttGraceMs, type SttChoice } from "../../lib/sttModel";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
 import ReadAloud from "../../components/ReadAloud";
@@ -683,6 +683,42 @@ export default function Chat() {
     // 先行接続は選択が同じときだけ使うので、どちらの経路でもこの選択で繋がる
     const modelLabel = `${sonioxModelConfig(sttChoice, SONIOX_MODEL).model}/${sttChoiceKey(sttChoice)}`;
 
+    // 終端の猶予（app/lib/sttModel.ts の sttGraceMs）。<end> が来ても graceMs 待ち、その間に声が出たら
+    // 同じ発話として聞き続ける（Soniox は同じ WS で続きを文字にし、次の <end> を送る）。
+    // 声が物音だっただけなら次の <end> が来ないので、RESUME_MAX_MS 新しい文字が無ければ送る。
+    const graceMs = sttGraceMs(sttChoice);
+    const RESUME_MAX_MS = 3000;
+    let firstEndAt = 0;
+    let graceTimer: ReturnType<typeof setTimeout> | null = null;
+    let resumeTimer: ReturnType<typeof setTimeout> | null = null;
+    let resumes = 0;
+    const clearGraceTimers = () => {
+      if (graceTimer) { clearTimeout(graceTimer); graceTimer = null; }
+      if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+    };
+    const finishUtterance = (why: string) => {
+      clearGraceTimers();
+      if (graceMs > 0) {
+        const line = `⏱️ STT grace: sent +${firstEndAt ? Date.now() - firstEndAt : -1}ms after first end (${why}, resumed=${resumes}, grace=${graceMs}ms, model=${modelLabel})`;
+        console.log(line);
+        if (DEBUG_TIME) setLog((L) => [...L, line]);
+      }
+      try { ws.close(); } catch {}
+    };
+    const onEndpoint = () => {
+      if (!firstEndAt) firstEndAt = Date.now();
+      if (graceMs <= 0) { finishUtterance("no grace"); return; }
+      if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
+      if (!graceTimer) graceTimer = setTimeout(() => finishUtterance("quiet"), graceMs);
+    };
+    const onSpeechDuringGrace = () => {
+      if (!graceTimer) return;
+      clearTimeout(graceTimer); graceTimer = null;
+      resumes++;
+      console.log(`⏱️ STT grace: speech resumed (+${Date.now() - firstEndAt}ms after first end)`);
+      resumeTimer = setTimeout(() => finishUtterance("no new text"), RESUME_MAX_MS);
+    };
+
     // 先行接続済みWSがあれば再利用
     const preWs = preconnectedWsRef.current;
     const choiceChanged = !!preWs && preconnectedChoiceRef.current !== sttChoiceKey(sttChoice);
@@ -731,6 +767,7 @@ export default function Chat() {
             if (Math.sqrt(sum / v.length) >= SPEECH_RMS) {
               lastSpeechAt = Date.now();
               if (!speechAt) speechAt = lastSpeechAt;
+              onSpeechDuringGrace();
             }
           }
           if (wsReady && ws.readyState === 1) {
@@ -832,17 +869,17 @@ export default function Chat() {
           const txt = t.text ?? "";
           if (!txt) continue;
           if (txt.trim() === "<end>") {
-            if (DEBUG) setLog(L => [...L, "Soniox: <end> detected, closing WS"]);
-            if (!endLogged) {
-              endLogged = true;
-              // 計測（ロードマップ18）: 話し終わり（最後に RMS≥SPEECH_RMS だった時刻）から終端が届くまで
-              const line = `⏱️ STT endpoint: +${lastSpeechAt ? Date.now() - lastSpeechAt : -1}ms after last speech (rms≥${SPEECH_RMS}, model=${modelLabel})`;
-              console.log(line);
-              if (DEBUG_TIME) setLog((L) => [...L, line]);
-            }
-            try { ws.close(); } catch {}
+            if (DEBUG) setLog(L => [...L, "Soniox: <end> detected"]);
+            // 計測（ロードマップ18）: 話し終わり（最後に RMS≥SPEECH_RMS だった時刻）から終端が届くまで。猶予中につないだ後の <end> も出す
+            const line = `⏱️ STT endpoint: +${lastSpeechAt ? Date.now() - lastSpeechAt : -1}ms after last speech (rms≥${SPEECH_RMS}, model=${modelLabel}${endLogged ? ", after resume" : ""})`;
+            endLogged = true;
+            console.log(line);
+            if (DEBUG_TIME) setLog((L) => [...L, line]);
+            onEndpoint();
             continue;
           }
+          // 声が戻った後に新しい文字が来たら、物音ではなかった。次の <end> を待つ
+          if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
           if (t.is_final) {
             sonioxFinalBufRef.current += txt;
           } else {
@@ -917,6 +954,7 @@ export default function Chat() {
     // ws.closeが実行されたとき or サーバー側から想定外にWebSocket通信を切断された時に自動実行される
     ws.onclose = async (e) => {
       if(DEBUG)setLog(L => [...L, `Soniox WS closed: code=${e.code}`]);
+      clearGraceTimers();
 
       // 状態リセット
       sonioxListeningRef.current = false;
