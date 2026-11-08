@@ -79,6 +79,7 @@ Espressif純正で信頼性高く、260MHzデュアルCPU、8 MB Flash & 2 M
 ```
 cd "C:/Users/exodj/Documents/KiCad/10.0/3rdparty/plugins" && "/c/Program Files/KiCad/10.0/bin/python.exe" -m "com_github_bennymeg_JLC-Plugin-for-KiCad.cli" --path "<基板の .kicad_pcb の絶対パス>" -t -f -nI -nB
 ```
+  部品番号は回路図の各部品の **`LCSC Part` 項目**から BOM に入る（v0.3 で全部品に入れた。回路図で部品を変えたらこの項目も直し、「回路図から基板を更新」で基板側にも写す）。
   出したら前の版の bom.csv・positions.csv と `diff` して、変えた部品の行だけが違うことを確かめる。positions.csv の角度は KiCad の角度そのまま（v0.1 の SSAJ110100 は 270° で正しく実装された）。JLCPCB 側の部品の向きは注文後の「実装前配置確認」で見る。
 - ネットの確認はネットリスト（`sch export netlist`）で、差し替えた部品のピンがどのネットに付いたかを読む。目視は SVG を PNG にして該当部分だけ切り出す（PyMuPDF）。
 
