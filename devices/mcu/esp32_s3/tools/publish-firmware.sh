@@ -116,8 +116,13 @@ echo "🔖 version=$VERSION channel=$CHANNEL key=$KEY"
 
 if [[ $NO_BUILD -eq 0 ]]; then
   echo "🔨 building $SKETCH_DIR ($FQBN)..."
-  arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$SKETCH_DIR" \
-    | grep -E 'Sketch uses|Global variables' || true
+  # ビルドに失敗したら止める。以前は `| grep ... || true` で失敗を握りつぶし、古い .bin を新しい版の名前で発行した
+  # （2026-11-08、arduino-cli が PATH に無く 0.7.7 の名前で古い中身を発行）。古い .bin は先に消して取り違えを防ぐ
+  command -v arduino-cli >/dev/null 2>&1 || { echo "❌ arduino-cli が PATH に無い（Windows は Arduino IDE の resources/app/lib/backend/resources を PATH へ）" >&2; exit 1; }
+  rm -f "$BIN"
+  BUILD_LOG="$(arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$SKETCH_DIR" 2>&1)" \
+    || { echo "$BUILD_LOG" | tail -20 >&2; echo "❌ build failed" >&2; exit 1; }
+  echo "$BUILD_LOG" | grep -E 'Sketch uses|Global variables' || true
 fi
 [[ -f "$BIN" ]] || { echo "binary not found: $BIN" >&2; exit 1; }
 
