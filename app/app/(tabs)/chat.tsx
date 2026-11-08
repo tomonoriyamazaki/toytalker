@@ -31,7 +31,7 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { APP_VERSION } from "../../lib/appVersion";
 import { API_BASE_URL, apiFetch, requestHeaders } from "../../lib/api";
-import { loadSttModelChoice, sonioxModelConfig, type SttModelChoice } from "../../lib/sttModel";
+import { DEFAULT_STT_CHOICE, loadSttChoice, sonioxModelConfig, sttChoiceKey, type SttChoice } from "../../lib/sttModel";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
 import ReadAloud from "../../components/ReadAloud";
@@ -39,8 +39,8 @@ import ReadAloud from "../../components/ReadAloud";
 /* === Soniox定数 === */
 const SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"; // 公式
 let SONIOX_MODEL = "stt-rt-v4"; // Lambda が配る値（stt_model）。設定画面の選択で上書きされ得る
-/** 設定画面「音声認識」のモデル選択（app/lib/sttModel.ts）。チャット画面を開くたびに読み直す */
-let sttModelChoice: SttModelChoice = "default";
+/** 設定画面「音声認識」のモデルと話し終わりの待ち（app/lib/sttModel.ts）。チャット画面を開くたびに読み直す */
+let sttChoice: SttChoice = DEFAULT_STT_CHOICE;
 const SONIOX_SAMPLE_RATE = 16000;
 const SONIOX_CHANNELS = 1;
 
@@ -199,7 +199,7 @@ export default function Chat() {
       (async () => {
         const saved = await AsyncStorage.getItem("sttMode");
         if (saved === "local" || saved === "soniox") setSttMode(saved);
-        sttModelChoice = await loadSttModelChoice();
+        sttChoice = await loadSttChoice();
         const bcSaved = await AsyncStorage.getItem("backchannelEnabled");
         const enabled = bcSaved !== "false";
         setBackchannelEnabled(enabled);
@@ -552,7 +552,7 @@ export default function Chat() {
   const sonioxWsRef = useRef<WebSocket | null>(null);
   const sonioxListeningRef = useRef(false);
   const preconnectedWsRef = useRef<WebSocket | null>(null);
-  const preconnectedChoiceRef = useRef<SttModelChoice>("default"); // 先行接続を開いた時のモデル選択
+  const preconnectedChoiceRef = useRef(""); // 先行接続を開いた時の選択（sttChoiceKey）
   const sonioxFinalBufRef = useRef<string>(""); // final確定の蓄積
   const sonioxNonFinalBufRef = useRef<string>(""); // 非確定の表示用
 
@@ -581,8 +581,8 @@ export default function Chat() {
     const ws = new WebSocket(SONIOX_WS_URL);
     ws.binaryType = "arraybuffer";
     preconnectedWsRef.current = ws;
-    const choice = sttModelChoice;
-    preconnectedChoiceRef.current = choice; // 選択が変わったら startSonioxSTT はこの接続を使わない
+    const choice = sttChoice;
+    preconnectedChoiceRef.current = sttChoiceKey(choice); // 選択が変わったら startSonioxSTT はこの接続を使わない
 
     ws.onopen = async () => {
       console.log("⏱️ preconnect: WebSocket OPEN, sending config");
@@ -653,16 +653,16 @@ export default function Chat() {
     let endLogged = false;
     const SPEECH_RMS = 400;
     // 先行接続は選択が同じときだけ使うので、どちらの経路でもこの選択で繋がる
-    const modelLabel = `${sonioxModelConfig(sttModelChoice, SONIOX_MODEL).model}/${sttModelChoice}`;
+    const modelLabel = `${sonioxModelConfig(sttChoice, SONIOX_MODEL).model}/${sttChoiceKey(sttChoice)}`;
 
     // 先行接続済みWSがあれば再利用
     const preWs = preconnectedWsRef.current;
-    const choiceChanged = !!preWs && preconnectedChoiceRef.current !== sttModelChoice;
+    const choiceChanged = !!preWs && preconnectedChoiceRef.current !== sttChoiceKey(sttChoice);
     const usePreconnected = preWs && preWs.readyState === WebSocket.OPEN && !choiceChanged;
     if (usePreconnected) {
       console.log(`⏱️ STT [${Date.now() - sttT0}ms] using preconnected WebSocket`);
     } else {
-      console.log(`⏱️ STT [${Date.now() - sttT0}ms] creating new WebSocket${choiceChanged ? " (stt model choice changed)" : ""}`);
+      console.log(`⏱️ STT [${Date.now() - sttT0}ms] creating new WebSocket${choiceChanged ? " (stt choice changed)" : ""}`);
       if (preWs) try { preWs.close(); } catch {}
     }
     preconnectedWsRef.current = null;
@@ -757,7 +757,7 @@ export default function Chat() {
         }
         const cfg = {
           api_key: apiKey,
-          ...sonioxModelConfig(sttModelChoice, SONIOX_MODEL),
+          ...sonioxModelConfig(sttChoice, SONIOX_MODEL),
           audio_format: "pcm_s16le",
           sample_rate: SONIOX_SAMPLE_RATE,
           num_channels: SONIOX_CHANNELS,
