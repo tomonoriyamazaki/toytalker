@@ -30,6 +30,7 @@
     - 必ず --tunnel 付きで起動する。tunnel なしだと URL が 192.168.x.x の LAN アドレスになり、自宅Wi-Fi以外から繋がらない。tunnel だと Expo 管理の *.exp.direct の公開URLになるので、キャリア回線や出先からも同じ dev client で繋がる（PCはスリープ無効のまま起動しっぱなしにする）
     - tunnel の URL はプロジェクトの場所と Expo アカウント名から決まるので、expo start を再起動しても同じ（このWindows PCでは `https://gjkw8oi-zackey-8081.exp.direct`、2026-10-31）。2回目以降は dev client の「Recently opened」から繋がり、QRの再読み込みは不要。読み直すのは dev client をビルドし直したとき（新しいアプリにURLの記憶が無い）だけ
     - ここで使う ngrok は Expo 社が用意した専用経路で、自分の ngrok アカウントや TTS 配信（Cloudflare）とは無関係
+    - **Claude が起動し、出力をファイルに残す**（2026-11-08）。アプリの `console.log`（`⏱️ STT` の計測行など）は Metro の出力にしか出ないので、VS Code のターミナルで起動するとスマホから試している間に Claude が読めない。Claude は Bash のバックグラウンド実行で `cd app && npm run start:tunnel > ../.local/metro-logs/metro-$(date +%Y%m%d-%H%M%S).log 2>&1` のように起動し、ログは最新のファイルを読む（`.local/` は Git の対象外）。すでに別の Metro が 8081 で動いていたら、止めてよいか利用者に聞いてから止める。worktree から試すときは、その worktree の `app/` で起動し、ポートを変える（例 `--port 8082`）
 - 実機検証2       ：実質不要。PC側でサービス起動（expo start）しなくてもアプリ検証できる。でもjsコードを修正したら毎回buildしないといけないのでほぼ使わない。ここで検証せずにtestflightへ登録でok
   - eas build --platform ios --profile preview    ：ビルド。10分以上かかる。QRコードが発行されるので、ダウンロードすれば利用可能
 - TestFlight    ：iOSアプリとして登録する前段階の検証サイト。ここにアップしたら、URLが発行できるようになる。これも初回手続きが面倒
