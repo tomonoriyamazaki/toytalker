@@ -24,6 +24,7 @@ import { apiFetch } from "../../lib/api";
 import { signOut, useAuthSession } from "../../lib/auth";
 import { LoginButtons } from "../../components/LoginButtons";
 import AudioRecord from "react-native-audio-record";
+import { acquireMic, releaseMic } from "../../lib/micOwner";
 import { Audio } from "expo-av";
 import * as DocumentPicker from "expo-document-picker";
 import * as FileSystem from "expo-file-system";
@@ -394,6 +395,8 @@ export default function Settings() {
         if (status !== "granted") { Alert.alert("エラー", "マイクの権限が必要です"); return; }
       }
 
+      // マイクの持ち主になる。会話画面が録音中（発話待ち）なら、そちらを止めてから始める（録音器は1つしかない。lib/micOwner.ts）
+      await acquireMic("custom-voice", () => stopCvRecordingRef.current());
       await Audio.setAudioModeAsync({ allowsRecordingIOS: true, playsInSilentModeIOS: true });
 
       const wavFile = "custom_voice_recording.wav";
@@ -422,6 +425,7 @@ export default function Settings() {
       const filePath = await AudioRecord.stop();
       cvWavPathRef.current = filePath;
     } catch {}
+    releaseMic("custom-voice");
     setCvRecording(false);
     await Audio.setAudioModeAsync({ allowsRecordingIOS: false });
   };

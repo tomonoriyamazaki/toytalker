@@ -34,6 +34,7 @@ import { API_BASE_URL, apiFetch, requestHeaders } from "../../lib/api";
 import { DEFAULT_STT_CHOICE, loadSttChoice, rememberSttOptions, sonioxModelConfig, sttChoiceKey, sttGraceMs, type SttChoice } from "../../lib/sttModel";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
+import { acquireMic, releaseMic, micOwner } from "../../lib/micOwner";
 import ReadAloud from "../../components/ReadAloud";
 
 /* === Soniox定数 === */
@@ -580,6 +581,7 @@ export default function Chat() {
   /* === Soniox: リアルタイムWS === */
   const sonioxWsRef = useRef<WebSocket | null>(null);
   const sonioxListeningRef = useRef(false);
+  const micDataSubRef = useRef<{ remove: () => void } | null>(null); // AudioRecord.on("data") の購読。止めるときに外す
   const preconnectedWsRef = useRef<WebSocket | null>(null);
   const preconnectedChoiceRef = useRef(""); // 先行接続を開いた時の選択（sttChoiceKey）
   const sonioxFinalBufRef = useRef<string>(""); // final確定の蓄積
@@ -750,11 +752,34 @@ export default function Chat() {
     const audioBuffer: Uint8Array[] = [];
     let wsReady = usePreconnected;
 
+    // 別の画面（ボイス登録）がマイクを取ったときに呼ばれる。録音・再生・WSを止め、途中の文章は送らない。
+    // 勝手には再開しない（会話画面でもう一度ボタンを押してもらう）
+    let preempted = false;
+    const onMicPreempted = async () => {
+      preempted = true;
+      console.log("[MIC] chat preempted");
+      sonioxListeningRef.current = false;
+      sonioxFinalBufRef.current = ""; sonioxNonFinalBufRef.current = "";
+      try { micDataSubRef.current?.remove(); } catch {}
+      micDataSubRef.current = null;
+      try { await AudioRecord.stop(); } catch {}
+      stopPlayback();
+      try { preconnectedWsRef.current?.close(); } catch {}
+      preconnectedWsRef.current = null;
+      try { ws.close(); } catch {}
+      setIsListening(false);
+      setPartial("");
+    };
+
     // 録音開始処理（WS接続前でも呼べる — バッファリングする）
     const beginRecording = async () => {
+      // マイクの持ち主になる。ボイス登録の録音中なら、そちらを止めてから（止めると iOS の音声モードが再生用に戻るので取り直す）
+      if (await acquireMic("chat", onMicPreempted)) await setIOSRecordingMode();
+      if (!guard()) return;
       console.log(`⏱️ STT [${Date.now() - sttT0}ms] configuring AudioRecord`);
       configureAudioRecord();
-      AudioRecord.on("data", (b64: string) => {
+      // 型定義は void だが、実体は NativeEventEmitter の購読（remove() で外せる）
+      micDataSubRef.current = AudioRecord.on("data", (b64: string) => {
         if (!guard()) return;
         if (!sonioxListeningRef.current) return;
 
@@ -781,7 +806,7 @@ export default function Chat() {
         } catch (e: any) {
           setLog(L => [...L, `Soniox send err: ${e?.message ?? String(e)}`]);
         }
-      });
+      }) as unknown as { remove: () => void };
 
       try {
         console.log(`⏱️ STT [${Date.now() - sttT0}ms] AudioRecord.start()`);
@@ -980,9 +1005,13 @@ export default function Chat() {
         // ケース1（fetchがまだ返ってない）はfetch完了時にsttFinishedRefを見て即再生
       }
 
-      // 録音停止 + 再生モードに切り替え（send後に非同期で実行）
+      // 録音停止 + 再生モードに切り替え（send後に非同期で実行）。
+      // 別の画面にマイクを取られて閉じたときは、そちらが録音中なので触らない（止めるのも音声モードを戻すのも済んでいる）
+      if (preempted) return;
+      try { micDataSubRef.current?.remove(); } catch {}
+      micDataSubRef.current = null;
       try { await AudioRecord.stop(); } catch {}
-      try { AudioRecord.removeAllListeners?.(); } catch {}
+      releaseMic("chat");
       await restoreIOSPlayback();
     };
   };
@@ -994,6 +1023,32 @@ export default function Chat() {
   };
 
 
+  // 再生中なら止めてキューを捨てる（文字は出す）
+  const stopPlayback = () => {
+    if (!playingRef.current) return;
+    currentSoundRef.current?.stop();
+    currentSoundRef.current?.release();
+    currentSoundRef.current = null;
+    for (const item of queueRef.current) showQueued(item, 0);
+    queueRef.current = [];
+    playingRef.current = false;
+  };
+
+  // iOS録音カテゴリ
+  const setIOSRecordingMode = async () => {
+    if (Platform.OS !== "ios") return;
+    try {
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      });
+    } catch (e: any) {
+      setLog(L => [...L, `Audio.setAudioModeAsync error: ${String(e)}`]);
+    }
+  };
+
   // STT開始/停止トグル
   const startSTT = async () => {
     if(DEBUG)setLog(L => [...L, "=== startSTT CALLED ==="]);
@@ -1003,28 +1058,10 @@ export default function Chat() {
     if (isListening) return;
 
     // 再生中なら強制停止してキューをリセット
-    if (playingRef.current) {
-      currentSoundRef.current?.stop();
-      currentSoundRef.current?.release();
-      currentSoundRef.current = null;
-      for (const item of queueRef.current) showQueued(item, 0);
-      queueRef.current = [];
-      playingRef.current = false;
-    }
+    stopPlayback();
 
     // iOS録音カテゴリ
-    if (Platform.OS === "ios") {
-      try {
-        await Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: false,
-          interruptionModeIOS: InterruptionModeIOS.DoNotMix,
-        });
-      } catch (e: any) {
-        setLog(L => [...L, `Audio.setAudioModeAsync error: ${String(e)}`]); // ★追加
-      }
-    }
+    await setIOSRecordingMode();
 
     if (sttMode === "soniox") {
       // 体感フィードバック
@@ -1232,6 +1269,12 @@ export default function Chat() {
           if (textSentRef.current) {
             console.log("⏸️ text sent, skip auto-restart STT");
             textSentRef.current = false;
+            return;
+          }
+          // 別の画面（ボイス登録）が録音中なら取りに行かない
+          const owner = micOwner();
+          if (owner && owner !== "chat") {
+            console.log(`⏸️ mic in use by ${owner}, skip auto-restart STT`);
             return;
           }
 

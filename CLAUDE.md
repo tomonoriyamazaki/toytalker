@@ -59,6 +59,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - 話題が変わる区切りや、コンテキストが膨らんだら、新しいセッションでの再開を提案する。「引き継ぎmd書いて」と言われたら、状況・決定事項・残タスクを該当領域の入口文書へまとめる（新しい引き継ぎ文書は作らない）。
 - 破壊的・不可逆な操作（DynamoDBの削除/更新、Lambda削除、`Remove-Item`、`git reset --hard` 等）のパーミッションは `ask` のままにし、`allow` へ移す提案はしない。
 - アプリの開発サーバー（dev client 用 Metro）は `cd app && npm run start:tunnel` で起動する（LAN起動は出先から繋がらない）。**Claude がバックグラウンドで起動し、出力を `.local/metro-logs/` のファイルに残す**（利用者がスマホから試している間もアプリのログを Claude が読めるように）。詳細は [app/README](app/README.md) の「実機検証1」。
+- **worktree で Metro を起動するなら、先にその worktree の `app` で `npm ci` を実行する**（node_modules を本体へのジャンクションにすると、Expo Router が本体側を基準に画面を探して「Welcome to Expo」になる）。ポートは worktree ごとに変え（`--port 8083` など）、端末の dev client には「Enter URL manually」でそのトンネル URL を入れる。どの Metro に繋いでいるかは `127.0.0.1:4040` 以降の ngrok API の接続数で分かる。
 - MacBookで開発するときは [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md) を最初に読む。Windows固有のルール（PowerShell、スクリーンショット、`tools/tts-service/`）はMacでは該当しない。
 
 ### スクリーンショットの共有
