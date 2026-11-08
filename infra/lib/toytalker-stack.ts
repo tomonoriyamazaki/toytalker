@@ -788,7 +788,7 @@ export class ToyTalkerStack extends cdk.Stack {
       "EventBridge Scheduler が月次Lambdaのバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
     ack("AwsSolutions-IAM5[Resource::<BillingWorker6FBDD3C9.Arn>:*]",
       "EventBridge Scheduler（オートチャージの5分ごと・有効期限の毎日）が課金 worker のバージョン付きARNも呼べるようCDKが付ける。関数1つに限定");
-    ack("AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:<AWS::Region>:<AWS::AccountId>:identity/*]",
+    ack(`AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:ses:${this.region}:${this.account}:identity/*]`,
       "サポートの返信の SMTP 用ユーザー。sandbox では受信者の識別子も要るため識別子全部を対象にするが、送信元は ses:FromAddress の条件で2つに限る");
     ack("AwsSolutions-IAM5[Resource::*]",
       "月次Lambdaの logs:GetQueryResults / logs:StopQuery。資源単位の指定ができない操作で、問い合わせIDを知っている自分の問い合わせしか読めない。どのロググループを読むかは logs:StartQuery の側で5本に絞っている");
