@@ -50,9 +50,32 @@ Espressif純正で信頼性高く、260MHzデュアルCPU、8 MB Flash & 2 M
 
 ## 基板設計の覚え書き
 
+版ごとにフォルダを残す（`devices/KiCad/toytalker_mini_v0.X/`。配布した版は消さない）。今の版は [CLAUDE.md](../CLAUDE.md) の「基板」の行。各版の `PARTS_LIST.md` が値とネットの正、`PINMAP.md` が GPIO の正で、「設計の状態」節に何を変えたか・残りを書く。
+
 ### 発注前チェック
 - 寸法・配置・向きの根拠は、データシートの縮尺付き実寸図（Physical Dimensions）とファイル座標の実測にする。「not to scale」の模式図で判断しない。過去にESP32-S3-MINI-1を正方形と誤認した（実寸15.4×20.5、アンテナ含む）。
-- 発注前に、3Dビューア確認、原寸紙テスト（実物部品を1:1印刷に載せる）、DRC・ERCゼロ、JLCPCBのDFMとガーバービューア確認を行う。
+- **自作したフットプリントは JLCPCB の部品ページの Footprint と必ず突き合わせる**（下の「フットプリント・記号の作り方」）。v0.3 で SPH0655 のパッドが 0.26mm ずれていたのをこれで見つけた。
+- 発注前に、3Dビューア確認、原寸紙テスト（実物部品を1:1印刷に載せる）、DRC・ERC（既知の指摘以外ゼロ）、JLCPCBのDFMとガーバービューア確認を行う。
+- JLCPCB の注文条件は v0.2 と同じにする: 2層・厚さ 1mm・緑・HASL（有鉛）・1oz・ビアはレジストカバー・最小ビア穴 0.3mm/(0.4/0.45mm)・外形公差 ±0.2mm。設計の穴は v0.3 からすべて 0.3mm 以上（0.3 未満かつビア径 0.4 以下だと追加料金の対象）。
+
+### フットプリント・記号の作り方（v0.3 で確立）
+- **優先順位**: ① 前の版の基板に埋め込まれている実績のあるフットプリント（`.kicad_pcb` の `(footprint ...)` ブロックから取れる。v0.3 の SSAJ110100 はこれ）→ ② JLCPCB（EasyEDA）のフットプリント → ③ メーカーのデータシートから自作。③ のときも ② と照合する。
+- **JLCPCB のフットプリントの取り方**: `https://easyeda.com/api/products/<LCSC番号>/components?version=6.4.19.5` を取ると JSON が返る。`result.packageDetail.dataStr.shape` の `PAD~形~x~y~幅~高~層~ネット~番号~穴半径~...` を読む。単位は 10mil（×0.254 で mm）、原点は `dataStr.head` の x・y。銅の形がおかしいことがある（SPH0655 の GND リングが幅 0.07mm の線になっていた）ので、**位置と大きさだけを信じて、銅の形は自分で描く**。
+- **データシートの読み方の罠**: 寸法線が「パッドの中心まで」か「パッドの縁まで」かを確かめる。確かめ方は、その寸法でパッドを置いたときに本体の外形からはみ出さないか（はみ出すなら縁までの寸法）。
+- **記号**: 基板に効くのはピン番号とフットプリントのパッド番号の対応だけで、絵は何でもよい。ピン番号は前の版と揃える。ON/OFF の向きなど、配線から推定した注釈は実物で確かめる。
+- **配置と配線の既存部分は動かさない**。差し替える部品の原点を前の版と同じにし、配線の先端だけを新しいパッドへ付け替えると、他の部品の DRC 結果が変わらないので差分が確かめやすい。
+- ファイルはすべてテキスト（S式）なのでスクリプトで書き換えられる。回路図は `(lib_symbols ...)` に記号が埋め込まれていて `libs/symbols/*.kicad_sym` と一致していないと ERC が `lib_symbol_mismatch` を出す（両方を同じ内容にする）。回路図の `(instances (project "名前" ...))` はプロジェクト名と一致させる。
+
+### 確かめ方（kicad-cli。KiCad 10）
+```
+"/c/Program Files/KiCad/10.0/bin/kicad-cli.exe" sch erc -o erc.txt  toytalker_mini_v0.X.kicad_sch
+"/c/Program Files/KiCad/10.0/bin/kicad-cli.exe" sch export netlist -o net.txt toytalker_mini_v0.X.kicad_sch
+"/c/Program Files/KiCad/10.0/bin/kicad-cli.exe" pcb drc --refill-zones --save-board --schematic-parity --severity-all -o drc.txt toytalker_mini_v0.X.kicad_pcb
+"/c/Program Files/KiCad/10.0/bin/kicad-cli.exe" pcb export svg --page-size-mode 2 --layers "F.Cu,F.Mask,F.Paste,F.SilkS,F.Fab,Edge.Cuts" -o front.svg toytalker_mini_v0.X.kicad_pcb
+```
+- 基板を書き換えたら DRC を `--refill-zones --save-board` 付きで回してベタを再充填し、報告は前回の報告と `diff` する（増えた指摘だけ見る）。SVG は `--page-size-mode 2` だと基板の外形が原点になり、座標は基板座標から (12, 12) を引く。
+- ERC は 0 件が基準。DRC の既知の指摘（v0.3 で 19 件）: U4（MAX98357 の BGA）のマスク橋 13、J1 の銅と端 0.48mm（2）と J1 のシルクと端（2）、U3 のライブラリ不一致（1）、U1 放熱パッドのネット衝突（2）、S2/U3 のシルク重なり（1）、MK1 のマスク円と穴（1）。回路図照合は参照記号なしの穴フットプリント 9 個と U1 のパッド 12/13 が常に出る。これ以外が出たら直す。
+- ネットの確認はネットリスト（`sch export netlist`）で、差し替えた部品のピンがどのネットに付いたかを読む。目視は SVG を PNG にして該当部分だけ切り出す（PyMuPDF）。
 
 ### 次の基板改修で行うこと
-- 録音用I2SのBCLK/WSを再生用と別ピンに割り当てる。現在は録音/再生でクロックピン（BCLK=4, WS=3）を共有しており、サンプルレートが違う（16kHz/24kHz）ため同時動作できない。分離するとソフト側はピン番号の変更だけで再生中の録音が可能になる。優先度は低め。
+- 録音用 I2S の BCLK/WS を再生用と別ピンにする件は v0.2 で分離済み（録音 48/33、再生 37/36）。v0.3 は録音が PDM になり WS 自体が無くなった。
