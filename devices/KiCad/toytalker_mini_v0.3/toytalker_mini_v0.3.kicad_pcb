@@ -12407,7 +12407,7 @@
 	)
 	(segment
 		(start 25.2625 29.322)
-		(end 24.85 29.322)
+		(end 24.4 29.322)
 		(width 0.2)
 		(layer "F.Cu")
 		(net "GND")
@@ -12614,7 +12614,7 @@
 		(uuid "7e194af6-2cd3-4e54-80b3-06b244cf7085")
 	)
 	(via
-		(at 24.85 29.322)
+		(at 24.4 29.322)
 		(size 0.5)
 		(drill 0.3)
 		(layers "F.Cu" "B.Cu")
