@@ -125,6 +125,13 @@ if [[ $NO_BUILD -eq 0 ]]; then
   echo "$BUILD_LOG" | grep -E 'Sketch uses|Global variables' || true
 fi
 [[ -f "$BIN" ]] || { echo "binary not found: $BIN" >&2; exit 1; }
+# 中身が本当にこの版かを確かめる（--no-build や別の経路で古い .bin が混ざっても止める）。
+# 本文の要求に入る `"fw":"<版>"` は文字列リテラルの連結で .bin にそのまま残る（toytalker_mini_v0.7.ino の payload）
+if ! grep -aqF "\"fw\":\"$VERSION\"" "$BIN"; then
+  echo "❌ $BIN の中身が $VERSION ではない（\"fw\":\"$VERSION\" が見つからない）。ビルドし直す" >&2
+  exit 1
+fi
+echo "🔎 binary contains \"fw\":\"$VERSION\""
 
 if command -v sha256sum >/dev/null 2>&1; then
   SHA="$(sha256sum "$BIN" | cut -d' ' -f1)"
