@@ -1,0 +1,297 @@
+(footprint "MIC_SPH0655LM4H-1"
+	(version 20241229)
+	(generator "pcbnew")
+	(generator_version "9.0")
+	(layer "F.Cu")
+	(descr "Knowles SPH0655LM4H-1 PDM MEMS microphone, bottom port, land pattern from datasheet Rev C (pads 0.725x0.522, pitch 1.675x0.822, ring 1.025/1.625, 1.513 from lower row to port)")
+	(tags "microphone mems pdm knowles")
+	(property "Reference" "REF**"
+		(at 0 2.1 0)
+		(layer "F.SilkS")
+		(uuid "0624fa69-75ce-401f-ba56-63bbfbf22454")
+		(effects
+			(font
+				(size 0.8 0.8)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Value" "MIC_SPH0655LM4H-1"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(uuid "2dc805d3-7139-47d0-8da1-1821429f7069")
+		(effects
+			(font
+				(size 0.75 0.75)
+				(thickness 0.15)
+				(bold yes)
+			)
+		)
+	)
+	(property "Datasheet" "https://www.mouser.com/catalog/specsheets/knowles_10162023_sph0655lm4h_1_cornell_ii_datasheet_2.pdf"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "a3fa5e7c-76bb-4881-b878-f6f76cbdf6dc")
+		(effects
+			(font
+				(size 0.75 0.75)
+				(thickness 0.15)
+			)
+		)
+	)
+	(property "Description" "PDM MEMS microphone, bottom port, 3.5x2.65x0.98mm, SNR 66dB(A), 1.65-3.6V (Knowles Cornell II)"
+		(at 0 0 0)
+		(layer "F.Fab")
+		(hide yes)
+		(uuid "7634fc12-fc69-4b03-8960-60f6797b6b00")
+		(effects
+			(font
+				(size 0.75 0.75)
+				(thickness 0.15)
+			)
+		)
+	)
+	(attr smd)
+	(fp_line
+		(start -1.325 -0.7)
+		(end -1.325 1.04)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "58b6d9ba-2494-4791-bdf4-6edf59351972")
+	)
+	(fp_line
+		(start -1.325 1.04)
+		(end 1.325 1.04)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "e9c6eca9-33f2-4fc3-b08b-c919f6d5f5d2")
+	)
+	(fp_line
+		(start 1.325 1.04)
+		(end 1.325 -0.7)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.SilkS")
+		(uuid "1999e036-e77e-4cac-989d-b2f45f71879e")
+	)
+	(fp_circle
+		(center -1.6 -2.4)
+		(end -1.55 -2.4)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.SilkS")
+		(uuid "948dcb87-41cd-447a-8965-ed5817c71c37")
+	)
+	(fp_line
+		(start -1.325 -2.46)
+		(end 1.325 -2.46)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "4d127063-0f04-4144-bfea-94ed156f292d")
+	)
+	(fp_line
+		(start 1.325 -2.46)
+		(end 1.325 1.04)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "88c917ee-7c41-4664-93e5-f77356882d86")
+	)
+	(fp_line
+		(start 1.325 1.04)
+		(end -1.325 1.04)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "892fece0-2a30-4a2f-a39f-397bf739182d")
+	)
+	(fp_line
+		(start -1.325 1.04)
+		(end -1.325 -2.46)
+		(stroke
+			(width 0.127)
+			(type solid)
+		)
+		(layer "F.Fab")
+		(uuid "73657618-c669-4671-a522-891c4429d035")
+	)
+	(fp_circle
+		(center -1.6 -2.4)
+		(end -1.55 -2.4)
+		(stroke
+			(width 0.1)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Fab")
+		(uuid "8e97b57a-36ac-452c-b16c-f228fd368e18")
+	)
+	(fp_line
+		(start -1.65 -2.9)
+		(end 1.65 -2.9)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "71caeb3d-567a-4af6-9dd3-24e96abcf538")
+	)
+	(fp_line
+		(start 1.65 -2.9)
+		(end 1.65 1.4)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "d4cddc62-f884-4a3f-b6e7-605ea8c788e0")
+	)
+	(fp_line
+		(start 1.65 1.4)
+		(end -1.65 1.4)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "92872fdd-6947-45c3-a0d7-fb6cf13bf49f")
+	)
+	(fp_line
+		(start -1.65 1.4)
+		(end -1.65 -2.9)
+		(stroke
+			(width 0.05)
+			(type solid)
+		)
+		(layer "F.CrtYd")
+		(uuid "e1d68a1f-f032-475f-a03f-0a49172d1661")
+	)
+	(fp_circle
+		(center 0 0)
+		(end 0.456 0)
+		(stroke
+			(width 0.912)
+			(type solid)
+		)
+		(fill no)
+		(layer "F.Mask")
+		(uuid "2690ab01-6678-4b6a-86ec-46016c836487")
+	)
+	(fp_arc
+		(start 0.6507 -0.1243)
+		(mid 0.4685 -0.4685)
+		(end 0.1243 -0.6507)
+		(stroke
+			(width 0.3)
+			(type solid)
+		)
+		(layer "F.Paste")
+		(uuid "99ee6e19-7e56-44f7-a8c2-d6c26b3f9216")
+	)
+	(fp_arc
+		(start -0.1243 -0.6507)
+		(mid -0.4685 -0.4685)
+		(end -0.6507 -0.1243)
+		(stroke
+			(width 0.3)
+			(type solid)
+		)
+		(layer "F.Paste")
+		(uuid "003e3881-712d-4d59-8bda-6e193612e1bf")
+	)
+	(fp_arc
+		(start -0.6507 0.1243)
+		(mid -0.4685 0.4685)
+		(end -0.1243 0.6507)
+		(stroke
+			(width 0.3)
+			(type solid)
+		)
+		(layer "F.Paste")
+		(uuid "43a4f6ba-b145-484b-99ae-165e4a6520b0")
+	)
+	(fp_arc
+		(start 0.1243 0.6507)
+		(mid 0.4685 0.4685)
+		(end 0.6507 0.1243)
+		(stroke
+			(width 0.3)
+			(type solid)
+		)
+		(layer "F.Paste")
+		(uuid "28bc744f-7201-43e5-8268-c4107da25cea")
+	)
+	(pad "" np_thru_hole circle
+		(at 0 0)
+		(size 0.5 0.5)
+		(drill 0.5)
+		(layers "*.Cu" "*.Mask")
+		(uuid "8620ea8f-2235-452e-91fe-38cc85bff4c9")
+	)
+	(pad "1" smd rect
+		(at -0.8375 -2.335)
+		(size 0.725 0.522)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "30e7749d-f261-4ef4-9e81-a92a111916e3")
+	)
+	(pad "2" smd rect
+		(at -0.8375 -1.513)
+		(size 0.725 0.522)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "9f1982a5-fe32-49cf-8853-c94abdea1069")
+	)
+	(pad "4" smd rect
+		(at 0.8375 -1.513)
+		(size 0.725 0.522)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "0557e7c1-2018-4916-b691-a8ebe7b9f327")
+	)
+	(pad "5" smd rect
+		(at 0.8375 -2.335)
+		(size 0.725 0.522)
+		(layers "F.Cu" "F.Mask" "F.Paste")
+		(solder_mask_margin 0.102)
+		(uuid "e19f97db-7b6b-43dd-8ec4-f33f131fe841")
+	)
+	(pad "3" smd custom
+		(at 0.6625 0)
+		(size 0.1 0.1)
+		(layers "F.Cu")
+		(options
+			(clearance outline)
+			(anchor rect)
+		)
+		(primitives
+			(gr_circle
+				(center -0.6625 0)
+				(end 0 0)
+				(width 0.3)
+				(fill no)
+			)
+		)
+		(uuid "07a68552-ddec-4082-98a8-25c04f395adb")
+	)
+	(embedded_fonts no)
+)
