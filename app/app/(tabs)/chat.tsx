@@ -182,6 +182,16 @@ export default function Chat() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const scrollRef = useRef<ScrollView>(null);
   const [showScrollButton, setShowScrollButton] = useState(false);
+  // 一番下に付いていくか。返答の文字が出て行が増えるたびに下へ送る。指で上へスクロールしたら外れ、下まで戻すか ↓ を押すか話すと戻る
+  const stickToBottomRef = useRef(true);
+  const draggingRef = useRef(false);
+  const STICK_PX = 40;
+  // 付いていくかを変える。↓ ボタンは付いていないときだけ出す（描き直しは切り替わったときだけ）
+  const setStick = (v: boolean) => {
+    if (stickToBottomRef.current === v) return;
+    stickToBottomRef.current = v;
+    setShowScrollButton(!v);
+  };
 
   // セッション管理とウォッチドッグ
   const sonioxSessionRef = useRef(0);  // 起動ごとに +1
@@ -399,6 +409,11 @@ export default function Chat() {
   const lastSentRef = useRef<string>("");
   const autoSendTimerRef = useRef<NodeJS.Timeout | null>(null);
   const sendingRef = useRef(false);
+  const micStopRef = useRef<Promise<void> | null>(null); // 録音停止（AudioRecord.stop）の完了。再生はこれを待ってからカテゴリを切り替える
+  // 録音器が動いているか。会話中はターンの区切りでも止めない（YouTube と同じく音声を止めずに続ける。ロードマップ26）。
+  // iOS は背面のアプリが音声を止めた後に鳴らし始めることを拒むので、録音↔再生の切り替えをしない。
+  // 返答の再生中に拾った音は、data の購読を外しているので Soniox へは送られない
+  const recorderOnRef = useRef(false);
   const textSentRef = useRef(false); // テキスト送信時はSTT自動再起動をスキップ
   const sttDetectAtRef = useRef<number | null>(null);
   const lastActivityAtRef = useRef<number>(0);
@@ -406,12 +421,15 @@ export default function Chat() {
   const INACT_MS = 900;
 
 
+  // 会話を止めた後に再生用へ戻す。会話中は録音器を止めず、カテゴリも PlayAndRecord のまま（recorderOnRef のコメントと
+  // app/README の「iOS の音声セッション」）。staysActiveInBackground は true にしないと、expo-av は背面でここの設定を当てず、
+  // 前面に戻った瞬間に古い設定を当て直す。
   const restoreIOSPlayback = async () => {
     if (Platform.OS !== "ios") return;
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false, // マイク完全に解放して再生専用
-        staysActiveInBackground: false,
+        staysActiveInBackground: true,
         playsInSilentModeIOS: true,
         interruptionModeIOS: InterruptionModeIOS.DoNotMix,
         interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
@@ -540,7 +558,7 @@ export default function Chat() {
 
     if (!isListening) {
       setLog(L => [...L, JSON.stringify({ type: "user", text: t })]);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+      if (stickToBottomRef.current) setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
 
       if (t !== lastSentRef.current && !sendingRef.current) {
         lastSentRef.current = t;
@@ -603,6 +621,26 @@ export default function Chat() {
       wavFile: "", // 生PCMでon('data')を受ける
     });
   };
+
+  // 録音器を動かす（動いていれば何もしない）。ネイティブ側は start が2回来ると録音キューを2本作るので必ずここを通す
+  const ensureRecorder = async () => {
+    if (recorderOnRef.current) return false;
+    configureAudioRecord();
+    await AudioRecord.start();
+    recorderOnRef.current = true;
+    return true;
+  };
+
+  // 会話そのものを止めるときだけ録音器を止める（ターンの区切りでは止めない）
+  const stopRecorder = () => {
+    try { micDataSubRef.current?.remove(); } catch {}
+    micDataSubRef.current = null;
+    if (!recorderOnRef.current) return;
+    recorderOnRef.current = false;
+    micStopRef.current = AudioRecord.stop().then(() => {}, () => {});
+  };
+  // 画面が消えるときは録音器を止める（会話中ずっと動かすので、置き去りにしない）
+  useEffect(() => () => { stopRecorder(); releaseMic("chat"); }, []);
 
   // Soniox WS先行接続（再生中に呼ぶ）
   const preconnectSonioxWs = async () => {
@@ -696,6 +734,10 @@ export default function Chat() {
     // 声が物音だっただけなら次の <end> が来ないので、RESUME_MAX_MS 新しい文字が無ければ送る。
     const graceMs = sttGraceMs(sttChoice, SONIOX_MODEL);
     const RESUME_MAX_MS = 3000;
+    // 猶予中の音は、基準を超えた状態がこの長さ続いたときだけ「話の続き」とみなす（一瞬の物音で 3 秒待たない。2026-11-08）
+    const RESUME_MIN_LOUD_MS = 200;
+    let loudRunMs = 0; // 基準を超えた音が続いている長さ
+    let loudRunPeak = 0; // その間の最大音量
     let firstEndAt = 0;
     let graceTimer: ReturnType<typeof setTimeout> | null = null;
     let resumeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -717,13 +759,13 @@ export default function Chat() {
       if (!firstEndAt) firstEndAt = Date.now();
       if (graceMs <= 0) { finishUtterance("no grace"); return; }
       if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null; }
-      if (!graceTimer) graceTimer = setTimeout(() => finishUtterance("quiet"), graceMs);
+      if (!graceTimer) { graceTimer = setTimeout(() => finishUtterance("quiet"), graceMs); loudRunMs = 0; loudRunPeak = 0; } // 終端の後の音だけを数える
     };
     const onSpeechDuringGrace = () => {
       if (!graceTimer) return;
       clearTimeout(graceTimer); graceTimer = null;
       resumes++;
-      console.log(`⏱️ STT grace: speech resumed (+${Date.now() - firstEndAt}ms after first end)`);
+      console.log(`⏱️ STT grace: speech resumed (+${Date.now() - firstEndAt}ms after first end, loud=${Math.round(loudRunMs)}ms, peak_rms=${loudRunPeak})`);
       resumeTimer = setTimeout(() => finishUtterance("no new text"), RESUME_MAX_MS);
     };
 
@@ -765,9 +807,8 @@ export default function Chat() {
       console.log("[MIC] chat preempted");
       sonioxListeningRef.current = false;
       sonioxFinalBufRef.current = ""; sonioxNonFinalBufRef.current = "";
-      try { micDataSubRef.current?.remove(); } catch {}
-      micDataSubRef.current = null;
-      try { await AudioRecord.stop(); } catch {}
+      stopRecorder();
+      await micStopRef.current;
       stopPlayback();
       try { preconnectedWsRef.current?.close(); } catch {}
       preconnectedWsRef.current = null;
@@ -781,8 +822,6 @@ export default function Chat() {
       // マイクの持ち主になる。ボイス登録の録音中なら、そちらを止めてから（止めると iOS の音声モードが再生用に戻るので取り直す）
       if (await acquireMic("chat", onMicPreempted)) await setIOSRecordingMode();
       if (!guard()) return;
-      console.log(`⏱️ STT [${Date.now() - sttT0}ms] configuring AudioRecord`);
-      configureAudioRecord();
       // 型定義は void だが、実体は NativeEventEmitter の購読（remove() で外せる）
       micDataSubRef.current = AudioRecord.on("data", (b64: string) => {
         if (!guard()) return;
@@ -795,10 +834,20 @@ export default function Chat() {
             const v = new Int16Array(ab, 0, Math.floor(ab.byteLength / 2));
             let sum = 0;
             for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
-            if (Math.sqrt(sum / v.length) >= SPEECH_RMS) {
+            const rms = Math.round(Math.sqrt(sum / v.length));
+            const chunkMs = (v.length / (SONIOX_SAMPLE_RATE * SONIOX_CHANNELS)) * 1000;
+            if (rms >= SPEECH_RMS) {
               lastSpeechAt = Date.now();
               if (!speechAt) speechAt = lastSpeechAt;
-              onSpeechDuringGrace();
+              loudRunMs += chunkMs;
+              if (rms > loudRunPeak) loudRunPeak = rms;
+              if (loudRunMs >= RESUME_MIN_LOUD_MS) onSpeechDuringGrace();
+            } else {
+              // 猶予中に短い物音だけで終わったときは、続きとみなさなかったことを残す（音量の切り分け用）
+              if (graceTimer && loudRunMs > 0) {
+                console.log(`⏱️ STT grace: short noise ignored (+${Date.now() - firstEndAt}ms after first end, loud=${Math.round(loudRunMs)}ms, peak_rms=${loudRunPeak})`);
+              }
+              loudRunMs = 0; loudRunPeak = 0;
             }
           }
           if (wsReady && ws.readyState === 1) {
@@ -814,9 +863,8 @@ export default function Chat() {
       }) as unknown as { remove: () => void };
 
       try {
-        console.log(`⏱️ STT [${Date.now() - sttT0}ms] AudioRecord.start()`);
-        await AudioRecord.start();
-        console.log(`⏱️ STT [${Date.now() - sttT0}ms] AudioRecord started OK`);
+        const started = await ensureRecorder();
+        console.log(`⏱️ STT [${Date.now() - sttT0}ms] ${started ? "AudioRecord started" : "AudioRecord already running"}`);
         sonioxListeningRef.current = true;
         setIsListening(true);
         setPartial(""); setFinalText("");
@@ -828,6 +876,7 @@ export default function Chat() {
       } catch (e: any) {
         setIsListening(false);
         setLog(L => [...L, `AudioRecord.start failed: ${e?.message ?? e}`]);
+        stopRecorder();
         try { ws.close(); } catch {}
         sonioxListeningRef.current = false;
         setIsListening(false);
@@ -984,6 +1033,8 @@ export default function Chat() {
 
     // ws.closeが実行されたとき or サーバー側から想定外にWebSocket通信を切断された時に自動実行される
     ws.onclose = async (e) => {
+      // 新しい開始が旧WSを閉じたときの close は、新しいセッションの状態（録音中の印・録音器）に触らない
+      if (!guard()) { if(DEBUG)setLog(L => [...L, `Soniox WS closed (stale): code=${e.code}`]); return; }
       if(DEBUG)setLog(L => [...L, `Soniox WS closed: code=${e.code}`]);
       clearGraceTimers();
 
@@ -996,8 +1047,17 @@ export default function Chat() {
       if (fullText) {
         setLog(L => [...L, JSON.stringify({ type: "user", text: fullText })]);
         setPartial("");
+      }
 
-        // 本Lambdaへの送信を最優先（録音停止を待たない）
+      // ターンの区切り: 録音器は止めず、音を Soniox へ流すのだけやめる（会話を止めるのは stopSTT と preempt）。
+      // 別の画面にマイクを取られて閉じたときは、そちらが録音中なので触らない
+      if (!preempted) {
+        try { micDataSubRef.current?.remove(); } catch {}
+        micDataSubRef.current = null;
+      }
+
+      if (fullText) {
+        // 本Lambdaへの送信を最優先（録音停止の完了を待たない）
         send(fullText);
 
         // 相槌音声があれば再生（ケース2: fetch完了済み）
@@ -1010,12 +1070,9 @@ export default function Chat() {
         // ケース1（fetchがまだ返ってない）はfetch完了時にsttFinishedRefを見て即再生
       }
 
-      // 録音停止 + 再生モードに切り替え（send後に非同期で実行）。
-      // 別の画面にマイクを取られて閉じたときは、そちらが録音中なので触らない（止めるのも音声モードを戻すのも済んでいる）
-      if (preempted) return;
-      try { micDataSubRef.current?.remove(); } catch {}
-      micDataSubRef.current = null;
-      try { await AudioRecord.stop(); } catch {}
+      // 会話を止めたときだけ（録音器が止まっていれば）マイクを手放して再生用に戻す
+      if (preempted || recorderOnRef.current) return;
+      await micStopRef.current;
       releaseMic("chat");
       await restoreIOSPlayback();
     };
@@ -1043,14 +1100,14 @@ export default function Chat() {
     playingRef.current = false;
   };
 
-  // iOS録音カテゴリ
+  // iOS録音カテゴリ（staysActiveInBackground の意味は restoreIOSPlayback のコメント）
   const setIOSRecordingMode = async () => {
     if (Platform.OS !== "ios") return;
     try {
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
-        staysActiveInBackground: false,
+        staysActiveInBackground: true,
         interruptionModeIOS: InterruptionModeIOS.DoNotMix,
       });
     } catch (e: any) {
@@ -1063,8 +1120,8 @@ export default function Chat() {
     if(DEBUG)setLog(L => [...L, "=== startSTT CALLED ==="]);
     if(DEBUG)setLog((L) => [...L, `sttMode=${sttMode}`]);
 
-    // 二重起動ガード（無反応の原因になりやすいので明示）
-    if (isListening) return;
+    // 二重起動ガード（無反応の原因になりやすいので明示。React の state は描画前だと古いので印も見る）
+    if (isListening || sonioxListeningRef.current || sttStartingRef.current) return;
 
     // 再生中なら強制停止してキューをリセット
     stopPlayback();
@@ -1115,6 +1172,7 @@ export default function Chat() {
 
   const stopSTT = async () => {
     if (sttMode === "soniox") {
+      stopRecorder();
       await stopSonioxSTT();
     } else {
       try {
@@ -1188,7 +1246,11 @@ export default function Chat() {
     playingRef.current = true;
     loopBeatRef.current = Date.now();
     try {
-      Sound.setCategory("Playback");
+      // 録音器が動いている間はカテゴリを触らない（PlayAndRecord のまま鳴らす）。止まっていれば再生用にする
+      if (!recorderOnRef.current) {
+        if (micStopRef.current) await micStopRef.current;
+        Sound.setCategory("Playback");
+      }
       while (queueRef.current.length) {
         const item = queueRef.current.shift()!;
         if (!item.uri) {
@@ -1278,6 +1340,7 @@ export default function Chat() {
           if (textSentRef.current) {
             console.log("⏸️ text sent, skip auto-restart STT");
             textSentRef.current = false;
+            stopRecorder();
             return;
           }
           // 別の画面（ボイス登録）が録音中なら取りに行かない
@@ -1362,7 +1425,7 @@ export default function Chat() {
     setMsg("");
     if (textArg === undefined) {
       setLog((L) => [...L, JSON.stringify({ type: "user", text: t })]);
-      setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
+      if (stickToBottomRef.current) setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 50);
       textSentRef.current = true;
       if (isListening) stopSTT();
     }
@@ -1704,9 +1767,23 @@ export default function Chat() {
         ref={scrollRef}
         style={s.chat}
         onScroll={(e) => {
+          // 付いていくかは利用者が指で動かしたときだけ決め直す（自動で下へ送っている途中の位置では外さない）
+          if (!draggingRef.current) return;
           const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
-          const distanceFromBottom = contentSize.height - contentOffset.y - layoutMeasurement.height;
-          setShowScrollButton(distanceFromBottom > 100);
+          setStick(contentSize.height - contentOffset.y - layoutMeasurement.height < STICK_PX);
+        }}
+        onScrollBeginDrag={() => { draggingRef.current = true; }}
+        onScrollEndDrag={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          setStick(contentSize.height - contentOffset.y - layoutMeasurement.height < STICK_PX);
+          draggingRef.current = false;
+        }}
+        onMomentumScrollEnd={(e) => {
+          const { contentOffset, contentSize, layoutMeasurement } = e.nativeEvent;
+          setStick(contentSize.height - contentOffset.y - layoutMeasurement.height < STICK_PX);
+        }}
+        onContentSizeChange={() => {
+          if (stickToBottomRef.current && !draggingRef.current) scrollRef.current?.scrollToEnd({ animated: true });
         }}
         scrollEventThrottle={16}
       >
@@ -1759,7 +1836,7 @@ export default function Chat() {
         {showScrollButton && (
           <TouchableOpacity
             style={s.scrollToBottomBtn}
-            onPress={() => scrollRef.current?.scrollToEnd({ animated: true })}
+            onPress={() => { setStick(true); scrollRef.current?.scrollToEnd({ animated: true }); }}
           >
             <Text style={s.scrollToBottomText}>↓</Text>
           </TouchableOpacity>

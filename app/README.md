@@ -62,6 +62,14 @@
 * 痛み止め: `chat.tsx` の playLoop に見張りを付けた。読み込みが 5 秒、再生が「長さ＋3 秒」で戻らなければ、その文の文字だけ出して次へ進む（`PLAYBACK_*`）。正常時の速度は変わらない。
 * 切り分け: 次の本文要求に前のターンの結果 `prev_turn`（受けた文数・鳴らした数・done・エラー種別・見張りの回数。文章は無い）を添え、Lambda のログに同名で載る。見方は [infra/README](../infra/README.md) の「Lambdaログの見方」。再発したら、その次の要求の `prev_turn` で通信側か再生側かが決まる。dev client で繋いでいれば Metro の `⏰ playback watchdog` / `❌ Sound load error` / `[BC] ERROR` も見る。
 
+## iOS の音声セッション（2026-11-08）
+* **会話中は録音器を止めない**（YouTube が鳴らし続けるのと同じ）。iOS は、背面のアプリが音声を止めたりカテゴリを切り替えたりした後に、鳴らし始めることを拒む。以前は毎ターン「録音を止める → 再生用に切り替える → 鳴らす」をしていたので、背面では再生が断られて止まっていた（[ロードマップ](../docs/roadmap.md) 26）。
+* 録音と再生は1つのカテゴリ `PlayAndRecord` で行う。`patches/react-native-audio-record` が録音開始時のカテゴリを `Record` から `PlayAndRecord` + `DefaultToSpeaker`（受話口でなくスピーカー）+ `AllowBluetoothA2DP` に変える。スピーカーの指定は JS の音声モード（expo-av / expo-audio）からはできない。ネイティブなので EAS 再ビルドで反映され、OTA では出ない。
+* `chat.tsx` の `ensureRecorder` / `stopRecorder` だけが録音器を動かす・止める。止めるのは会話ボタンで止めたとき、文字で送ったとき、ボイス登録にマイクを譲ったとき、画面が消えるとき。返答の再生中は data の購読を外して、拾った音を Soniox へ送らない。録音器が動いている間は `Sound.setCategory` を呼ばない。
+* 会話中はマイクのオレンジの点が付いたまま。誰も話さないときに止めるかはロードマップ24。
+* 終端の猶予（0.6秒）の間の音は、基準を超えた状態が 0.2 秒続いたときだけ話の続きとみなす（`RESUME_MIN_LOUD_MS`）。PlayAndRecord にしてから物音で 3 秒待つことが増えたため。Metro に `speech resumed` / `short noise ignored` と音量が出る。
+* 背面の確認: 会話中にホームへ戻る、または画面を消して話しかけ、相槌と本文が鳴り、次の聞き取りが始まること（2026-11-08 に dev client で確認）。Metro に `⏰ playback watchdog` が出ないこと。
+
 ## 改善
 * 話している内容を保持する　→　OK
 * 時間計測できるようにした（DEGUB_TIMEでon/off）　→　OK

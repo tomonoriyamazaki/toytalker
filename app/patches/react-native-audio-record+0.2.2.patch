@@ -1,23 +1,24 @@
 diff --git a/node_modules/react-native-audio-record/ios/RNAudioRecord.m b/node_modules/react-native-audio-record/ios/RNAudioRecord.m
-index 7304653..ad24a67 100644
+index 7304653..9368890 100644
 --- a/node_modules/react-native-audio-record/ios/RNAudioRecord.m
 +++ b/node_modules/react-native-audio-record/ios/RNAudioRecord.m
-@@ -56,6 +56,18 @@ RCT_EXPORT_METHOD(stop:(RCTPromiseResolveBlock)resolve
-         AudioQueueDispose(_recordState.mQueue, true);
-         AudioFileClose(_recordState.mAudioFile);
-     }
-+
-+    // ★ AVAudioSession を非アクティブに戻す処理を追加
-+    NSError *error = nil;
-+    [[AVAudioSession sharedInstance] setActive:NO
-+                                   withOptions:AVAudioSessionSetActiveOptionNotifyOthersOnDeactivation
-+                                         error:&error];
-+    if (error) {
-+        RCTLogInfo(@"Error deactivating AVAudioSession: %@", error);
-+    } else {
-+        RCTLogInfo(@"AVAudioSession deactivated");
-+    }
-+
-     resolve(_filePath);
-     unsigned long long fileSize = [[[NSFileManager defaultManager] attributesOfItemAtPath:_filePath error:nil] fileSize];
-     RCTLogInfo(@"file path %@", _filePath);
+@@ -28,9 +28,16 @@ RCT_EXPORT_METHOD(init:(NSDictionary *) options) {
+ RCT_EXPORT_METHOD(start) {
+     RCTLogInfo(@"start");
+ 
+-    // most audio players set session category to "Playback", record won't work in this mode
+-    // therefore set session category to "Record" before recording
+-    [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryRecord error:nil];
++    // ToyTalker: 録音と再生を1つのカテゴリ（PlayAndRecord）で行い、会話中はカテゴリを切り替えない。
++    // iOS は背面のアプリがカテゴリを切り替えて再生を始め直すことを拒むため（ロードマップ26）。
++    // DefaultToSpeaker で受話口ではなくスピーカーから鳴らし、A2DP でBluetoothイヤホンの音質を保つ。
++    AVAudioSession *session = [AVAudioSession sharedInstance];
++    NSError *categoryError = nil;
++    [session setCategory:AVAudioSessionCategoryPlayAndRecord
++             withOptions:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetoothA2DP
++                   error:&categoryError];
++    if (categoryError) RCTLogInfo(@"setCategory PlayAndRecord failed: %@", categoryError);
++    [session setActive:YES error:nil];
+ 
+     _recordState.mIsRunning = true;
+     _recordState.mCurrentPacket = 0;
