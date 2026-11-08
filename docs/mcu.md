@@ -75,6 +75,11 @@ Espressif純正で信頼性高く、260MHzデュアルCPU、8 MB Flash & 2 M
 ```
 - 基板を書き換えたら DRC を `--refill-zones --save-board` 付きで回してベタを再充填し、報告は前回の報告と `diff` する（増えた指摘だけ見る）。SVG は `--page-size-mode 2` だと基板の外形が原点になり、座標は基板座標から (12, 12) を引く。
 - ERC は 0 件が基準。DRC の既知の指摘（v0.3 で 19 件）: U4（MAX98357 の BGA）のマスク橋 13、J1 の銅と端 0.48mm（2）と J1 のシルクと端（2）、U3 のライブラリ不一致（1）、U1 放熱パッドのネット衝突（2）、S2/U3 のシルク重なり（1）、MK1 のマスク円と穴（1）。回路図照合は参照記号なしの穴フットプリント 9 個と U1 のパッド 12/13 が常に出る。これ以外が出たら直す。
+- **製造ファイル（ガーバー zip・bom.csv・positions.csv）**は Fabrication Toolkit（KiCad のプラグイン。GUI の代わりに CLI でも出せる）で `production/` へ。v0.2・v0.3 とも自動回転補正あり・ベタ再充填ありで出した。zip は `.gitignore` の `*.zip` で git に入らないので発注前に出し直す。
+```
+cd "C:/Users/exodj/Documents/KiCad/10.0/3rdparty/plugins" && "/c/Program Files/KiCad/10.0/bin/python.exe" -m "com_github_bennymeg_JLC-Plugin-for-KiCad.cli" --path "<基板の .kicad_pcb の絶対パス>" -t -f -nI -nB
+```
+  出したら前の版の bom.csv・positions.csv と `diff` して、変えた部品の行だけが違うことを確かめる。positions.csv の角度は KiCad の角度そのまま（v0.1 の SSAJ110100 は 270° で正しく実装された）。JLCPCB 側の部品の向きは注文後の「実装前配置確認」で見る。
 - ネットの確認はネットリスト（`sch export netlist`）で、差し替えた部品のピンがどのネットに付いたかを読む。目視は SVG を PNG にして該当部分だけ切り出す（PyMuPDF）。
 
 ### 次の基板改修で行うこと
