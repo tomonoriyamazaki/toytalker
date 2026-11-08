@@ -80,7 +80,10 @@ Espressif純正で信頼性高く、260MHzデュアルCPU、8 MB Flash & 2 M
 cd "C:/Users/exodj/Documents/KiCad/10.0/3rdparty/plugins" && "/c/Program Files/KiCad/10.0/bin/python.exe" -m "com_github_bennymeg_JLC-Plugin-for-KiCad.cli" --path "<基板の .kicad_pcb の絶対パス>" -t -f -nI -nB
 ```
   部品番号は回路図の各部品の **`LCSC Part` 項目**から BOM に入る（v0.3 で全部品に入れた。回路図で部品を変えたらこの項目も直し、「回路図から基板を更新」で基板側にも写す）。
-  出したら前の版の bom.csv・positions.csv と `diff` して、変えた部品の行だけが違うことを確かめる。positions.csv の角度は KiCad の角度そのまま（v0.1 の SSAJ110100 は 270° で正しく実装された）。JLCPCB 側の部品の向きは注文後の「実装前配置確認」で見る。
+  出したら前の版の bom.csv・positions.csv と `diff` して、変えた部品の行だけが違うことを確かめる。
+- **JLCPCB の配置プレビューで部品がずれる・向きが違う問題の根治（v0.3 で実施）**: JLCPCB は CPL の座標を「EasyEDA フットプリントの原点」、角度を「EasyEDA フットプリントの向きからの回転」と解釈する。うちの KiCad フットプリントは原点（アンカー）や 0° の向きが EasyEDA と違う部品があり、そのままだとプレビューでずれる（ピンクの丸＝JLC モデルの 1 番ピン、白い丸＝基板の 1 番ピンが合わない）。対策は部品ごとに **`FT Position Offset`（x,y。部品ローカル座標で y は上が正）と `FT Rotation Offset`（度）** を回路図の部品と基板のフットプリントに入れること。Fabrication Toolkit がこれを読んで positions.csv に反映する。v0.3 で入れた値: J1 "0,2.324"、MK1 "0,0.706"、S1 "0,0.603"、U3 "0,-2.525"、U1 回転 270、U2 回転 180、U4 回転 180。
+  値の求め方: EasyEDA の API（`https://easyeda.com/api/products/<LCSC>/components?version=6.4.19.5`）からパッド座標を取り、うちのパッド座標と重ね合わせて「EasyEDA 原点がうちのローカル座標のどこか」と「何度回すと一致するか」を出す（同名パッドの位置で向きを決める）。部品やフットプリントを変えたら、その部品だけ求め直す。
+  v0.2 までは JLC のエンジニアが手で直していた（U2 は毎回向きが違い、注文画面で手直ししていた）。
 - ネットの確認はネットリスト（`sch export netlist`）で、差し替えた部品のピンがどのネットに付いたかを読む。目視は SVG を PNG にして該当部分だけ切り出す（PyMuPDF）。
 
 ### 次の基板改修で行うこと

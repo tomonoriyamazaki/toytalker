@@ -7981,6 +7981,17 @@
 				)
 			)
 		)
+		(property "FT Rotation Offset" "180"
+			(at 226.06 25.4 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "2"
 			(uuid "c3654818-79d9-4e7f-a82a-c7914ac18c7e")
 		)
@@ -9833,6 +9844,17 @@
 				)
 			)
 		)
+		(property "FT Position Offset" "0,0.603"
+			(at 193.04 26.67 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "1"
 			(uuid "662fc079-d38f-4e51-80b2-3f26d1876e15")
 		)
@@ -9929,6 +9951,17 @@
 		)
 		(property "LCSC Part" "C22376158"
 			(at 68.58 99.06 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "FT Position Offset" "0,0.706"
+			(at 68.58 86.36 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -10208,6 +10241,17 @@
 		)
 		(property "PURCHASE-URL" ""
 			(at 60.96 34.29 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "FT Position Offset" "0,2.324"
+			(at 60.96 16.51 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -11447,6 +11491,17 @@
 		)
 		(property "PURCHASE-URL" ""
 			(at 138.43 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "FT Position Offset" "0,-2.525"
+			(at 138.43 83.82 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
@@ -12696,6 +12751,17 @@
 				)
 			)
 		)
+		(property "FT Rotation Offset" "180"
+			(at 207.01 90.17 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "A2"
 			(uuid "cccf813d-c335-4896-a88e-4754c1260425")
 		)
@@ -13360,6 +13426,17 @@
 		)
 		(property "PURCHASE-URL" ""
 			(at 138.43 35.56 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "FT Rotation Offset" "270"
+			(at 138.43 15.24 0)
 			(hide yes)
 			(show_name no)
 			(do_not_autoplace no)
