@@ -743,10 +743,10 @@ export class ToyTalkerStack extends cdk.Stack {
    * - ドメインの検証は Easy DKIM（CNAME 3本を DNS に入れる）。MAIL FROM を mail.<domain>（MX と TXT の2本）にして SPF も揃える。
    *   入れる記録はスタックの出力（SupportMailDns*）に出る。
    * - SMTP の資格情報は IAM ユーザー `toytalker-ses-smtp-<stage>` のアクセスキー（長期鍵の唯一の例外。ロードマップ 8）。
-   *   キーは CDK では作らず手順で作る（infra/README「サポートの返信の送信元」）。権限は address からの SendRawEmail だけ。
+   *   キーは CDK では作らず手順で作る（infra/README「サポートの返信の送信元」）。権限は addresses からの SendRawEmail だけ。
    * - 送れる相手の制限（sandbox）の解除は手作業で申請する。
    */
-  private createSupportMail(mail: { readonly domain: string; readonly address: string }): void {
+  private createSupportMail(mail: { readonly domain: string; readonly addresses: readonly string[] }): void {
     const identity = new ses.EmailIdentity(this, "SupportMailIdentity", {
       identity: ses.Identity.domain(mail.domain),
       dkimSigning: true,
@@ -758,7 +758,7 @@ export class ToyTalkerStack extends cdk.Stack {
     user.addToPolicy(new iam.PolicyStatement({
       actions: ["ses:SendRawEmail"],
       resources: [identity.emailIdentityArn],
-      conditions: { StringEquals: { "ses:FromAddress": mail.address } },
+      conditions: { StringEquals: { "ses:FromAddress": [...mail.addresses] } },
     }));
     identity.dkimRecords.forEach((r, i) => {
       new cdk.CfnOutput(this, `SupportMailDnsDkim${i + 1}`, { value: `CNAME ${r.name} -> ${r.value}` });

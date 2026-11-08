@@ -139,17 +139,17 @@ aws backup describe-backup-vault --backup-vault-name toytalker-backup-rnd   # Lo
 
 ## サポートの返信の送信元（SES、ロードマップ 7(d)、2026-11-08）
 
-`support@zakicorp.com` 宛のメールは Cloudflare Email Routing で Gmail へ転送し、返信は Gmail の「別のアドレスから送信」が SES の SMTP で送る。手元にメールボックスは持たない。設定は `stages.ts` の `supportMail`（無い環境は作らない）。
+`support@zakicorp.com`（会社の窓口。Google Cloud の同意画面もこれ）と `toytalker-support@zakicorp.com`（ToyTalker の窓口。プライバシーポリシー・特商法・購入ページ・アプリに出す）宛のメールは Cloudflare Email Routing で同じ Gmail へ転送し、Gmail のフィルタが宛先でラベルを分ける。返信は Gmail の「別のアドレスから送信」が SES の SMTP で、受信したアドレスから送る。手元にメールボックスは持たない。製品が増えたら `<製品>-support@` を Cloudflare のルール・`stages.ts` の `supportMail.addresses`・Gmail の送信元に1つずつ足す（Google アカウントは support@ の1つで足りる）。設定は `stages.ts` の `supportMail`（無い環境は作らない）。
 
 1. deploy すると SES のドメイン識別子と IAM ユーザー `toytalker-ses-smtp-<stage>` ができ、出力 `SupportMailDns*` に DNS へ入れる記録（DKIM の CNAME 3本、MAIL FROM の MX と TXT）が出る。Cloudflare の DNS に入れる（CNAME はプロキシ無し「DNS のみ」）。`aws sesv2 get-email-identity --email-identity zakicorp.com` の `DkimAttributes.Status` が `SUCCESS` になれば検証済み（数分〜）。
 2. 送れる相手の制限（sandbox）の解除を申請する: `aws sesv2 put-account-details --production-access-enabled --mail-type TRANSACTIONAL --website-url https://toytalker.zakicorp.com/ --use-case-description "..."`（用途: 問い合わせへの手動の返信だけ。1日数通）。承認まで1日ほど。承認前は検証済みの宛先にしか送れない。
-3. SMTP の資格情報を作る（長期鍵の唯一の例外。権限は support@ からの `ses:SendRawEmail` だけ）。シークレットは画面に出さずパイプで変換する:
+3. SMTP の資格情報を作る（長期鍵の唯一の例外。権限は `addresses` からの `ses:SendRawEmail` だけ。SMTP のユーザー名とパスワードは全アドレスで共通）。シークレットは画面に出さずパイプで変換する:
    ```sh
    aws iam create-access-key --user-name toytalker-ses-smtp-rnd --query "AccessKey.[AccessKeyId,SecretAccessKey]" --output text > "$TMP/ses-key.txt"   # 1行目=ID 2行目=secret（一時ファイル。使ったら消す）
    cut -f2 "$TMP/ses-key.txt" | npx tsx scripts/ses-smtp-password.ts ap-northeast-1
    ```
    ユーザー名 = アクセスキー ID、パスワード = 出力の1行。パスワードマネージャーに入れ、一時ファイルは消す。
-4. Gmail: 設定 → アカウントとインポート → 「他のメールアドレスを追加」→ 名前「ToyTalker サポート」、`support@zakicorp.com`、「エイリアスとして扱う」はオン → SMTP サーバー `email-smtp.ap-northeast-1.amazonaws.com`、ポート 587、上のユーザー名とパスワード、「TLS を使用したセキュリティで保護された接続」→ Gmail が確認コードを support@ へ送るので、転送で届いたメールのコードを入れる。「受信したアドレスで返信する」をオンにする。
+4. Gmail: 設定 → アカウントとインポート → 「他のメールアドレスを追加」をアドレスごとに（名前「ToyTalker サポート」で `toytalker-support@zakicorp.com`、名前「ZakiCorp」で `support@zakicorp.com`）、「エイリアスとして扱う」はオン → SMTP サーバー `email-smtp.ap-northeast-1.amazonaws.com`、ポート 587、上のユーザー名とパスワード、「TLS を使用したセキュリティで保護された接続」→ Gmail が確認コードを support@ へ送るので、転送で届いたメールのコードを入れる。「受信したアドレスで返信する」をオンにする。
 5. 自分宛に1通送り、送信元が support@ で「経由」の表示が無く、ヘッダーの DKIM が `zakicorp.com` で pass になっていることを見る。
 
 鍵が漏れたら `aws iam delete-access-key` で即無効。作り直しは 3 から。
