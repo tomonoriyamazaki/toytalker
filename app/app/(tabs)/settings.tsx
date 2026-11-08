@@ -31,6 +31,7 @@ import Sound from "react-native-sound";
 import { Buffer } from "buffer";
 import { VOICE_EFFECTS, applyVoiceEffect, decodeWav, encodeWav, type VoiceEffectId } from "../../lib/voiceEffects";
 import { fetchTtsAudio } from "../../lib/ttsOnly";
+import { STT_MODEL_OPTIONS, STT_MODEL_STORAGE_KEY, loadSttModelChoice, type SttModelChoice } from "../../lib/sttModel";
 
 const SCREEN_WIDTH = Dimensions.get("window").width;
 
@@ -94,6 +95,7 @@ export default function Settings() {
 
   // STT設定
   const [sttMode, setSttMode] = useState<"local" | "soniox">("soniox");
+  const [sttModelChoice, setSttModelChoice] = useState<SttModelChoice>("default");
 
   // 相槌設定
   const [backchannelEnabled, setBackchannelEnabled] = useState(true);
@@ -138,6 +140,7 @@ export default function Settings() {
     (async () => {
       const saved = await AsyncStorage.getItem("sttMode");
       if (saved === "local" || saved === "soniox") setSttMode(saved);
+      setSttModelChoice(await loadSttModelChoice());
       const bcSaved = await AsyncStorage.getItem("backchannelEnabled");
       if (bcSaved === "false") setBackchannelEnabled(false);
     })();
@@ -252,6 +255,12 @@ export default function Settings() {
     setSttMode(value);
     await AsyncStorage.setItem("sttMode", value);
     navigateTo("main", "back");
+  };
+
+  // Soniox のモデル選択。画面に留まる（続けて別の選択肢と聞き比べるため）。次の発話から効く
+  const handleSttModelChange = async (value: SttModelChoice) => {
+    setSttModelChoice(value);
+    await AsyncStorage.setItem(STT_MODEL_STORAGE_KEY, value);
   };
 
   // ---- キャラクター一覧 ----
@@ -1471,6 +1480,30 @@ export default function Settings() {
               </TouchableOpacity>
             );
           })}
+
+          {sttMode === "soniox" && (
+            <>
+              <Text style={s.sttSectionTitle}>Soniox のモデル</Text>
+              {STT_MODEL_OPTIONS.map((opt) => {
+                const selected = sttModelChoice === opt.value;
+                return (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={[s.sttOption, selected && s.sttOptionSelected]}
+                    onPress={() => handleSttModelChange(opt.value)}
+                  >
+                    <View style={s.sttOptionRow}>
+                      <View style={[s.radio, selected && s.radioSelected]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={[s.sttLabel, selected && s.sttLabelSelected]}>{opt.label}</Text>
+                        <Text style={s.sttDesc}>{opt.description}</Text>
+                      </View>
+                    </View>
+                  </TouchableOpacity>
+                );
+              })}
+            </>
+          )}
         </View>
         </Animated.View>
       </SafeAreaView>
@@ -1842,6 +1875,7 @@ const s = StyleSheet.create({
   sttLabel:                { fontSize: 16, fontWeight: "600", color: "#333" },
   sttLabelSelected:        { color: "#007AFF" },
   sttDesc:                 { fontSize: 13, color: "#888", marginTop: 4 },
+  sttSectionTitle:         { fontSize: 13, fontWeight: "600", color: "#888", marginTop: 12 },
   // ナビゲーション
   navRow:                  { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingVertical: 12, paddingHorizontal: 16, backgroundColor: "#f9f9f9", borderRadius: 8, borderWidth: 1, borderColor: "#e0e0e0" },
   navText:                 { fontSize: 16, color: "#333" },

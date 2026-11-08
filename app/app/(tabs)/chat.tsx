@@ -31,13 +31,16 @@ import { useFocusEffect } from "@react-navigation/native";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { APP_VERSION } from "../../lib/appVersion";
 import { API_BASE_URL, apiFetch, requestHeaders } from "../../lib/api";
+import { loadSttModelChoice, sonioxModelConfig, type SttModelChoice } from "../../lib/sttModel";
 import AudioRecord from "react-native-audio-record";
 import Sound from "react-native-sound";
 import ReadAloud from "../../components/ReadAloud";
 
 /* === Soniox定数 === */
 const SONIOX_WS_URL = "wss://stt-rt.soniox.com/transcribe-websocket"; // 公式
-let SONIOX_MODEL = "stt-rt-v4";
+let SONIOX_MODEL = "stt-rt-v4"; // Lambda が配る値（stt_model）。設定画面の選択で上書きされ得る
+/** 設定画面「音声認識」のモデル選択（app/lib/sttModel.ts）。チャット画面を開くたびに読み直す */
+let sttModelChoice: SttModelChoice = "default";
 const SONIOX_SAMPLE_RATE = 16000;
 const SONIOX_CHANNELS = 1;
 
@@ -196,6 +199,7 @@ export default function Chat() {
       (async () => {
         const saved = await AsyncStorage.getItem("sttMode");
         if (saved === "local" || saved === "soniox") setSttMode(saved);
+        sttModelChoice = await loadSttModelChoice();
         const bcSaved = await AsyncStorage.getItem("backchannelEnabled");
         const enabled = bcSaved !== "false";
         setBackchannelEnabled(enabled);
@@ -548,6 +552,7 @@ export default function Chat() {
   const sonioxWsRef = useRef<WebSocket | null>(null);
   const sonioxListeningRef = useRef(false);
   const preconnectedWsRef = useRef<WebSocket | null>(null);
+  const preconnectedChoiceRef = useRef<SttModelChoice>("default"); // 先行接続を開いた時のモデル選択
   const sonioxFinalBufRef = useRef<string>(""); // final確定の蓄積
   const sonioxNonFinalBufRef = useRef<string>(""); // 非確定の表示用
 
@@ -576,6 +581,8 @@ export default function Chat() {
     const ws = new WebSocket(SONIOX_WS_URL);
     ws.binaryType = "arraybuffer";
     preconnectedWsRef.current = ws;
+    const choice = sttModelChoice;
+    preconnectedChoiceRef.current = choice; // 選択が変わったら startSonioxSTT はこの接続を使わない
 
     ws.onopen = async () => {
       console.log("⏱️ preconnect: WebSocket OPEN, sending config");
@@ -589,11 +596,10 @@ export default function Chat() {
       }
       const cfg = {
         api_key: apiKey,
-        model: SONIOX_MODEL,
+        ...sonioxModelConfig(choice, SONIOX_MODEL),
         audio_format: "pcm_s16le",
         sample_rate: SONIOX_SAMPLE_RATE,
         num_channels: SONIOX_CHANNELS,
-        enable_endpoint_detection: true,
         language_hints: ["ja","en"],
       };
       ws.send(JSON.stringify(cfg));
@@ -643,15 +649,20 @@ export default function Chat() {
     let firstAudioSentAt = 0;
     let firstTextSeen = false;
     let speechAt = 0; // マイクの RMS が SPEECH_RMS を超えた最初の時刻（話し始めの近似）
+    let lastSpeechAt = 0; // 同じく最後の時刻（話し終わりの近似。周りがうるさいと遅めに出る）
+    let endLogged = false;
     const SPEECH_RMS = 400;
+    // 先行接続は選択が同じときだけ使うので、どちらの経路でもこの選択で繋がる
+    const modelLabel = `${sonioxModelConfig(sttModelChoice, SONIOX_MODEL).model}/${sttModelChoice}`;
 
     // 先行接続済みWSがあれば再利用
     const preWs = preconnectedWsRef.current;
-    const usePreconnected = preWs && preWs.readyState === WebSocket.OPEN;
+    const choiceChanged = !!preWs && preconnectedChoiceRef.current !== sttModelChoice;
+    const usePreconnected = preWs && preWs.readyState === WebSocket.OPEN && !choiceChanged;
     if (usePreconnected) {
       console.log(`⏱️ STT [${Date.now() - sttT0}ms] using preconnected WebSocket`);
     } else {
-      console.log(`⏱️ STT [${Date.now() - sttT0}ms] creating new WebSocket`);
+      console.log(`⏱️ STT [${Date.now() - sttT0}ms] creating new WebSocket${choiceChanged ? " (stt model choice changed)" : ""}`);
       if (preWs) try { preWs.close(); } catch {}
     }
     preconnectedWsRef.current = null;
@@ -685,11 +696,14 @@ export default function Chat() {
         try {
           const ab = base64ToArrayBuffer(b64);
           const chunk = new Uint8Array(ab);
-          if (!speechAt && ab.byteLength >= 2) {
+          if (ab.byteLength >= 2) {
             const v = new Int16Array(ab, 0, Math.floor(ab.byteLength / 2));
             let sum = 0;
             for (let i = 0; i < v.length; i++) sum += v[i] * v[i];
-            if (Math.sqrt(sum / v.length) >= SPEECH_RMS) speechAt = Date.now();
+            if (Math.sqrt(sum / v.length) >= SPEECH_RMS) {
+              lastSpeechAt = Date.now();
+              if (!speechAt) speechAt = lastSpeechAt;
+            }
           }
           if (wsReady && ws.readyState === 1) {
             ws.send(chunk);
@@ -743,11 +757,10 @@ export default function Chat() {
         }
         const cfg = {
           api_key: apiKey,
-          model: SONIOX_MODEL,
+          ...sonioxModelConfig(sttModelChoice, SONIOX_MODEL),
           audio_format: "pcm_s16le",
           sample_rate: SONIOX_SAMPLE_RATE,
           num_channels: SONIOX_CHANNELS,
-          enable_endpoint_detection: true,
           language_hints: ["ja","en"],
         };
         ws.send(JSON.stringify(cfg));
@@ -791,6 +804,13 @@ export default function Chat() {
           if (!txt) continue;
           if (txt.trim() === "<end>") {
             if (DEBUG) setLog(L => [...L, "Soniox: <end> detected, closing WS"]);
+            if (!endLogged) {
+              endLogged = true;
+              // 計測（ロードマップ18）: 話し終わり（最後に RMS≥SPEECH_RMS だった時刻）から終端が届くまで
+              const line = `⏱️ STT endpoint: +${lastSpeechAt ? Date.now() - lastSpeechAt : -1}ms after last speech (rms≥${SPEECH_RMS}, model=${modelLabel})`;
+              console.log(line);
+              if (DEBUG_TIME) setLog((L) => [...L, line]);
+            }
             try { ws.close(); } catch {}
             continue;
           }
@@ -806,7 +826,7 @@ export default function Chat() {
           if (!firstTextSeen) {
             firstTextSeen = true;
             const now = Date.now();
-            const line = `⏱️ STT first text: +${speechAt ? now - speechAt : -1}ms after speech (rms≥${SPEECH_RMS}), +${firstAudioSentAt ? now - firstAudioSentAt : -1}ms after first audio (audio_proc=${data.total_audio_proc_ms ?? "?"}ms, model=${SONIOX_MODEL})`;
+            const line = `⏱️ STT first text: +${speechAt ? now - speechAt : -1}ms after speech (rms≥${SPEECH_RMS}), +${firstAudioSentAt ? now - firstAudioSentAt : -1}ms after first audio (audio_proc=${data.total_audio_proc_ms ?? "?"}ms, model=${modelLabel})`;
             console.log(line);
             if (DEBUG_TIME) setLog((L) => [...L, line]);
           }
