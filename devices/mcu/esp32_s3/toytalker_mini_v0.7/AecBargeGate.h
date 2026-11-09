@@ -17,6 +17,20 @@ constexpr uint32_t AEC_BARGE_MIN_RETAINED_PERCENT = 25;
 static_assert(AEC_BARGE_HOLD_FRAMES * AEC_BARGE_FRAME_SAMPLES * 1000 ==
               16000 * AEC_BARGE_HOLD_MS, "hold must contain whole AEC frames");
 
+// 発火後の確かめ（2026-11-09、0.7.9）: 発火したらアンプを切って再生を一時停止し、スピーカーが黙っている間に
+// マイクだけで声が続くかを見る。続けば割り込み、静かなら止めた所から再生を続ける。
+// 再生音の漏れ・触った音・くすっと笑う程度の短い音は、スピーカーを止めれば消えるので再開になる。
+// 鳴り続ける背景の音（プリンターなど）は声と区別できない。値は試験値（ログの aec_confirm_* で詰める）。
+constexpr uint32_t AEC_CONFIRM_SETTLE_MS = 64;     // アンプを切ってから部屋の残響が引くまで（このフレームは数えない）
+constexpr uint32_t AEC_CONFIRM_WINDOW_MS = 384;    // 耳をすます長さ（12 フレーム）
+constexpr uint32_t AEC_CONFIRM_RMS = 1200;         // 声とみなすマイクの AC RMS（判定と同じ尺度）
+constexpr uint32_t AEC_CONFIRM_VOICE_FRAMES = 3;   // 窓の中でこれだけ超えたら声（連続でなくてよい。音節の切れ目があるため）
+constexpr uint32_t AEC_CONFIRM_TIMEOUT_MS = 1000;  // マイクのフレームが来ないときの保険。来なければ割り込み扱い（従来どおり止める）
+constexpr uint32_t AEC_REARM_MS = 300;             // 再開してから判定を再開するまで
+constexpr uint32_t AEC_CONFIRM_WINDOW_FRAMES = AEC_CONFIRM_WINDOW_MS * 16 / AEC_BARGE_FRAME_SAMPLES;
+static_assert(AEC_CONFIRM_WINDOW_FRAMES * AEC_BARGE_FRAME_SAMPLES == AEC_CONFIRM_WINDOW_MS * 16,
+              "confirm window must contain whole AEC frames");
+
 class AecBargeGate {
  public:
   constexpr void reset() { *this = AecBargeGate{}; }
@@ -26,6 +40,8 @@ class AecBargeGate {
     micEnergy_ = outEnergy_ = 0;
     for (uint32_t i = 0; i < AEC_BARGE_HOLD_FRAMES; ++i) mic_[i] = out_[i] = 0;
   }
+  // 確かめの結果が「声ではない」だったとき。数えた回数は残し、次の発火を待てる状態に戻す
+  constexpr void rearm() { breakRun(); fired_ = false; recoverySamples_ = 0; }
   constexpr bool fired() const { return fired_; }
   constexpr uint32_t residualRejects() const { return residualRejects_; }
   constexpr uint32_t clipFrames() const { return clipFrames_; }

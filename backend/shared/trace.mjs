@@ -97,15 +97,17 @@ export function describePrevTurn(prev) {
  */
 const DEVICE_PREV_MS = [
   "pre_ms", "tls_ms", "send_ms", "headers_ms", "first_audio_ms", "play_start_ms", "recv_end_ms", "play_end_ms",
-  "barge_ms", "audio_ms", "unplayed_ms", "ws_max_block_ms",
+  "barge_ms", "audio_ms", "unplayed_ms", "ws_max_block_ms", "aec_confirm_ms",
 ];
 const DEVICE_PREV_COUNTS = [
   "turn", "underruns", "segments",
   "aec_threshold", "aec_armed_frames", "aec_out_peak", "aec_out_sustained", "aec_mic_sustained",
   "aec_residual_rejects", "aec_clip_frames", "aec_recovery_frames", "aec_age_rejects", "aec_missing",
   "aec_trigger_out", "aec_trigger_mic", "aec_ref_peak", "aec_trigger_ref",
+  // 発火後の確かめ（ファーム 0.7.9）
+  "aec_triggers", "aec_confirm_rejects", "aec_confirm_voice_frames", "aec_confirm_mic_max",
 ];
-const DEVICE_PREV_FLAGS = ["tls_ok", "bc", "aec_fired"];
+const DEVICE_PREV_FLAGS = ["tls_ok", "bc", "aec_fired", "aec_confirm_timeout"];
 const DEVICE_PREV_STOPS = ["done", "aec", "button", "stream_error", "connect_failed", "i2s_failed"];
 const DEVICE_STT_MS = ["ws_wait_ms", "listen_ms", "last_text_to_end_ms", "end_to_send_ms"];
 const DEVICE_STT_COUNTS = ["resumes", "speech_peak_rms", "grace_peak_rms", "disconnects", "errors"];

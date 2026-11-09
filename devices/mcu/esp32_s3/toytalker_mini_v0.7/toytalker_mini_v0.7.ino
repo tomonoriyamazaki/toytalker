@@ -935,6 +935,10 @@ static TaskHandle_t voiceTaskHandle = NULL;
 static SemaphoreHandle_t voiceStopped = NULL;
 static std::atomic<bool> voiceMonitorEnabled{false};
 static std::atomic<uint32_t> voiceTriggerMs{0};
+// 声の割り込みの確かめ中（監視タスクが立て、再生タスクが見る）。true の間は返答を捨てずに無音を流す
+static volatile bool playerPaused = false;
+// スマホの設定（鍵発行の応答の voice_barge_enabled）。届かなければ今までどおり ON。ボタンはいつでも効く
+static volatile bool voiceBargeEnabled = true;
 static bool voiceMonitorRunning = false;  // start/stopはloopタスクだけ
 static bool micPausedForPlayback = false;  // loopのみ。STT開始前に必ず再開する
 static bool micReleasedForPlayback = false;
@@ -956,19 +960,38 @@ void voiceMonitorTask(void*) {
   for (;;) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     if (aecMonitor.ready()) {
+      uint32_t candidateMs = 0;  // 確かめ中の発火の時刻（割り込みと決まったら voiceTriggerMs にする）
       while (voiceMonitorEnabled.load()) {
-        const bool triggered = aecMonitor.pump();
-        if (triggered && voiceMonitorEnabled.load() && !bargeInRequested) {
+        const auto event = aecMonitor.pump();
+        if (event == AecMonitor::Event::Triggered && voiceMonitorEnabled.load() && !bargeInRequested) {
           const uint32_t atMs = millis();
-          if (!AEC_BARGE_DETECT_ONLY) {
-            voiceTriggerMs.store(atMs);
+          if (!AEC_BARGE_DETECT_ONLY && voiceBargeEnabled) {
+            // すぐ黙らせ、返答は捨てずに一時停止して確かめる（AecBargeGate.h の AEC_CONFIRM_*）
             digitalWrite(PIN_AMP_SD, LOW);
+            playerPaused = true;
+            candidateMs = atMs;
+            aecMonitor.beginConfirm(esp_timer_get_time());
+          } else if (!AEC_BARGE_DETECT_ONLY) {
+            // スマホの設定で声の割り込みを切っている: 数えるだけで止めない
+            aecMonitor.resumeAfterReject(esp_timer_get_time());
+          }
+          aecMonitor.printTrigger(atMs);
+        } else if (event == AecMonitor::Event::Confirmed) {
+          if (voiceMonitorEnabled.load() && !bargeInRequested) {
+            voiceTriggerMs.store(candidateMs ? candidateMs : millis());
             bargeInRequested = true;
             // Signal only: loop owns sockets, playback cancellation and channel lifetime.
             aecMonitor.stopCapture();
             voiceMonitorEnabled.store(false);
           }
-          aecMonitor.printTrigger(atMs);
+          aecMonitor.printConfirm("voice");
+        } else if (event == AecMonitor::Event::Rejected) {
+          // 声ではなかった: 止めた所から続ける。ボタンが押されていればアンプは入れない（enableAmp が ISR と排他）
+          playerPaused = false;
+          if (!bargeInRequested) bargeInRequested.enableAmp(PIN_AMP_SD);
+          aecMonitor.resumeAfterReject(esp_timer_get_time());
+          candidateMs = 0;
+          aecMonitor.printConfirm("resume");
         }
         vTaskDelay(pdMS_TO_TICKS(1));
       }
@@ -1376,6 +1399,10 @@ static volatile bool playerActive = false;    // 再生セッション中
 static volatile bool playerStreamEnd = false; // 受信完了（残りを出し切って停止）
 static volatile bool playerPrebuffering = true;
 static volatile bool playerParked = true;     // タスクがI2Sに触っていない状態
+// 一時停止のとき巻き戻す量: アンプを切った時点で DMA に入っていた分（8 本 × 4092 バイト ≈ 0.34 秒、満杯と仮定）
+static constexpr size_t PLAY_REWIND_BYTES = PLAY_DMA_COUNT * PLAY_DMA_FRAMES * 4;
+static size_t playConsumedBytes = 0;          // 再生タスクだけが書く。このセッションでリングから I2S へ渡した量
+static uint32_t playPauses = 0;               // このセッションで一時停止した回数（再生タスクだけが書く）
 static TaskHandle_t playerTaskHandle = NULL;
 
 // ==== WiFi/再生品質の計測（基板グラウンド設計の検証用） ====
@@ -1434,8 +1461,10 @@ size_t playRingAvail() {
   return (h + PLAY_RING_SIZE - t) % PLAY_RING_SIZE;
 }
 
+// 再生済みの直近 PLAY_REWIND_BYTES は上書きしない（確かめで再開するとき、アンプを切って黙って流れた分を巻き戻すため）
 size_t playRingFree() {
-  return PLAY_RING_SIZE - 1 - playRingAvail();
+  const size_t used = playRingAvail() + PLAY_REWIND_BYTES;
+  return used >= PLAY_RING_SIZE - 1 ? 0 : PLAY_RING_SIZE - 1 - used;
 }
 
 // producer: リングバッファへ書き込み（満杯時は空くまで待つ）。barge-in時はfalse
@@ -1463,6 +1492,7 @@ bool playRingPush(const uint8_t* data, size_t len) {
 
 // consumer: 再生専用タスク（Core 0）
 void playbackTask(void* param) {
+  bool pauseRewound = false;  // この一時停止で巻き戻し済み
   for (;;) {
     if (!playerActive) {
       playerParked = true;
@@ -1470,6 +1500,24 @@ void playbackTask(void* param) {
       continue;
     }
     playerParked = false;
+
+    if (playerPaused) {
+      // 声の割り込みの確かめ中: 返答は捨てず、無音を流して I2S と AEC の参照の時計を止めない
+      static const uint8_t pauseSilence[PLAY_WRITE_CHUNK] = {};
+      if (!pauseRewound) {
+        // アンプを切ってから DMA に残っていた分は誰にも聞こえていないので、その分だけ戻す
+        const size_t back = min(PLAY_REWIND_BYTES, playConsumedBytes);
+        playRingTail = (playRingTail + PLAY_RING_SIZE - back) % PLAY_RING_SIZE;
+        playConsumedBytes -= back;
+        ++playPauses;
+        pauseRewound = true;
+        Serial.printf("[PLAYER] paused for confirm rewind_bytes=%u\n", (unsigned)back);
+      }
+      size_t written = 0;
+      writePlaybackI2s(pauseSilence, sizeof(pauseSilence), &written, pdMS_TO_TICKS(100));
+      continue;
+    }
+    pauseRewound = false;
 
     size_t avail = playRingAvail();
 
@@ -1519,6 +1567,7 @@ void playbackTask(void* param) {
       logFirstTtsWrite();
     }
     playRingTail = (t + written) % PLAY_RING_SIZE;
+    playConsumedBytes += written;
   }
 }
 
@@ -1528,6 +1577,9 @@ void playerStart() {
   playRingHead = 0;
   playRingTail = 0;
   playerStreamEnd = false;
+  playerPaused = false;
+  playConsumedBytes = 0;
+  playPauses = 0;
   playerPrebuffering = true;
   statUnderrunPending = false;  // 前セッション(相槌等)の終端レースを持ち越さない
   playerActive = true;
@@ -1542,6 +1594,7 @@ void playerStop() {
   while (!playerParked && (millis() - start < 1000)) delay(5);
   playRingHead = 0;
   playRingTail = 0;
+  playerPaused = false;
 }
 
 // 次のセグメントの直前に無音PCMを流す。固定領域を再利用してヒープ確保を避ける。
@@ -2682,7 +2735,12 @@ void startNormalOperation() {
   if (doc.containsKey("stt_model")) {
     sonioxModel = doc["stt_model"].as<String>();
   }
-  Serial.printf("🔊 Backchannel: %s, STT: %s\n", backchannelEnabled ? "ON" : "OFF", sonioxModel.c_str());
+  // 声の割り込み（スマホの設定。届かなければ ON のまま）。反映は起動時
+  if (doc.containsKey("voice_barge_enabled")) {
+    voiceBargeEnabled = doc["voice_barge_enabled"].as<bool>();
+  }
+  Serial.printf("🔊 Backchannel: %s, STT: %s, voice barge-in: %s\n", backchannelEnabled ? "ON" : "OFF",
+                sonioxModel.c_str(), voiceBargeEnabled ? "ON" : "OFF");
 
   startSTTRecording();
 }

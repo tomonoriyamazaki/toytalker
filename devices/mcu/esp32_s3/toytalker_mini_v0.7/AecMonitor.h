@@ -60,12 +60,20 @@ class AecMonitor {
     uint32_t triggerOut = 0, triggerMic = 0;  // 発火した4フレームの最小（fired のときだけ）
     uint32_t triggerRef = 0;                  // 発火したフレームの参照 RMS
     double retainedPct = NAN;                 // 発火時の残り具合（out/mic、%）
+    // 発火後の確かめ（0.7.9。AecBargeGate.h の AEC_CONFIRM_*）。trigger_* は最後の発火の値
+    uint32_t triggers = 0;                    // 発火した回数（確かめに入った回数）
+    uint32_t confirmRejects = 0;              // 確かめで「声ではない」として再生を続けた回数
+    uint32_t confirmVoiceFrames = 0;          // 最後の確かめで AEC_CONFIRM_RMS を超えたフレーム数
+    uint32_t confirmMicMax = 0;               // 最後の確かめのマイク AC RMS の最大（スピーカーを止めた後の外の音）
+    uint32_t confirmMs = 0;                   // 最後の確かめの、アンプを切ってから決めるまで
+    bool confirmTimeout = false;              // マイクのフレームが来ず、保険で割り込み扱いにした
   };
+  enum class Event : uint8_t { None, Triggered, Confirmed, Rejected };
   Report report() const {
     Report r;
     if (!handle_ || !turnStarted_) return r;
     r.valid = true;
-    r.fired = bargeGate_.fired();
+    r.fired = triggers_ > 0;
     r.armedFrames = gateOutLevels_.armedFrames();
     r.outPeak = gateOutLevels_.peakRms();
     r.outSustained = gateOutLevels_.sustainedRms();
@@ -77,14 +85,17 @@ class AecMonitor {
     r.missing = stats_.missing;
     r.refPeak = refPeak_;
     if (r.fired) {
-      r.triggerOut = r.triggerMic = UINT32_MAX;
-      for (uint32_t i = 0; i < AEC_BARGE_HOLD_FRAMES; ++i) {
-        if (bargeGate_.outFrame(i) < r.triggerOut) r.triggerOut = bargeGate_.outFrame(i);
-        if (bargeGate_.micFrame(i) < r.triggerMic) r.triggerMic = bargeGate_.micFrame(i);
-      }
-      r.retainedPct = retainedPercent();
+      r.triggerOut = triggerOut_;
+      r.triggerMic = triggerMic_;
+      r.retainedPct = triggerRetainedPct_;
       r.triggerRef = triggerRef_;
     }
+    r.triggers = triggers_;
+    r.confirmRejects = confirmRejects_;
+    r.confirmVoiceFrames = confirmVoiceFrames_;
+    r.confirmMicMax = confirmMicMax_;
+    r.confirmMs = confirmMs_;
+    r.confirmTimeout = confirmTimeout_;
     return r;
   }
   bool init() {
@@ -159,6 +170,10 @@ class AecMonitor {
     micLevels_.reset(); outLevels_.reset(); stats_ = Stats{};
     gateMicLevels_.reset(); gateOutLevels_.reset();
     bargeGate_.reset(); triggerAudioAgeMs_ = 0; refPeak_ = triggerRef_ = 0;
+    triggerOut_ = triggerMic_ = 0; triggerRetainedPct_ = NAN; triggers_ = 0;
+    confirming_ = false; confirmMuteUs_ = 0; rearmUs_ = 0;
+    confirmRejects_ = confirmFrames_ = confirmVoiceFrames_ = confirmMicMax_ = confirmMs_ = 0;
+    confirmTimeout_ = false;
     dcReady_ = false; firstAudioUs_ = 0; processedSequence_ = 0;
     generation_ = generation; lastLog_ = millis(); summaryPending_ = false;
     windowMicEnergy_ = windowOutEnergy_ = 0; windowMicMax_ = windowOutMax_ = 0;
@@ -170,6 +185,27 @@ class AecMonitor {
                   (unsigned long)AEC_BARGE_RMS, (unsigned long)AEC_BARGE_HOLD_MS);
   }
   void stopCapture() { capture_.stop(); }
+  // 発火後の確かめ。監視タスクだけが呼ぶ（pump と同じタスク）。muteUs はアンプを切った時刻（esp_timer）
+  void beginConfirm(int64_t muteUs) {
+    confirming_ = true; confirmMuteUs_ = muteUs;
+    confirmFrames_ = confirmVoiceFrames_ = confirmMicMax_ = confirmMs_ = 0;
+    confirmTimeout_ = false;
+  }
+  // 「声ではない」で再生を続けるとき。判定は AEC_REARM_MS 後から（再開直後の音の立ち上がりで発火させない）
+  void resumeAfterReject(int64_t nowUs) {
+    confirming_ = false;
+    ++confirmRejects_;
+    bargeGate_.rearm();
+    breakLevels();
+    rearmUs_ = nowUs + int64_t(AEC_REARM_MS) * 1000;
+  }
+  bool confirming() const { return confirming_; }
+  void printConfirm(const char* result) const {
+    Serial.printf("[AEC_CONFIRM] result=%s voice_frames=%lu frames=%lu mic_max=%lu threshold=%lu elapsed_ms=%lu rejects=%lu timeout=%d\n",
+                  result, (unsigned long)confirmVoiceFrames_, (unsigned long)confirmFrames_,
+                  (unsigned long)confirmMicMax_, (unsigned long)AEC_CONFIRM_RMS, (unsigned long)confirmMs_,
+                  (unsigned long)confirmRejects_, confirmTimeout_);
+  }
   void finish() {
     // Pending delayed mic frames are discarded, not waited for during STT restart.
     summaryPending_ = true;
@@ -203,9 +239,15 @@ class AecMonitor {
     tx_.commitPush();
   }
 
-  bool pump() {
-    bool triggered = false;
+  Event pump() {
+    Event event = Event::None;
     drainTx(); drainRx();
+    if (confirming_ && esp_timer_get_time() - confirmMuteUs_ >= int64_t(AEC_CONFIRM_TIMEOUT_MS) * 1000) {
+      // マイクのフレームが届かない。分からないときは従来どおり止める
+      confirming_ = false; confirmTimeout_ = true;
+      confirmMs_ = uint32_t((esp_timer_get_time() - confirmMuteUs_) / 1000);
+      return Event::Confirmed;
+    }
     if (pending_->head != pending_->tail) {
       const auto& mic = pending_->blocks[pending_->tail % 8];
       int16_t lastReference = 0;
@@ -214,12 +256,12 @@ class AecMonitor {
       // process() still validates EVERY sample; gaps never become silent audio.
       if (history_->sample(lastTick, lastReference) ||
           esp_timer_get_time() - mic.endUs >= int64_t(AEC_MIC_HOLD_MS) * 1000) {
-        triggered = process(mic);
+        event = process(mic);
         ++pending_->tail;
       }
     }
     // Return a candidate before serial output so the caller can mute promptly.
-    if (!triggered && millis() - lastLog_ >= 1000) {
+    if (event == Event::None && !confirming_ && millis() - lastLog_ >= 1000) {
       Serial.printf("[AEC] mic=%lu ref=%lu out=%lu mic_max=%lu out_max=%lu reduction_db=%.1f paired=%lu missing=%lu mic_drop=%lu ref_drop=%lu cpu_max_us=%lu\n",
                     (unsigned long)stats_.micRms, (unsigned long)stats_.refRms, (unsigned long)stats_.outRms,
                     (unsigned long)windowMicMax_, (unsigned long)windowOutMax_,
@@ -229,7 +271,7 @@ class AecMonitor {
       windowMicEnergy_ = windowOutEnergy_ = 0; windowMicMax_ = windowOutMax_ = 0;
       lastLog_ = millis();
     }
-    return triggered;
+    return event;
   }
   void printTrigger(uint32_t atMs) {
     printGateAc();
@@ -355,10 +397,27 @@ class AecMonitor {
       ++pending_->head; rx_.pop();
     }
   }
-  bool process(const MicBlock& mic) {
+  // 確かめ中のフレーム: スピーカーは黙っているので AEC を通さずマイクだけを見る
+  Event confirmFrame(const MicBlock& mic) {
+    if (mic.endUs - 32000 < confirmMuteUs_ + int64_t(AEC_CONFIRM_SETTLE_MS) * 1000) return Event::None;
+    aec_gate_energy::Moments moments;
+    for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) moments.feed(mic.data[i]);
+    const uint32_t level = aec_mic::gateRms(rms(moments.acEnergy()));
+    ++confirmFrames_;
+    if (level > confirmMicMax_) confirmMicMax_ = level;
+    // スピーカーを止めた後の飽和は外の大きな音（大声）なので声に数える
+    if (mic.clips || level >= AEC_CONFIRM_RMS) ++confirmVoiceFrames_;
+    const bool voice = confirmVoiceFrames_ >= AEC_CONFIRM_VOICE_FRAMES;
+    if (!voice && confirmFrames_ < AEC_CONFIRM_WINDOW_FRAMES) return Event::None;
+    confirming_ = false;
+    confirmMs_ = uint32_t((esp_timer_get_time() - confirmMuteUs_) / 1000);
+    return voice ? Event::Confirmed : Event::Rejected;
+  }
+  Event process(const MicBlock& mic) {
     int64_t started = esp_timer_get_time();
     if (!mic.continuous || mic.sequence != processedSequence_ + 1) breakLevels();
     processedSequence_ = mic.sequence;
+    if (confirming_) return confirmFrame(mic);
     auto* in = buffers_[0]; auto* ref = buffers_[1]; auto* out = buffers_[2];
     int64_t firstTick = referenceFirstTick(mic.endUs);
     bool complete = true;
@@ -366,7 +425,7 @@ class AecMonitor {
       in[i] = mic.data[i];
       if (!history_->sample(firstTick + int64_t(i) * 3000, ref[i])) complete = false;
     }
-    if (!complete) { ++stats_.missing; breakLevels(); return false; }
+    if (!complete) { ++stats_.missing; breakLevels(); return Event::None; }
     // Before the first transmitted sound, detection is unarmed and no echo is
     // present. Leave this CPU time for TLS/response startup instead of DSP.
     if (firstAudioUs_) aec_process(handle_, in, ref, out);
@@ -384,7 +443,8 @@ class AecMonitor {
     stats_.outMean = outMoments.mean() * aec_mic::divisor;
     stats_.preScaleClips += mic.preScaleClips;
     ++stats_.paired; stats_.clips += mic.clips;
-    bool armed = firstAudioUs_ && mic.endUs - 32000 >= firstAudioUs_ + int64_t(AEC_BARGE_WARMUP_MS) * 1000;
+    bool armed = firstAudioUs_ && mic.endUs - 32000 >= firstAudioUs_ + int64_t(AEC_BARGE_WARMUP_MS) * 1000 &&
+                 mic.endUs - 32000 >= rearmUs_;
     micLevels_.feed(stats_.micRms, armed); outLevels_.feed(stats_.outRms, armed);
     gateMicLevels_.feed(stats_.gateMicRms, armed); gateOutLevels_.feed(stats_.gateOutRms, armed);
     if (armed) {
@@ -402,11 +462,20 @@ class AecMonitor {
     if (armed && stats_.outRms >= AEC_BARGE_RMS && stats_.gateOutRms < AEC_BARGE_RMS)
       ++stats_.dcRejectedFrames;
     const bool triggered = bargeGate_.feed(stats_.gateMicRms, stats_.gateOutRms, armed, mic.clips, ageMs);
-    if (triggered) { triggerAudioAgeMs_ = ageMs; triggerRef_ = stats_.refRms; }
+    if (triggered) {
+      triggerAudioAgeMs_ = ageMs; triggerRef_ = stats_.refRms; ++triggers_;
+      // 確かめで再開すると判定の窓は消えるので、発火した4フレームの値をここで残す
+      triggerOut_ = triggerMic_ = UINT32_MAX;
+      for (uint32_t i = 0; i < AEC_BARGE_HOLD_FRAMES; ++i) {
+        if (bargeGate_.outFrame(i) < triggerOut_) triggerOut_ = bargeGate_.outFrame(i);
+        if (bargeGate_.micFrame(i) < triggerMic_) triggerMic_ = bargeGate_.micFrame(i);
+      }
+      triggerRetainedPct_ = retainedPercent();
+    }
     uint32_t elapsed = uint32_t(finishedUs - started);
     if (elapsed > stats_.cpuMaxUs) stats_.cpuMaxUs = elapsed;
     if (elapsed > 32000) ++stats_.slowFrames;
-    return triggered;
+    return triggered ? Event::Triggered : Event::None;
   }
 
   AecCaptureQueue<RxBlock, 2> rx_;
@@ -424,6 +493,11 @@ class AecMonitor {
   AecBargeGate bargeGate_;
   uint32_t triggerAudioAgeMs_ = 0;
   uint32_t refPeak_ = 0, triggerRef_ = 0;
+  uint32_t triggerOut_ = 0, triggerMic_ = 0, triggers_ = 0;
+  double triggerRetainedPct_ = NAN;
+  bool confirming_ = false, confirmTimeout_ = false;
+  int64_t confirmMuteUs_ = 0, rearmUs_ = 0;
+  uint32_t confirmRejects_ = 0, confirmFrames_ = 0, confirmVoiceFrames_ = 0, confirmMicMax_ = 0, confirmMs_ = 0;
   Stats stats_;
   uint32_t generation_ = 0, lastLog_ = 0, processedSequence_ = 0;
   uint32_t windowMicMax_ = 0, windowOutMax_ = 0;
