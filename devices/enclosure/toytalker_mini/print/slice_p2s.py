@@ -1,0 +1,173 @@
+"""ToyTalker mini 外装を Bambu Lab P2S 向けにスライスして、設定入りのプレート 3MF を作る。
+
+使い方（このフォルダで）:
+    python slice_p2s.py v0.6
+    python slice_p2s.py v0.7 --filament "Bambu PLA Matte @BBL P2S" --infill 20%
+
+入力:  toytalker_mini_<版>_box.stl / _lid.stl（Fusion の exportManager でボディごとに書き出したもの。単位 mm、
+       モデル座標のまま = 箱は開口が上、蓋は上面が上）
+出力:  toytalker_mini_<版>_plate.3mf（Bambu Studio で開いてそのまま「造形開始」できる）と、
+       確認用の plate_1_0.png（等角の見た目）
+
+やること:
+  1. Bambu Studio のシステムプリセット（machine / process / filament）を `inherits` をたどって 1 枚に平らにする
+     （CLI は inherits を解決しないため。`from` と `compatible_printers` は残さないと弾かれる）
+  2. process に外装用の上書きを入れる: 壁 3 周、サポートはプレートからの通常サポートのみ（吊り具の下だけに付く）、
+     橋はサポート無し（USB 穴・スイッチ穴の上）、小さな張り出しは無視、インフィル 15%
+  3. 蓋の STL を X 軸回りに 180° 回して上面をプレート側にする（爪と突起が上に伸びてサポート不要になる）
+  4. bambu-studio.exe を CLI で呼び、並べてスライスし、3MF を書き出す。続けて PNG も書き出す
+     （--export-png は他の動作と同時に付けられないので 2 回呼ぶ）
+"""
+import argparse
+import json
+import os
+import shutil
+import struct
+import subprocess
+import sys
+import tempfile
+
+BS_EXE = r"C:\Program Files\Bambu Studio\bambu-studio.exe"
+SYS_DIR = os.path.join(os.environ.get("APPDATA", ""), "BambuStudio", "system", "BBL")
+
+PROCESS_OVERRIDES = {
+    "wall_loops": "3",
+    "enable_support": "1",
+    "support_type": "normal(auto)",
+    "support_style": "default",
+    "support_threshold_angle": "30",
+    "support_on_build_plate_only": "1",
+    "bridge_no_support": "1",
+    "support_remove_small_overhang": "1",
+}
+
+
+def flatten(kind: str, name: str) -> dict:
+    """system/BBL/<kind>/<name>.json を inherits をたどって 1 枚にする。"""
+    chain = []
+    cur = name
+    while cur:
+        path = os.path.join(SYS_DIR, kind, cur + ".json")
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        chain.append(d)
+        cur = d.get("inherits")
+    out = {}
+    for d in reversed(chain):
+        out.update({k: v for k, v in d.items() if k != "inherits"})
+    out["from"] = "system"
+    out.setdefault("instantiation", "true")
+    return out
+
+
+def flip_lid(src: str, dst: str) -> None:
+    """バイナリ STL を X 軸回りに 180° 回し（y→-y, z→-z）、底が z=0 になるよう持ち上げる。"""
+    with open(src, "rb") as f:
+        data = f.read()
+    cnt = struct.unpack_from("<I", data, 80)[0]
+    tris = []
+    for i in range(cnt):
+        vals = struct.unpack_from("<12f", data, 84 + i * 50)
+        rot = lambda p: (p[0], -p[1], -p[2])
+        n = rot(vals[0:3])
+        v = [rot(vals[3:6]), rot(vals[6:9]), rot(vals[9:12])]
+        tris.append((n, [v[0], v[2], v[1]]))  # 頂点順を入れ替えて面の向きを保つ
+    zmin = min(p[2] for _, vs in tris for p in vs)
+    out = bytearray(b"\0" * 80) + struct.pack("<I", cnt)
+    for n, vs in tris:
+        out += struct.pack("<3f", *n)
+        for p in vs:
+            out += struct.pack("<3f", p[0], p[1], p[2] - zmin)
+        out += b"\0\0"
+    with open(dst, "wb") as f:
+        f.write(out)
+
+
+def run_cli(args: list, log_path: str) -> int:
+    with open(log_path, "a", encoding="utf-8") as log:
+        proc = subprocess.run([BS_EXE, *args], stdout=log, stderr=subprocess.STDOUT)
+    return proc.returncode
+
+
+def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("version", help="v0.6 のような版。toytalker_mini_<版>_box.stl / _lid.stl を読む")
+    ap.add_argument("--machine", default="Bambu Lab P2S 0.4 nozzle")
+    ap.add_argument("--process", default="0.20mm Standard @BBL P2S")
+    ap.add_argument("--filament", default="Bambu PLA Basic @BBL P2S")
+    ap.add_argument("--infill", default="15%", help="sparse_infill_density")
+    a = ap.parse_args()
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    base = f"toytalker_mini_{a.version}"
+    box = os.path.join(here, f"{base}_box.stl")
+    lid = os.path.join(here, f"{base}_lid.stl")
+    for p in (box, lid):
+        if not os.path.exists(p):
+            print("見つからない:", p)
+            return 1
+    if not os.path.exists(BS_EXE):
+        print("Bambu Studio が見つからない:", BS_EXE)
+        return 1
+
+    work = tempfile.mkdtemp(prefix="toytalker_slice_")
+    out_dir = os.path.join(work, "out")
+    png_dir = os.path.join(work, "png")
+    os.makedirs(out_dir)
+    os.makedirs(png_dir)
+    log_path = os.path.join(work, "cli.log")
+
+    mach = flatten("machine", a.machine)
+    proc = flatten("process", a.process)
+    fila = flatten("filament", a.filament)
+    proc.update(PROCESS_OVERRIDES)
+    proc["sparse_infill_density"] = a.infill
+    proc["name"] = f"{a.process} - {base}"
+    proc["compatible_printers"] = [a.machine]
+    fila["compatible_printers"] = [a.machine]
+    paths = {}
+    for kind, d in (("machine", mach), ("process", proc), ("filament", fila)):
+        paths[kind] = os.path.join(work, f"{kind}.json")
+        with open(paths[kind], "w", encoding="utf-8") as f:
+            json.dump(d, f, ensure_ascii=False, indent=1)
+
+    lid_flipped = os.path.join(work, "lid_flipped.stl")
+    flip_lid(lid, lid_flipped)
+    box_copy = os.path.join(work, "box.stl")
+    shutil.copy(box, box_copy)
+
+    plate_name = f"{base}_plate.3mf"
+    rc = run_cli([
+        "--debug", "2",
+        "--load-settings", f"{paths['machine']};{paths['process']}",
+        "--load-filaments", paths["filament"],
+        "--arrange", "1", "--orient", "0", "--slice", "0",
+        "--export-3mf", plate_name, "--outputdir", out_dir,
+        box_copy, lid_flipped,
+    ], log_path)
+    result_path = os.path.join(out_dir, "result.json")
+    result = json.load(open(result_path, encoding="utf-8")) if os.path.exists(result_path) else {}
+    if rc != 0 or not os.path.exists(os.path.join(out_dir, plate_name)):
+        print("スライス失敗 rc=", rc, result.get("error_string"), "\nログ:", log_path)
+        return 1
+
+    plate_src = os.path.join(out_dir, plate_name)
+    run_cli(["--debug", "1", "--export-png", "0", "--camera-view", "0", "--outputdir", png_dir, plate_src], log_path)
+
+    shutil.copy(plate_src, os.path.join(here, plate_name))
+    png_src = os.path.join(png_dir, "plate_1_0.png")
+    if os.path.exists(png_src):
+        shutil.copy(png_src, os.path.join(here, f"{base}_plate.png"))
+
+    sp = (result.get("sliced_plates") or [{}])[0]
+    fil = (sp.get("filaments") or [{}])[0]
+    print("出力:", os.path.join(here, plate_name))
+    print("造形時間(秒):", round(sp.get("main_predication", 0)), " フィラメント(g):", round(fil.get("total_used_g", 0), 2))
+    print("作業フォルダ（ログ・gcode）:", work)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

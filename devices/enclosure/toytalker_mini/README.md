@@ -15,7 +15,7 @@
 
 ## 印刷の手順（Bambu Studio）
 
-- **スライス済みプロジェクト `print/toytalker_mini_v0.6_plate.3mf`** を Bambu Studio で開けば、下の置き方・設定が入った状態で印刷できる（P2S 0.4 ノズル、Bambu PLA Basic、0.20mm Standard を元に壁 3 周・サポートはプレートからの通常サポートのみ・橋はサポート無し。推定 15 分、8.5 g）。Bambu Studio のコマンドラインで作った: システムのプリセット JSON を `inherits` をたどって 1 枚に平らにし（`from` と `compatible_printers` は残す）、`bambu-studio.exe --load-settings "machine.json;process.json" --load-filaments filament.json --arrange 1 --orient 0 --slice 0 --export-3mf ...` に箱の STL と、Z を反転した蓋の STL を渡す（`--export-png` は他の動作と同時に付けられない）。
+- **スライス済みプロジェクト `print/toytalker_mini_v0.6_plate.3mf`** を Bambu Studio で開けば、下の置き方・設定が入った状態で印刷できる（P2S 0.4 ノズル、Bambu PLA Basic、0.20mm Standard を元に壁 3 周・サポートはプレートからの通常サポートのみ・橋はサポート無し。推定 15 分、8.5 g）。作るのは `print/slice_p2s.py`（このフォルダで `python slice_p2s.py v0.6`。箱と蓋の STL から、Bambu Studio の CLI でプレート 3MF と確認用 PNG を出す。中でやっていること: システムのプリセット JSON を `inherits` をたどって 1 枚に平らにし（CLI は inherits を解決しない。`from` と `compatible_printers` は残す）、process に壁 3 周・サポート・橋の上書きを入れ、蓋の STL を X 軸回りに 180° 回してから `bambu-studio.exe --load-settings ... --load-filaments ... --arrange 1 --orient 0 --slice 0 --export-3mf` を呼ぶ。`--export-png` は他の動作と同時に付けられないので別に呼ぶ）。
 - 部品ごとの形は `print/toytalker_mini_v0.6_box.3mf` と `_lid.3mf`（単位 mm。STL も同じ中身）。Fusion から書き出す場合は `exportManager.createC3MFExportOptions(body, path)` でボディごとに出す。
 - **箱**: 開口を上にしてそのまま置く。吊り具の下面（高さ 4.5 の張り出し 5.5）だけサポートが要る。他の穴（USB の上の橋 9.6、スイッチ穴、吊り穴 Ø2 横向き、受け溝）はサポート無しで出る。
 - **蓋**: 上面を下にして（裏返して）置く。爪と突起が上に伸びるのでサポート不要。ボタンのスリット 0.5 が 1 層目で潰れていたらカッターで通すか、`build_v06.py` の `slit` を 0.6 にして組み直す。
