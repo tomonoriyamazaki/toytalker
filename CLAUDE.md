@@ -8,7 +8,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 
 - 残作業全体: [ロードマップ](docs/roadmap.md)。やらないと決めたことは [先送り項目](docs/deferred-items.md)
 - インフラ（CDK・複数アカウント）: 状態は [ロードマップ](docs/roadmap.md) の「いまの状態」、決定と根拠は [複数アカウント計画](docs/multi-account-iac-plan.md) と [命名規則](docs/naming-conventions.md)、手順は [infra/README](infra/README.md)
-- セキュリティ: [セキュリティ見直し](docs/security-review-2026-10-25.md)
+- セキュリティ: [セキュリティ見直し](docs/security-review-2026-10-25.md)。送信元 IP とアクセスログの扱い（決定・法的整理・設計）は [アクセスログ](docs/access-logs.md)
 - ESP32ファーム: [ESP32ファーム](docs/esp32-firmware.md)（状態・ビルド・調査メモ一覧）
 - 基板（KiCad、ESP32-S3 スタンドアロン機）: 今の設計は `devices/KiCad/toytalker_mini_v0.3/`（[部品表](devices/KiCad/toytalker_mini_v0.3/PARTS_LIST.md) が値とネットの正、[ピン割当](devices/KiCad/toytalker_mini_v0.3/PINMAP.md) が GPIO の正）。配置の地図と部品選定の経緯は v0.2 フォルダ（LAYOUT_PLAN.md・PARTS_AND_POWER.md）、フットプリントの作り方・確かめ方（kicad-cli）・発注前チェック・JLCPCB の注文条件は [マイコン](docs/mcu.md) の「基板設計の覚え書き」。配布した基板の版はフォルダごと残す（v0.1・v0.2）
 - ZakiCorp TTS（クローンボイス）: [ZakiCorp TTS](docs/zakicorp-tts.md)（状態・所在）、[起動・復旧](docs/tts-boot-recovery.md)（手順）、[バッチエンジン](docs/qwen3-tts-batch-engine-2026-09-12.md)（設計・計測）

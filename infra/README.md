@@ -77,7 +77,7 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 |---|---|
 | `kind` | `turn`（本文）/ `backchannel`（相槌）/ `stt-token`（Soniox鍵発行とOTA判定）/ `read-aloud`（読み上げ）/ `settings`（設定）/ `billing`（課金 API。`stripe_event` `stripe_type` と `reason`）/ `billing-worker`（課金の処理。`status` は recorded / duplicate / dropped / retry / ignored。スケジュールの回は `task`（auto-charge / expire）と件数の内訳） |
 | `request_id` `session_id` `device_id` `owner_id` | 識別子。`request_id` はLambdaの requestId（`REPORT` 行と同じ値） |
-| `source` `fw` `app_version` `ua` | 出どころ。`source` は `esp` / `app`。`fw` はESP32が本文に添えるファーム版（v0.7.3以降）、`app_version` はアプリ版（`app/lib/appVersion.ts`。次の配布以降）。古い版からの要求は null。**送信元IPは書かない**（個人に結びつく。2026-10-28決定） |
+| `source` `fw` `app_version` `ua` | 出どころ。`source` は `esp` / `app`。`fw` はESP32が本文に添えるファーム版（v0.7.3以降）、`app_version` はアプリ版（`app/lib/appVersion.ts`。次の配布以降）。古い版からの要求は null。**送信元IPは書かない**（個人に結びつく。2026-10-28決定。2026-11-09 に「CloudFront のアクセスログとしてだけ 180 日残す」方針に変えたが、Lambda ログに入れない点は変わらない。実装はロードマップ 29、設計は [docs/access-logs.md](../docs/access-logs.md)） |
 | `edge` `country` | 経路（2026-10-29）。`cloudfront` = 固定ドメイン経由で、`country` に `CloudFront-Viewer-Country` の国コード（JP など）。`direct` = Function URL を直接呼ぶ旧ファーム・旧アプリで、`country` は null。`direct` が無くなったら Function URL を IAM 認証にする（下の「固定ドメイン」） |
 | `llm` `tts` `voice` `character_id` `has_personality` | 使った設定 |
 | `marks` | 段階の経過時刻（リクエスト開始からのms）。本文は `secrets`（SSM鍵）→ `config`（DynamoDB）→ `llm_start` → `llm_first_token` →（検索時 `tool_call` → `llm2_start` → `llm2_first_token`）→ `llm_done` → `done_sent` → `usage_saved` |
@@ -115,7 +115,7 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 - **オリジンへ渡すヘッダーは allowList**（`content-type` `accept` `user-agent` `origin` `access-control-request-*` `cloudfront-viewer-country` `x-toytalker-token`。`x-amz-content-sha256` は OAC が扱うので書けない）。Host を渡すと Function URL が受け付けない。`Authorization` は OAC が上書きするので、認証（ロードマップ4）のトークンは `x-toytalker-token`（[docs/auth.md](../docs/auth.md)）。
 - **WAF は本番だけ**（`apiRateLimitPer5Min` のある環境。RnD は省略、理由は [docs/deferred-items.md](../docs/deferred-items.md)）: 送信元 IP ごとに 5分で 300 件を超えると 403。サンプル要求の保存とログは切る（IP を残さない）。件数は us-east-1 の CloudWatch `AWS/WAFV2` の `BlockedRequests`。費用は WebACL $5 + ルール $1 + 100万要求あたり $0.60（月約 $6）。CloudFront と ACM は無料枠内。
 - **応答待ちは 60 秒**（最初の1バイトまで、および途中のパケット間隔）。LLM の初回トークンがそれより遅いと 504。
-- **アクセスログは取らない**（送信元 IP が入る。cdk-nag の CFR3 を理由付きで受け入れ）。地域制限も掛けない（海外の利用者。CFR1）。
+- **アクセスログは今は取っていない**（送信元 IP が入る。cdk-nag の CFR3 を理由付きで受け入れ）。**2026-11-09 に「標準ログ v2 で項目を絞り、専用バケットに 180 日残す」方針に変えた**（ロードマップ 29。設計は [docs/access-logs.md](../docs/access-logs.md)）。実装したらこの行と CFR3 の受け入れ文言を直す。地域制限は掛けない（海外の利用者。CFR1）。
 
 初回の出し方（RnD は 2026-10-29 に実施済み。次の環境でも同じ）:
 
