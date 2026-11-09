@@ -91,8 +91,10 @@ inline String turnReportJson(const TurnReport& r) {
     // 発火後の確かめ（0.7.9）: 発火の回数・「声ではない」で続けた回数・最後の確かめの中身
     snprintf(buf, sizeof(buf),
       ",\"aec_triggers\":%lu,\"aec_confirm_rejects\":%lu,\"aec_confirm_voice_frames\":%lu,"
+      "\"aec_confirm_vad_frames\":%lu,\"aec_confirm_loud_frames\":%lu,"
       "\"aec_confirm_mic_max\":%lu,\"aec_confirm_ms\":%lu,\"aec_confirm_timeout\":%d",
       (unsigned long)a.triggers, (unsigned long)a.confirmRejects, (unsigned long)a.confirmVoiceFrames,
+      (unsigned long)a.confirmVadFrames, (unsigned long)a.confirmLoudFrames,
       (unsigned long)a.confirmMicMax, (unsigned long)a.confirmMs, a.confirmTimeout ? 1 : 0);
     out += buf;
   }

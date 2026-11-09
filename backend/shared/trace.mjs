@@ -106,6 +106,7 @@ const DEVICE_PREV_COUNTS = [
   "aec_trigger_out", "aec_trigger_mic", "aec_ref_peak", "aec_trigger_ref",
   // 発火後の確かめ（ファーム 0.7.9）
   "aec_triggers", "aec_confirm_rejects", "aec_confirm_voice_frames", "aec_confirm_mic_max",
+  "aec_confirm_vad_frames", "aec_confirm_loud_frames", // 0.7.10
 ];
 const DEVICE_PREV_FLAGS = ["tls_ok", "bc", "aec_fired", "aec_confirm_timeout"];
 const DEVICE_PREV_STOPS = ["done", "aec", "button", "stream_error", "connect_failed", "i2s_failed"];

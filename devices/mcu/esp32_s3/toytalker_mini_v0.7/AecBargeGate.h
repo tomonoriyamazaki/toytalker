@@ -27,6 +27,10 @@ constexpr uint32_t AEC_CONFIRM_RMS = 1200;         // 声とみなすマイク�
 constexpr uint32_t AEC_CONFIRM_VOICE_FRAMES = 3;   // 窓の中でこれだけ超えたら声（連続でなくてよい。音節の切れ目があるため）
 constexpr uint32_t AEC_CONFIRM_TIMEOUT_MS = 1000;  // マイクのフレームが来ないときの保険。来なければ割り込み扱い（従来どおり止める）
 constexpr uint32_t AEC_REARM_MS = 300;             // 再開してから判定を再開するまで
+// 0.7.10: 音量に加えて ESP-SR の VAD（声の特徴）も見る。指がマイクに当たる音など、大きいが声でない音を除くため。
+// モードは大きいほど声と判定しにくい（esp_vad.h）。VAD が作れなければ音量だけで判定する（0.7.9 と同じ）
+constexpr int AEC_CONFIRM_VAD_MODE = 2;            // VAD_MODE_2（試験値）
+constexpr uint32_t AEC_CONFIRM_VAD_MS = 30;        // VAD に渡す長さ（32ms のフレームの先頭 480 サンプル）
 constexpr uint32_t AEC_CONFIRM_WINDOW_FRAMES = AEC_CONFIRM_WINDOW_MS * 16 / AEC_BARGE_FRAME_SAMPLES;
 static_assert(AEC_CONFIRM_WINDOW_FRAMES * AEC_BARGE_FRAME_SAMPLES == AEC_CONFIRM_WINDOW_MS * 16,
               "confirm window must contain whole AEC frames");

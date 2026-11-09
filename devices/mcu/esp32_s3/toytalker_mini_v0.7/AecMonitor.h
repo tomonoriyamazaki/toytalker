@@ -2,6 +2,7 @@
 #include <Arduino.h>
 #include <driver/i2s_std.h>
 #include <esp_aec.h>
+#include <esp_vad.h>
 #include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <math.h>
@@ -63,7 +64,9 @@ class AecMonitor {
     // 発火後の確かめ（0.7.9。AecBargeGate.h の AEC_CONFIRM_*）。trigger_* は最後の発火の値
     uint32_t triggers = 0;                    // 発火した回数（確かめに入った回数）
     uint32_t confirmRejects = 0;              // 確かめで「声ではない」として再生を続けた回数
-    uint32_t confirmVoiceFrames = 0;          // 最後の確かめで AEC_CONFIRM_RMS を超えたフレーム数
+    uint32_t confirmVoiceFrames = 0;          // 最後の確かめで声と数えたフレーム（音量が AEC_CONFIRM_RMS 以上 かつ VAD が声）
+    uint32_t confirmVadFrames = 0;            // 最後の確かめで VAD が声と言ったフレーム（音量は問わない）
+    uint32_t confirmLoudFrames = 0;           // 最後の確かめで音量だけ超えたフレーム（VAD は問わない）
     uint32_t confirmMicMax = 0;               // 最後の確かめのマイク AC RMS の最大（スピーカーを止めた後の外の音）
     uint32_t confirmMs = 0;                   // 最後の確かめの、アンプを切ってから決めるまで
     bool confirmTimeout = false;              // マイクのフレームが来ず、保険で割り込み扱いにした
@@ -93,6 +96,8 @@ class AecMonitor {
     r.triggers = triggers_;
     r.confirmRejects = confirmRejects_;
     r.confirmVoiceFrames = confirmVoiceFrames_;
+    r.confirmVadFrames = confirmVadFrames_;
+    r.confirmLoudFrames = confirmLoudFrames_;
     r.confirmMicMax = confirmMicMax_;
     r.confirmMs = confirmMs_;
     r.confirmTimeout = confirmTimeout_;
@@ -111,6 +116,8 @@ class AecMonitor {
                                                           MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
     if (storageReady()) handle_ = createHandle();
+    vad_ = vad_create(static_cast<vad_mode_t>(AEC_CONFIRM_VAD_MODE));
+    Serial.printf("[AEC] confirm_vad=%d mode=%d\n", vad_ != nullptr, AEC_CONFIRM_VAD_MODE);
     if (!handle_) {
       Serial.println("[AEC] init failed or unsupported frame size; raw level monitor only");
       release();
@@ -173,6 +180,7 @@ class AecMonitor {
     triggerOut_ = triggerMic_ = 0; triggerRetainedPct_ = NAN; triggers_ = 0;
     confirming_ = false; confirmMuteUs_ = 0; rearmUs_ = 0;
     confirmRejects_ = confirmFrames_ = confirmVoiceFrames_ = confirmMicMax_ = confirmMs_ = 0;
+    confirmVadFrames_ = confirmLoudFrames_ = 0;
     confirmTimeout_ = false;
     dcReady_ = false; firstAudioUs_ = 0; processedSequence_ = 0;
     generation_ = generation; lastLog_ = millis(); summaryPending_ = false;
@@ -189,6 +197,7 @@ class AecMonitor {
   void beginConfirm(int64_t muteUs) {
     confirming_ = true; confirmMuteUs_ = muteUs;
     confirmFrames_ = confirmVoiceFrames_ = confirmMicMax_ = confirmMs_ = 0;
+    confirmVadFrames_ = confirmLoudFrames_ = 0;
     confirmTimeout_ = false;
   }
   // 「声ではない」で再生を続けるとき。判定は AEC_REARM_MS 後から（再開直後の音の立ち上がりで発火させない）
@@ -201,10 +210,11 @@ class AecMonitor {
   }
   bool confirming() const { return confirming_; }
   void printConfirm(const char* result) const {
-    Serial.printf("[AEC_CONFIRM] result=%s voice_frames=%lu frames=%lu mic_max=%lu threshold=%lu elapsed_ms=%lu rejects=%lu timeout=%d\n",
-                  result, (unsigned long)confirmVoiceFrames_, (unsigned long)confirmFrames_,
+    Serial.printf("[AEC_CONFIRM] result=%s voice_frames=%lu vad_frames=%lu loud_frames=%lu frames=%lu mic_max=%lu threshold=%lu elapsed_ms=%lu rejects=%lu timeout=%d vad=%d\n",
+                  result, (unsigned long)confirmVoiceFrames_, (unsigned long)confirmVadFrames_,
+                  (unsigned long)confirmLoudFrames_, (unsigned long)confirmFrames_,
                   (unsigned long)confirmMicMax_, (unsigned long)AEC_CONFIRM_RMS, (unsigned long)confirmMs_,
-                  (unsigned long)confirmRejects_, confirmTimeout_);
+                  (unsigned long)confirmRejects_, confirmTimeout_, vad_ != nullptr);
   }
   void finish() {
     // Pending delayed mic frames are discarded, not waited for during STT restart.
@@ -405,8 +415,17 @@ class AecMonitor {
     const uint32_t level = aec_mic::gateRms(rms(moments.acEnergy()));
     ++confirmFrames_;
     if (level > confirmMicMax_) confirmMicMax_ = level;
-    // スピーカーを止めた後の飽和は外の大きな音（大声）なので声に数える
-    if (mic.clips || level >= AEC_CONFIRM_RMS) ++confirmVoiceFrames_;
+    // スピーカーを止めた後の飽和は外の大きな音（大声か、マイクに触れた音）。音量としては超えた扱い
+    const bool loud = mic.clips || level >= AEC_CONFIRM_RMS;
+    bool speech = true;  // VAD が無ければ音量だけ（0.7.9 と同じ）
+    if (vad_) {
+      int16_t* frame = buffers_[0];
+      for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) frame[i] = mic.data[i];
+      speech = vad_process(vad_, frame, 16000, AEC_CONFIRM_VAD_MS) == VAD_SPEECH;
+      if (speech) ++confirmVadFrames_;
+    }
+    if (loud) ++confirmLoudFrames_;
+    if (loud && speech) ++confirmVoiceFrames_;
     const bool voice = confirmVoiceFrames_ >= AEC_CONFIRM_VOICE_FRAMES;
     if (!voice && confirmFrames_ < AEC_CONFIRM_WINDOW_FRAMES) return Event::None;
     confirming_ = false;
@@ -483,6 +502,7 @@ class AecMonitor {
   AecCaptureState capture_;
   uint32_t rxSequence_ = 0, txSequence_ = 0;  // respective ISR only, reset while capture disabled
   aec_handle_t* handle_ = nullptr;
+  vad_handle_t vad_ = nullptr;  // 確かめだけで使う。起動時に1つ作り、作り直さない
   History* history_ = nullptr;
   Pending* pending_ = nullptr;
   int16_t* buffers_[3] = {};
@@ -498,6 +518,7 @@ class AecMonitor {
   bool confirming_ = false, confirmTimeout_ = false;
   int64_t confirmMuteUs_ = 0, rearmUs_ = 0;
   uint32_t confirmRejects_ = 0, confirmFrames_ = 0, confirmVoiceFrames_ = 0, confirmMicMax_ = 0, confirmMs_ = 0;
+  uint32_t confirmVadFrames_ = 0, confirmLoudFrames_ = 0;
   Stats stats_;
   uint32_t generation_ = 0, lastLog_ = 0, processedSequence_ = 0;
   uint32_t windowMicMax_ = 0, windowOutMax_ = 0;
