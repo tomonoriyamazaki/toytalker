@@ -11,6 +11,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - セキュリティ: [セキュリティ見直し](docs/security-review-2026-10-25.md)
 - ESP32ファーム: [ESP32ファーム](docs/esp32-firmware.md)（状態・ビルド・調査メモ一覧）
 - 基板（KiCad、ESP32-S3 スタンドアロン機）: 今の設計は `devices/KiCad/toytalker_mini_v0.3/`（[部品表](devices/KiCad/toytalker_mini_v0.3/PARTS_LIST.md) が値とネットの正、[ピン割当](devices/KiCad/toytalker_mini_v0.3/PINMAP.md) が GPIO の正）。配置の地図と部品選定の経緯は v0.2 フォルダ（LAYOUT_PLAN.md・PARTS_AND_POWER.md）、フットプリントの作り方・確かめ方（kicad-cli）・発注前チェック・JLCPCB の注文条件は [マイコン](docs/mcu.md) の「基板設計の覚え書き」。配布した基板の版はフォルダごと残す（v0.1・v0.2）
+- 外装（Fusion、ペンダント型）: [外装 README](devices/enclosure/toytalker_mini/README.md)（状態・Fusion 側の所在・Claude Code から Fusion を操作する手順）。正本は Fusion のクラウドで、書き出した .f3d / .step をここに置く
 - ZakiCorp TTS（クローンボイス）: [ZakiCorp TTS](docs/zakicorp-tts.md)（状態・所在）、[起動・復旧](docs/tts-boot-recovery.md)（手順）、[バッチエンジン](docs/qwen3-tts-batch-engine-2026-09-12.md)（設計・計測）
 - 利用者認証（Cognito + Google / Apple。ロードマップ4）: [利用者認証](docs/auth.md)（状態・仕組み・各社側の設定・確認の仕方）
 - 原価・課金・前払いポイント制（Stripe・購入ページ `web/site/buy/`）: [原価と課金の考え方](docs/pricing-and-cost-model.md)（段階3の設計は 11.10）
