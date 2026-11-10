@@ -36,7 +36,52 @@ export const PAID_TOOLS = {
 };
 
 // 検索結果と一緒に渡す指示。検索直後のターンだけに効かせ、通常ターンの口調には影響させない。
-export const TOOL_RESULT_INSTRUCTION = "この検索結果をもとに答えてください。「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は入れず、答えの中身から話し始めてください。口調や温かさはいつも通りのキャラクターのままで、そのあとも自然に会話を続けてください。";
+export const TOOL_RESULT_INSTRUCTION = "この検索結果をもとに答えてください。「調べてみるね」「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は入れず、答えの中身から話し始めてください。もう一度検索はできません。口調や温かさはいつも通りのキャラクターのままで、そのあとも自然に会話を続けてください。";
+
+// システムプロンプトに足す検索の案内。「調べるね」はキャラクターの口調で言わせたいのでモデルに言わせる
+export const SEARCH_TOOL_HINT = "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。";
+
+/** 「調べてみるね」「ちょっと待ってね、今すぐ調べるね」のような、これから調べると言うだけの1文か。
+ *  検索結果を渡した後の返答の1文目にこれが来たら読み上げずに捨てる（検索前にも言っているので2回になる。2026-11-09/10 に ESP32 で確認。ロードマップ30）。
+ *  「調べてみたら晴れだったよ」のような結果の文は当たらない（「調べてみた」は対象外） */
+// 「これから調べる」の動詞。「お空の様子を見てみるね」「確認してみるね」のような言い方も実機で出た（2026-11-10）
+const SEARCH_VERB = "(調べ(てみる|てくる|る)|探し(てみる|てくる)|探す|検索(してみる|してくる|する)|見てみる|確認(してみる|してくる|する))";
+const PREFACE_RE = new RegExp(`^[^。！？!?]{0,20}${SEARCH_VERB}(ね|よ|から|わ|のだ)?[^。！？!?]{0,10}[。！？!?…]*$`);
+// 「ちょっと待ってね」「少し待っててね」だけの文
+const WAIT_RE = /^(ちょっと|少し|すこし|もう)?(だけ)?(待って|まって)(て|てて)?(ね|ください|てね)?[ー〜~]*[。！？!?…]*$/;
+
+export function isSearchPreface(sentence) {
+  return PREFACE_RE.test(String(sentence ?? "").trim());
+}
+
+/** 返答全体が「探してみるね。待っててね。」のような、調べると言っただけのものか。
+ *  ツールを呼ばずにこれで終わったら、本文Lambdaが検索を必ず呼ばせてもう1回頼む（指示ありだと Gemini 3.5 Flash Lite で
+ *  ニュースの質問4回中2回これになった。2026-11-10 の比較。ロードマップ30）。長い返答や「調べ」系の動詞が無い返答は当たらない */
+export function isSearchPromiseOnly(text) {
+  const t = String(text ?? "").trim();
+  if (!t || t.length > 60) return false;
+  const sentences = t.split(/(?<=[。！？!?])/).map((s) => s.trim()).filter(Boolean);
+  if (sentences.length > 3) return false;
+  return sentences.some((s) => isSearchPreface(s)) && sentences.every((s) => isSearchPreface(s) || WAIT_RE.test(s));
+}
+
+/**
+ * 検索結果を返した要求でモデルがまた検索を求めたときの、もう一回分の会話。
+ * 最後のツールの往復（呼び出しと結果）を外し、結果を普通の文章として直前の利用者の発話に添える。
+ * ツール定義なしで3社とも受け付ける形になる（Anthropic はツールの往復がある会話で tools を外すと拒むため）。
+ */
+export function inlineLastToolRound(messages) {
+  const respIdx = messages.findLastIndex((m) => m.functionResponse);
+  if (respIdx < 0) return messages;
+  const callIdx = messages.findLastIndex((m, i) => i < respIdx && m.functionCall);
+  const r = messages[respIdx].functionResponse.response ?? {};
+  const out = messages.filter((_, i) => i !== respIdx && i !== callIdx);
+  const userIdx = out.findLastIndex((m) => m.role === "user" && typeof m.content === "string");
+  const note = `\n\n（ウェブ検索の結果: ${JSON.stringify(r.results ?? r)}）\n${r.instruction ?? TOOL_RESULT_INSTRUCTION}`;
+  if (userIdx < 0) return [...out, { role: "user", content: note.trim() }];
+  out[userIdx] = { ...out[userIdx], content: out[userIdx].content + note };
+  return out;
+}
 
 /** Brave Search API（自社インデックス、SOC 2、クエリ不共有）。結果は [{ title, snippet, url }]。
  *  2026-10-27に Serper（Google結果の仲介）から切替。子供向け日本語20問で上位3件を比べ同等以上、応答は約半分、
@@ -72,17 +117,18 @@ export async function searchWeb(query, numResults = 3, trace = null) {
  * @param {string} p.model
  * @param {Array} p.messages  上記の共通形
  * @param {Array|null} p.tools  WEB_SEARCH_TOOL のような { name, description, parameters } の配列
- * @param {"auto"|"none"} [p.toolChoice]  "none" はツール定義は渡すが呼ばせない（検索結果を返した2回目の要求で使う。
- *   会話に tool の往復が入っていると Anthropic は tools 無しを拒むので、外すのではなく禁止する）
+ * @param {"auto"|"none"|"required"} [p.toolChoice]  "none" はツール定義は渡すが呼ばせない（検索結果を返した2回目の要求で使う。
+ *   会話に tool の往復が入っていると Anthropic は tools 無しを拒むので、外すのではなく禁止する）。
+ *   "required" は必ずどれかのツールを呼ばせる（「探してみるね」と言っただけで終わった返答のやり直しで使う）
  * @param {{in:number,out:number}} p.usage  トークン数の足し込み先
  * @param {object} [p.trace]  backend/shared/trace.mjs の startTrace()。要求ごとの応答コードと所要時間を ext に記録する
  */
 export function chatStream({ provider, model, messages, tools = null, toolChoice = "auto", usage, trace = null }) {
   const u = usage ?? { in: 0, out: 0 };
-  const noTools = tools && toolChoice === "none";
-  if (provider === "openai")    return streamOpenAI(messages, model, tools, noTools, u, trace);
-  if (provider === "google")    return streamGemini(messages, model, tools, noTools, u, trace);
-  if (provider === "anthropic") return streamAnthropic(messages, model, tools, noTools, u, trace);
+  const choice = tools ? toolChoice : "auto";
+  if (provider === "openai")    return streamOpenAI(messages, model, tools, choice, u, trace);
+  if (provider === "google")    return streamGemini(messages, model, tools, choice, u, trace);
+  if (provider === "anthropic") return streamAnthropic(messages, model, tools, choice, u, trace);
   return (async function* () { yield { type: "text", text: "（LLM ルート未実装です）" }; })();
 }
 
@@ -149,7 +195,7 @@ function toOpenAIMessages(messages) {
   });
 }
 
-function streamOpenAI(messages, model, tools, noTools, usage, trace) {
+function streamOpenAI(messages, model, tools, choice, usage, trace) {
   const body = {
     model,
     temperature: 0.7,
@@ -159,7 +205,8 @@ function streamOpenAI(messages, model, tools, noTools, usage, trace) {
   };
   if (tools) {
     body.tools = tools.map((t) => ({ type: "function", function: { name: t.name, description: t.description, parameters: t.parameters } }));
-    if (noTools) body.tool_choice = "none";
+    if (choice === "none") body.tool_choice = "none";
+    if (choice === "required") body.tool_choice = "required";
   }
   return (async function* () {
     const resp = await postJson("https://api.openai.com/v1/chat/completions", { Authorization: `Bearer ${secret("OPENAI_API_KEY")}` }, body, "OpenAI", trace);
@@ -223,12 +270,13 @@ export function geminiThinkingConfig(model) {
   return /^gemini-2\./.test(model) ? { thinkingBudget: 0 } : { thinkingLevel: "minimal" };
 }
 
-function streamGemini(messages, model, tools, noTools, usage, trace) {
+function streamGemini(messages, model, tools, choice, usage, trace) {
   const { systemMsg, contents } = toGeminiRequest(messages);
   const body = { contents, generationConfig: { temperature: 0.7, thinkingConfig: geminiThinkingConfig(model) } };
   if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg.content }] };
   if (tools) body.tools = [{ function_declarations: tools }];
-  if (noTools) body.toolConfig = { functionCallingConfig: { mode: "NONE" } };
+  if (choice === "none") body.toolConfig = { functionCallingConfig: { mode: "NONE" } };
+  if (choice === "required") body.toolConfig = { functionCallingConfig: { mode: "ANY" } };
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${secret("GOOGLE_API_KEY")}`;
 
   return (async function* () {
@@ -275,7 +323,7 @@ function toAnthropicRequest(messages) {
   return { systemMsg, chat };
 }
 
-function streamAnthropic(messages, model, tools, noTools, usage, trace) {
+function streamAnthropic(messages, model, tools, choice, usage, trace) {
   const { systemMsg, chat } = toAnthropicRequest(messages);
   const body = { model, max_tokens: 1024, stream: true, messages: chat };
   // Claude 4.6 以降は temperature を送ると 400、代わりに effort で思考量を抑える（会話用は low）。
@@ -284,7 +332,8 @@ function streamAnthropic(messages, model, tools, noTools, usage, trace) {
   if (legacy) body.temperature = 0.7; else body.output_config = { effort: "low" };
   if (systemMsg) body.system = systemMsg.content;
   if (tools) body.tools = tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
-  if (noTools) body.tool_choice = { type: "none" };
+  if (choice === "none") body.tool_choice = { type: "none" };
+  if (choice === "required") body.tool_choice = { type: "any" };
 
   return (async function* () {
     const resp = await postJson("https://api.anthropic.com/v1/messages", { "x-api-key": secret("ANTHROPIC_API_KEY"), "anthropic-version": "2023-06-01" }, body, "Anthropic", trace);

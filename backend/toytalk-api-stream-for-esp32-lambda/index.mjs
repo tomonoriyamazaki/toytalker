@@ -12,7 +12,7 @@
   import { tableName } from "../shared/tables.mjs";
   import { recordConsume, checkBalance } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
-  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
+  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
   import { startTrace, describeClient, describePrevTurn, describeDevice, errorStatus } from "../shared/trace.mjs";
 import { checkDeviceKey, deviceGate } from "../shared/auth.mjs";
 
@@ -790,7 +790,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     // システムプロンプトに置くと通常ターンの口調まで素っ気なくなるため。
     // 検索ツールは3社共通（backend/shared/llm.mjs）。プロンプトの「検索できます」と実際のツール付与は必ず同じ条件にする
     const enableTools = !!secret("BRAVE_API_KEY");
-    const toolHint = enableTools ? "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。" : "";
+    const toolHint = enableTools ? SEARCH_TOOL_HINT : "";
     const basePrompt = `あなたは子供向けの友好的な音声アシスタントです。簡潔に答えて、自然に会話を続けてください。単語の間に半角スペースを入れないでください。現在の日時は${now}です。日時を聞かれたら年は省略して簡潔に答えてください。相手が話した言語で返答してください。${backchannelHint}${toolHint}`;
     const systemPrompt = {
       role: "system",
@@ -943,91 +943,96 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
     // ---- LLM ストリーム処理（共通インターフェース）----
     try {
-      // ---- LLM ストリーム処理（tool callループ対応）----
-      let toolCallDetected = false;
-      trace.mark("llm_start");
-      for await (const delta of llmStream) {
-        if (delta.type === "toolCall") {
-          toolCallDetected = true;
-          trace.mark("tool_call");
-          trace.set({ tool: delta.name }); // 検索語は発話から作られるので書かない
-          // tool call前のつなぎテキストをflush
-          const preBuf = buf.trim();
-          if (preBuf) {
+      // テキストを文に区切って送る。ツール呼び出しが来たらそれを返して止まる（来なければ null）。
+      // afterSearch: 検索結果を渡した後の要求。頭の「調べてみるね」系の1文は捨てる（指示しても言うことがある。ロードマップ30）
+      // dropPreface: 頭の「調べてみるね」系の1文を捨てるだけ（検索のやり直しの要求。もう言ってあるので）
+      let spokeAfterSearch = false;
+      async function pumpLLM(stream, label, { afterSearch = false, dropPreface = afterSearch } = {}) {
+        let first = true;
+        const emit = async (segText, opts) => {
+          if (dropPreface && first && isSearchPreface(segText)) { first = false; trace.set({ preface_dropped: true }); return; }
+          if (afterSearch) spokeAfterSearch = true;
+          first = false;
+          textAll += segText;
+          await emitSegment(segText, opts);
+        };
+        for await (const delta of stream) {
+          if (delta.type === "toolCall") {
+            const pre = buf.trim();
             buf = "";
-            await emitSegment(preBuf);
+            if (pre) await emit(pre);
+            return delta;
           }
-          sendMeta(res, "tool_call", { name: delta.name, args: delta.args });
-
-          let toolResult;
-          if (delta.name === "web_search") {
-            try {
-              toolResult = await searchWeb(delta.args.query, 3, trace);
-              toolCalls.web_search = (toolCalls.web_search ?? 0) + 1;
-            } catch (e) {
-              trace.error("web_search", e);
-              toolResult = [{ title: "検索エラー", snippet: "検索に失敗しました", url: "" }];
-            }
-          } else {
-            toolResult = { error: `Unknown tool: ${delta.name}` };
+          trace.mark(`${label}_first_token`);
+          buf += delta.text;
+          if (DEBUG) sendMeta(res, "llm_token", { token: delta.text });
+          let match;
+          while ((match = buf.match(/^(.*?[。！？!?])\s*/s))) {
+            const segText = match[1].trim();
+            buf = buf.slice(match[0].length);
+            if (segText) await emit(segText);
           }
-
-          messagesWithSystem.push(...toolRoundMessages(delta, { results: toolResult, instruction: TOOL_RESULT_INSTRUCTION }));
-          // 2回目は検索結果で答えさせる（Gemini 3系は再検索を要求しがちで、無視すると本文が空になる）
-          llmStream = createLLMStream(messagesWithSystem, { toolChoice: "none" });
-          trace.mark("llm2_start");
-
-          for await (const delta2 of llmStream) {
-            if (delta2.type === "toolCall") {
-              trace.set({ nested_tool_ignored: delta2.name });
-              break;
-            }
-            trace.mark("llm2_first_token");
-            textAll += delta2.text;
-            buf     += delta2.text;
-            if (DEBUG) sendMeta(res, "llm_token", { token: delta2.text });
-            let match;
-            while ((match = buf.match(/^(.*?[。！？!?])\s*/s))) {
-              const segText = match[1].trim();
-              buf = buf.slice(match[0].length);
-              if (segText) await emitSegment(segText);
-            }
-            if (buf.trim().length >= SEG_MAX_CHARS) {
-              const segText = buf.trim();
-              buf = "";
-              await emitSegment(segText);
-            }
+          if (buf.trim().length >= SEG_MAX_CHARS) {
+            const segText = buf.trim();
+            buf = "";
+            await emit(segText);
           }
-          break;
         }
-        trace.mark("llm_first_token");
-        textAll += delta.text;
-        buf     += delta.text;
-        if (DEBUG) sendMeta(res, "llm_token", { token: delta.text });
-        let match;
-        while ((match = buf.match(/^(.*?[。！？!?])\s*/s))) {
-          const segText = match[1].trim();
-          buf = buf.slice(match[0].length);
-          if (segText) await emitSegment(segText);
+        const tail = buf.trim();
+        buf = "";
+        if (tail) await emit(tail, { final: true });
+        return null;
+      }
+
+      trace.mark("llm_start");
+      let call = await pumpLLM(llmStream, "llm");
+      // 「探してみるね。待っててね。」と言っただけで検索を呼ばずに終わったら、検索を必ず呼ばせてもう1回だけ頼む
+      // （一言を添える指示があると起きる。11/10 に ESP32 で「探してみるね」で止まった。ロードマップ30）。
+      // 言った一言は会話に足さない（足すと assistant が2つ続き、検索後の返答がまた前置きから始めやすい）
+      if (!call && toolsDef && isSearchPromiseOnly(textAll)) {
+        trace.set({ search_forced: true });
+        trace.mark("llm_force_start");
+        call = await pumpLLM(createLLMStream(messagesWithSystem, { toolChoice: "required" }), "llm_force", { dropPreface: true });
+      }
+      if (call) {
+        trace.mark("tool_call");
+        trace.set({ tool: call.name }); // 検索語は発話から作られるので書かない
+        sendMeta(res, "tool_call", { name: call.name, args: call.args });
+
+        let toolResult;
+        if (call.name === "web_search") {
+          try {
+            toolResult = await searchWeb(call.args.query, 3, trace);
+            toolCalls.web_search = (toolCalls.web_search ?? 0) + 1;
+          } catch (e) {
+            trace.error("web_search", e);
+            toolResult = [{ title: "検索エラー", snippet: "検索に失敗しました", url: "" }];
+          }
+        } else {
+          toolResult = { error: `Unknown tool: ${call.name}` };
         }
-        if (buf.trim().length >= SEG_MAX_CHARS) {
-          const segText = buf.trim();
-          buf = "";
-          await emitSegment(segText);
+
+        messagesWithSystem.push(...toolRoundMessages(call, { results: toolResult, instruction: TOOL_RESULT_INSTRUCTION }));
+        // 2回目は検索結果で答えさせる（ツールは渡すが呼ばせない）
+        trace.mark("llm2_start");
+        const nested = await pumpLLM(createLLMStream(messagesWithSystem, { toolChoice: "none" }), "llm2", { afterSearch: true });
+        if (nested) {
+          // それでも Gemini 3系は再検索を求めることがある（10/30・11/09 に「調べるね」で終わった原因）。
+          // まだ何も答えていなければ、検索結果を普通の文章に直してツール無しでもう1回だけ要求する
+          trace.set({ nested_tool: nested.name });
+          if (!spokeAfterSearch) {
+            trace.mark("llm3_start");
+            await pumpLLM(createLLMStream(inlineLastToolRound(messagesWithSystem), { tools: null }), "llm3", { afterSearch: true });
+          }
         }
       }
       trace.mark("llm_done");
-      // 残り
-      const tail = buf.trim();
-      if (tail.length > 0) {
-        buf = "";
-        await emitSegment(tail, { final: true });
-      }
       sendMeta(res, "done", {});
       trace.mark("done_sent");
 
       // ---- コスト計算 + usage書き込み + ログ保存 ----
-      if (sessionId !== "unknown" && textAll.trim()) {
+      // 本文が空でも有料の検索を呼んでいれば記録する（ロードマップ30。以前は空だと検索代が記録から漏れた）
+      if (sessionId !== "unknown" && (textAll.trim() || Object.keys(toolCalls).length > 0)) {
         const assistantTimestamp = new Date().toISOString();
 
         await loadPricingCache();
@@ -1091,7 +1096,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           toolCostUsd += c.costUsd;
         }
 
-        await saveLog({
+        if (textAll.trim()) await saveLog({
           "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
           "session_id#timestamp": `session_id#${sessionId}#timestamp#${assistantTimestamp}`,
           owner_id: ownerId, device_id: deviceId, source: "esp",
