@@ -10,8 +10,13 @@
 //   3. 受信全体のSHA-256がLambdaの応答と一致すること
 //   4. Updateライブラリのイメージヘッダ・チップ種別検査
 //
-// 失敗しても再起動せず通常動作へ進む。同じ目標版への試行はNVSで数え、MAX_ATTEMPTS回で諦める
-// （ロールバックで旧版へ戻った後の再更新ループもこれで止まる）。
+// 失敗しても再起動せず通常動作へ進む。失敗は2種類に分けて扱う（2026-11-11）:
+//   - ロールバック（入れた版が確認前に落ち、ブートローダーが旧版へ戻した）→ その版は以後試さない。
+//     試し続けると「入れる→落ちる→戻る」が永久に続き、会話できなくなるため。次の版が出れば試す。
+//   - ダウンロードの失敗（電源断・通信・SHA不一致など）→ 諦めない。ループにならない（そのまま会話へ進む）。
+//     ただし弱いWi-Fiで起動のたびに最大3分待たせないよう、続けてBACKOFF_AFTER回失敗したら
+//     以後はBACKOFF_EVERY回の起動に1回だけ試す。
+// 前回の結果は鍵取得の要求に添えて（queryParams()）、Lambdaの1行ログで見えるようにする。
 #include <Arduino.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
@@ -27,7 +32,8 @@
 namespace ota {
 
 constexpr const char* ALLOWED_HOST = "toytalker-firmware.s3.ap-northeast-1.amazonaws.com";
-constexpr uint8_t MAX_ATTEMPTS = 3;
+constexpr uint8_t BACKOFF_AFTER = 3;   // 続けてこの回数失敗したら間を空ける
+constexpr uint8_t BACKOFF_EVERY = 5;   // 間を空けた後は、この回数の起動に1回だけ試す
 constexpr size_t MIN_IMAGE_BYTES = 512 * 1024;   // これより小さい "ファーム" は受け付けない
 constexpr size_t IO_BUFFER_BYTES = 16 * 1024;    // PSRAM。Update側は4KBセクタ単位で書く
 constexpr uint32_t HTTP_TIMEOUT_MS = 15000;      // 接続・応答ヘッダ待ち
@@ -120,22 +126,69 @@ inline bool parseManifest(JsonVariantConst fw, Manifest& out, const char*& reaso
   return true;
 }
 
-// ---- NVS 試行カウンタ（namespace "ota": ver=目標版, n=回数）----
-inline uint8_t loadAttempts(const String& version) {
+// ---- NVS（namespace "ota"）----
+//   ver   : 失敗を数えている目標版        fails : その版で続けて失敗した回数（開始前に足すので電源断も数える）
+//   skip  : 間を空ける残りの起動回数      last  : 前回の試行の結果（started / 失敗の段階 / rollback）
+//   pend  : 入れて再起動した版（次の起動で確かめる）
+//   bad   : ロールバックした版（以後試さない）
+struct State {
+  String ver, last, pend, bad;
+  uint8_t fails = 0, skip = 0;
+};
+
+inline State loadState() {
+  State st;
   Preferences prefs;
-  if (!prefs.begin("ota", true)) return 0;
-  const String last = prefs.getString("ver", "");
-  const uint8_t n = (last == version) ? prefs.getUChar("n", 0) : 0;
+  if (!prefs.begin("ota", true)) return st;
+  st.ver = prefs.getString("ver", "");
+  st.fails = prefs.getUChar("fails", 0);
+  st.skip = prefs.getUChar("skip", 0);
+  st.last = prefs.getString("last", "");
+  st.pend = prefs.getString("pend", "");
+  st.bad = prefs.getString("bad", "");
   prefs.end();
-  return n;
+  return st;
 }
 
-inline void storeAttempts(const String& version, uint8_t n) {
+inline void saveState(const State& st) {
   Preferences prefs;
   if (!prefs.begin("ota", false)) return;
-  prefs.putString("ver", version);
-  prefs.putUChar("n", n);
+  prefs.putString("ver", st.ver);
+  prefs.putUChar("fails", st.fails);
+  prefs.putUChar("skip", st.skip);
+  prefs.putString("last", st.last);
+  prefs.putString("pend", st.pend);
+  prefs.putString("bad", st.bad);
+  prefs.remove("n");  // 0.7.11 までの試行カウンタ（上限3回で諦める方式）
   prefs.end();
+}
+
+// 起動ごとに1回（setup() で）。前回入れた版で起動できたか、ロールバックで戻ったかを確かめる。
+inline void checkPreviousUpdate() {
+  State st = loadState();
+  if (st.pend.isEmpty()) return;
+  if (st.pend == TOYTALKER_FW_VERSION) {
+    Serial.printf("[OTA] previous update to %s is running\n", st.pend.c_str());
+    st.ver = ""; st.fails = 0; st.skip = 0; st.last = "";
+  } else {
+    // 入れた版が有効印の前に落ちた（または確認前に電源が切れた）。その版は以後試さない
+    Serial.printf("[OTA] rollback detected: target=%s running=%s; will not retry this version\n",
+                  st.pend.c_str(), TOYTALKER_FW_VERSION);
+    st.bad = st.pend;
+    st.last = "rollback";
+  }
+  st.pend = "";
+  saveState(st);
+}
+
+// 鍵取得の要求に添える前回の結果（空なら何も付けない）。値は決まった語と版だけ
+inline String queryParams() {
+  const State st = loadState();
+  String q;
+  if (!st.last.isEmpty()) q += "&ota_last=" + st.last;
+  if (st.fails > 0) q += "&ota_fails=" + String(st.fails);
+  if (!st.bad.isEmpty()) q += "&ota_bad=" + st.bad;
+  return q;
 }
 
 inline void toHex(const uint8_t* bytes, size_t len, char* out) {
@@ -166,18 +219,32 @@ inline Result apply(const Manifest& m) {
     Serial.printf("[OTA] reject: size=%u exceeds partition=%u\n", (unsigned)m.size, (unsigned)partitionSize);
     return Result::Invalid;
   }
-  const uint8_t attempts = loadAttempts(m.version);
-  if (attempts >= MAX_ATTEMPTS) {
-    Serial.printf("[OTA] skip: target=%s attempts=%u reached limit\n", m.version.c_str(), attempts);
+  State st = loadState();
+  if (m.version == st.bad) {
+    Serial.printf("[OTA] skip: target=%s rolled back before\n", m.version.c_str());
     return Result::Skipped;
   }
-  storeAttempts(m.version, attempts + 1);  // 途中で電源が落ちても回数が残るよう先に記録
-  Serial.printf("[OTA] start: %s -> %s size=%u attempt=%u/%u\n", TOYTALKER_FW_VERSION, m.version.c_str(),
-                (unsigned)m.size, attempts + 1, MAX_ATTEMPTS);
+  if (st.ver != m.version) { st.ver = m.version; st.fails = 0; st.skip = 0; }
+  if (st.skip > 0) {
+    st.skip--;
+    saveState(st);
+    Serial.printf("[OTA] backoff: target=%s fails=%u next_try_in_boots=%u\n", m.version.c_str(),
+                  st.fails, st.skip + 1);
+    return Result::Skipped;
+  }
+  // 途中で電源が落ちても数えるよう先に記録する（次の起動で last=started が残っていれば中断）
+  st.fails++;
+  if (st.fails >= BACKOFF_AFTER) st.skip = BACKOFF_EVERY - 1;
+  st.last = "started";
+  saveState(st);
+  Serial.printf("[OTA] start: %s -> %s size=%u try=%u\n", TOYTALKER_FW_VERSION, m.version.c_str(),
+                (unsigned)m.size, st.fails);
 
   uint8_t* buffer = (uint8_t*)heap_caps_malloc(IO_BUFFER_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   if (!buffer) {
     Serial.println("[OTA] fail: io buffer allocation");
+    st.last = "alloc";
+    saveState(st);
     return Result::Failed;
   }
 
@@ -196,6 +263,9 @@ inline Result apply(const Manifest& m) {
     if (Update.isRunning()) Update.abort();
     http.end();
     heap_caps_free(buffer);
+    State failed = loadState();
+    failed.last = stage;
+    saveState(failed);
     return Result::Failed;
   };
 
@@ -258,6 +328,10 @@ inline Result apply(const Manifest& m) {
 
   http.end();
   heap_caps_free(buffer);
+  st = loadState();
+  st.pend = m.version;  // 次の起動でこの版が動いていれば成功、旧版ならロールバック
+  st.last = "installed";
+  saveState(st);
   Serial.printf("[OTA] done: %s -> %s bytes=%u total_ms=%lu; restarting\n", TOYTALKER_FW_VERSION,
                 m.version.c_str(), (unsigned)received, (unsigned long)(millis() - t0));
   Serial.flush();

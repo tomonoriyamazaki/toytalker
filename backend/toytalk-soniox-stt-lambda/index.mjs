@@ -68,6 +68,13 @@ function compareVersions(a, b) {
   return 0;
 }
 
+// 本体が添える OTA の語（段階の名前・版）だけを通す。それ以外の文字が入っていれば捨てる
+function otaWord(value, max) {
+  if (value == null) return null;
+  const s = String(value).slice(0, max);
+  return /^[A-Za-z0-9._-]+$/.test(s) ? s : null;
+}
+
 async function buildFirmwareInfo(query, device, manifest) {
   if (query.ota !== "1" || !query.fw || !manifest) return null;
   const target = pickTargetVersion(manifest, device);
@@ -161,6 +168,10 @@ export const handler = async (event, context) => {
       // 頼まれた寿命（秒）。null は ttl を付けない古いファーム・アプリ（1時間）。3分キーへの移行状況をログで数えるため
       ttl_sec: body.expires_in_seconds, ttl_requested: query.ttl != null,
       app_version: query.app_version ? String(query.app_version).slice(0, 16) : null,
+      // 前回の OTA の結果（0.7.12〜）。started=途中で止まった、rollback=入れた版が落ちて戻った、ほかは失敗の段階。
+      // ota_bad はロールバックして以後試さない版。全機で同じ失敗が出ていればマニフェスト側の誤りを疑う
+      ota_last: otaWord(query.ota_last, 24), ota_fails: query.ota_fails ? Number(query.ota_fails) || null : null,
+      ota_bad: otaWord(query.ota_bad, 32),
       ...describeEdge(event),
     });
 

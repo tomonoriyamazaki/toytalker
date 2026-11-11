@@ -2692,7 +2692,8 @@ void startNormalOperation() {
   String initUrl = String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress
                  + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + TOYTALKER_HW_VERSION
                  + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel()
-                 + "&ttl=" + SONIOX_KEY_TTL_SEC;
+                 + "&ttl=" + SONIOX_KEY_TTL_SEC
+                 + ota::queryParams();  // 前回の更新の結果（ロールバック・続いた失敗）
   String resp;
   const int code = httpGetWithRetry(initUrl, resp, 3);
   if (code != 200) {
@@ -2759,6 +2760,7 @@ void setup() {
   Serial.printf("[BUILD] fw=%s hw=%s arduino=%s idf=%s\n", TOYTALKER_FW_VERSION, TOYTALKER_HW_VERSION,
                 ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
   ota::printBootInfo();
+  ota::checkPreviousUpdate();  // 前回入れた版で起動できたか、ロールバックで戻ったか
 #if ARDUINO_USB_CDC_ON_BOOT && ARDUINO_USB_MODE
   Serial.println("[SERIAL] hwcdc_tx_timeout_ms=0 drop_on_backpressure=1");
 #endif
