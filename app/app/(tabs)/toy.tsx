@@ -65,6 +65,9 @@ type LogMessage = {
   timestamp: string;
 };
 
+// 描画で例外が出てもアプリを終了させず、この画面だけ「表示できませんでした」にする（components/ScreenError.tsx）
+export { ErrorBoundary } from "../../components/ScreenError";
+
 export default function Toy() {
   const ownerId = useOwnerId();
   const [status, setStatus]                         = useState<ConnectionStatus>("disconnected");

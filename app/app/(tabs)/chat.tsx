@@ -164,6 +164,9 @@ function RevealText({ text, at, span, style }: { text: string; at: number; span:
   );
 }
 
+// 描画で例外が出てもアプリを終了させず、この画面だけ「表示できませんでした」にする（components/ScreenError.tsx）
+export { ErrorBoundary } from "../../components/ScreenError";
+
 export default function Chat() {
   const ownerId = useOwnerId();
   // 時間計測
