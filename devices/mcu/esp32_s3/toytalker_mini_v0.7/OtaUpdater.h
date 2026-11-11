@@ -73,9 +73,17 @@ inline void printBootInfo() {
                 next ? next->label : "none", next != nullptr, (int)state);
 }
 
+inline void markUpdateSucceeded();  // 下の NVS の節
+inline void confirmImageState();
+
 // 新版がここまで到達（Wi-Fi接続とLambda到達）したら有効印を付ける。
 // これを呼ぶ前に落ちる版はブートローダーが旧版へ戻す（verifyRollbackLater() の上書きが前提）。
 inline void confirmRunningImage() {
+  confirmImageState();
+  markUpdateSucceeded();  // 入れた版で有効印まで来たら更新の記録を片付ける（入れた版でなければ何もしない）
+}
+
+inline void confirmImageState() {
   const esp_partition_t* running = esp_ota_get_running_partition();
   esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
   if (!running || esp_ota_get_state_partition(running, &state) != ESP_OK) {
@@ -163,21 +171,32 @@ inline void saveState(const State& st) {
   prefs.end();
 }
 
-// 起動ごとに1回（setup() で）。前回入れた版で起動できたか、ロールバックで戻ったかを確かめる。
+// 起動ごとに1回（setup() で）。入れた版と違う版で動いていればロールバックで戻っている。
+// 入れた版で動いていても、ここでは成功とみなさない。有効印の前に落ちる版もこの時点では動いているので、
+// ここで記録を消すと戻った後にロールバックと分からず、入れ直しを永久に繰り返す（2026-11-11 の試験で起きた）。
+// 成功の判定は有効印を付けた時（markUpdateSucceeded()）。
 inline void checkPreviousUpdate() {
   State st = loadState();
   if (st.pend.isEmpty()) return;
   if (st.pend == TOYTALKER_FW_VERSION) {
-    Serial.printf("[OTA] previous update to %s is running\n", st.pend.c_str());
-    st.ver = ""; st.fails = 0; st.skip = 0; st.last = "";
-  } else {
-    // 入れた版が有効印の前に落ちた（または確認前に電源が切れた）。その版は以後試さない
-    Serial.printf("[OTA] rollback detected: target=%s running=%s; will not retry this version\n",
-                  st.pend.c_str(), TOYTALKER_FW_VERSION);
-    st.bad = st.pend;
-    st.last = "rollback";
+    Serial.printf("[OTA] booted into %s; waiting for confirm\n", st.pend.c_str());
+    return;
   }
+  // 入れた版が有効印の前に落ちた（または確認前に電源が切れた）。その版は以後試さない
+  Serial.printf("[OTA] rollback detected: target=%s running=%s; will not retry this version\n",
+                st.pend.c_str(), TOYTALKER_FW_VERSION);
+  st.bad = st.pend;
+  st.last = "rollback";
   st.pend = "";
+  saveState(st);
+}
+
+// 有効印を付けた後に呼ぶ。入れた版が鍵の取得まで来たので、更新の記録を片付ける
+inline void markUpdateSucceeded() {
+  State st = loadState();
+  if (st.pend.isEmpty() || st.pend != TOYTALKER_FW_VERSION) return;
+  Serial.printf("[OTA] update to %s succeeded\n", st.pend.c_str());
+  st.pend = ""; st.ver = ""; st.fails = 0; st.skip = 0; st.last = "";
   saveState(st);
 }
 
