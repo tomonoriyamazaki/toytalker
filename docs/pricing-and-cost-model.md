@@ -170,12 +170,13 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 - **`adjust`**（運用者の手作業の調整。返金・お詫び・検証用など）: 1回の調整につき1行を足し、`memo` に理由、`by` に書いた人を入れる。書いた行は直さず、間違えたら逆向きの `adjust` を足して打ち消す。書くのは `backend/shared/wallet.mjs` の `recordAdjust`（`recordConsume` と同じく台帳の行と残高の加算を1回の書き込みで）で、運用者が手元から `infra/scripts/wallet-adjust.ts` で呼ぶ（`--yes` を付けるまでは残高と書く内容を見せるだけ）。Lambda には書く権限が無い。日次詳細は `consume` の行だけを拾うので、`adjust` の行が増えても表示は崩れない。
 - `consume` の行は1ターンの原価の正本（11.6）: `ref`（chat-logs の並べ替えキー `session_id#…#timestamp#…`。返答の行と同じ時刻）、`session_id`、`source`（`app` / `esp` / `tts`）、`cost_usd`（マージン前）、`cost_stt` `cost_llm` `cost_tts` `cost_tool`、`stt_chars`、`llm_provider` `llm_model` `llm_tokens_in` `llm_tokens_out`、`tts_provider` `tts_chars` `tts_fallback`、`tool_usage`、`character_id`。文章は持たない。読み上げ（`source: tts`）は `ref` 無し。
 - 台帳の行と残高の加算は1つのトランザクションで書く（`backend/shared/wallet.mjs`）。台帳の行は「まだ無ければ」の条件付きなので二重に引かない。片方だけ残ることも無いので、`balance_after` は持たない（必要なら台帳を足し上げる）。
+- **書けなかったときのやり直しと通知**（2026-11-11）: 同じ持ち主の財布へ別の書き込みが重なると、DynamoDB はトランザクションを取り消す（`TransactionCanceledException`、理由 `TransactionConflict`）。取り消しは何も書かれていないので、`wallet.mjs` の `appendAndAdd` が間をあけて6回までやり直す（合計2秒ほど。`consume` `adjust` と Stripe の行に効く）。台帳の行が既にある（`ConditionalCheckFailed`）ときはやり直さない。RnD の再現試験（同じ持ち主へ同時に50件）で、やり直し無しは38件が書けず、やり直し有りは50件すべて書けた。それでも書けなかった `consume` は、Lambda のログに `[wallet] consume error: <例外名> {"reasons":[台帳の行, 財布],"owner_id","sk","amount_jpy","source"}` を1行出す（文章は無い）。この行を CloudWatch のメトリクスフィルタが数え、5分に1件でもあればアラーム `toytalker-wallet-consume-failed-<環境>` がメールで知らせる（状態が変わったときの1通で、件数ぶんは来ない）。引けなかった分は、ログの `owner_id` と `amount_jpy` を見て `infra/scripts/wallet-adjust.ts` で引く。
 - 権限: 本文Lambda 2本と読み上げLambdaは、台帳に PutItem、財布に GetItem・UpdateItem だけ（台帳を読む・消すことはできない）。相槌Lambda 2本は財布を GetItem・Query で読むだけ。設定Lambdaは両方を GetItem・Query で読むだけ。
 
 ### 11.3 流れ
 
 1. **付与**: しない（特典は配らない、11.1）。運用者が渡すときは `adjust`。
-2. **消費**: 本文Lambdaがターン終了時、既存のコスト計算のあとに `cost_total` を残高から引き、台帳に `consume` を書く。読み上げLambdaも同じ。そのターンで残高が負になっても最後まで返す（止めるのは次の会話の始め）。オートチャージの家庭で残高が条件を下回ったら買い足す（段階3。Stripe の鍵を本文Lambdaに持たせず、別のLambdaで引く案）。
+2. **消費**: 本文Lambdaがターン終了時、既存のコスト計算のあとに `cost_total` を残高から引き、台帳に `consume` を書く。読み上げLambdaも同じ。どちらも書き終わるのを待ってから応答を閉じる（閉じた後は Lambda が止まり、待っていない書き込みは次の呼び出しまで進まないか、消える。読み上げは 2026-11-11 まで待っておらず、月の集計には入って台帳と残高に入らない行が出ていた）。そのターンで残高が負になっても最後まで返す（止めるのは次の会話の始め）。オートチャージの家庭で残高が条件を下回ったら買い足す（段階3。Stripe の鍵を本文Lambdaに持たせず、別のLambdaで引く案）。
 3. **残高確認**（段階2、`checkBalance`）: 本文Lambda・相槌Lambda・読み上げLambdaはターンの始めに財布を読み、0以下（財布が無いときも0）なら始めない。会話ログも書かず、LLM も走らない。財布を読めなかったとき（DynamoDB の障害）は止めずに続ける（障害で全部の会話を止めないため。損はその間の原価だけ）。STT（Soniox の一時鍵）は止めないので、止めたターンの音声認識の原価（1ターン0.1円未満）は運営持ち。
    - **RnD は止めない**（2026-11-03）。`infra/config/stages.ts` の `wallet.stopAtZero` が false の環境は `checkBalance` がいつも続けてよいと返す（環境変数 `WALLET_STOP_AT_ZERO`）。財布の無い外部テスターや家族の端末が、0.8.6 以前のアプリでは何も出ずに黙って止まっていたため。引き落としは記録するので残高はマイナスになる。止まる動きを試すときは一時的に true にしてデプロイする。
    - **App**: 本文・読み上げは 402 `{"error":"no_balance"}` を返し、アプリは「ポイントがなくなりました。ポイントを追加すると、また話せます」を出す。相槌も 402 で返し、アプリは鳴らさない。利用状況の残高が0以下なら赤字にして「会話と読み上げは、ポイントを追加するまで止まっています」を添える。
@@ -198,7 +199,7 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 
 - **いま**: `toytalker-usage` は日 × 機器 × 種類の合計（文章なし）。一方 `toytalker-chat-logs` の返答の行に、会話の文章と一緒に1ターンの原価（`cost_llm` `cost_tts` `cost_stt` `cost_tool` `cost_total`、トークン数、文字数）が入っている。利用状況の「日次詳細（会話ごとのコスト）」はこの行から金額と文章を同時に読む。
 - **困ること**: ロードマップ7の会話保護とぶつかる。`chat-logs` に保持期間（TTL）を付けると原価も消える、運用者に「コストは見えるが会話は読めない」権限を作れない、CMK で読める人を絞るとコストの集計も絞られる。
-- **方針**: 1ターンの原価は台帳 `toytalker-wallet-ledger` の `consume` 行（文章なし、`ref` に会話ログのキー）と `usage` の合計に持ち、`chat-logs` からコストの列（`cost_*`、トークン数、文字数、`tool_usage`、`tts_fallback`）を外して文章だけにする。「日次詳細」は台帳から金額、`chat-logs` から文章を引く。台帳にあって `chat-logs` に無いターン（保持期間で文章だけ消えた）は文章なしで金額だけ出す。
+- **方針**: 1ターンの原価は台帳 `toytalker-wallet-ledger` の `consume` 行（文章なし、`ref` に会話ログのキー）と `usage` の合計に持ち、`chat-logs` からコストの列（`cost_*`、トークン数、文字数、`tool_usage`、`tts_fallback`）を外して文章だけにする。「日次詳細」は台帳から金額、`chat-logs` から文章を引く。台帳にあって `chat-logs` に無いターン（保持期間で文章だけ消えた）は文章なしで金額だけ出す。読み上げ（`source: tts`）は会話ではないので `ref` も `chat-logs` の行も無く、台帳の行だけで TTS の金額と文字数を出す（2026-11-11。応答の行に `source: "tts"` が付き、アプリは「読み上げ」と出す）。
 - **決めたこと（2026-10-31）**: (a) 段階1で分離と台帳と残高の引き落としを一緒に出す（11.8）。(b) 過去分のコスト列（RnD の 3,903行）は台帳へ移さない。日次詳細は台帳に行が無ければ `chat-logs` のコスト列を読む（それも無い2026-09以前の行は計算し直す）。会話保護（CMK・TTL）を入れるのは新しい本番アカウントで、そこは最初から分離した形で始まるので、RnD の旧行が残っていても困らない。(c) ESP32 も App と同じ形にする。
 - **日付は日本時間で区切る**（2026-11-01）: `usage` の日付（並べ替えキーの先頭）と「日次詳細」の1日は日本時間（`backend/shared/jst.mjs`）。`chat-logs`・台帳の `timestamp` は UTC のまま持ち、日次詳細は日本時間の1日を UTC の範囲にして引く。それより前の `usage` の行は UTC の日付のまま（移さない）。為替の月は従来どおり UTC。
 

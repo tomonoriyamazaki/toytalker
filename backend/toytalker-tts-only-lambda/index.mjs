@@ -539,8 +539,10 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
   trace.mark("tts_done");
   trace.set({ status: 200, audio_bytes: Math.round(b64.length * 3 / 4) });
 
-  // コスト記録（レスポンスとは独立、失敗しても無視。フォールバック時は実際に使った声で記録）
-  trackTtsCost({ ownerId, ttsVendor: usedVendor, ttsModel: usedVendor === "sakura" ? "zundamon" : cfg.ttsModel, text: ttsText, b64Len: b64.length });
+  // コスト記録（失敗しても読み上げは返す。フォールバック時は実際に使った声で記録）。
+  // 音声を送るのと並べて始め、応答を閉じる前に終わるのを待つ。待たずに閉じると、Lambda が応答の後に止まって
+  // 書き込みが途中で消えることがある（月の集計には入り、台帳と残高には入らない行が出た。2026-11-10）
+  const costSaved = trackTtsCost({ ownerId, ttsVendor: usedVendor, ttsModel: usedVendor === "sakura" ? "zundamon" : cfg.ttsModel, text: ttsText, b64Len: b64.length });
 
   // 音声バイナリを直接ストリーミング返却（S3に保存しない）
   const audioBuf = Buffer.from(b64, "base64");
@@ -555,6 +557,8 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
     },
   });
   out.write(audioBuf);
+  await costSaved;
+  trace.mark("usage_saved");
   out.end();
   trace.finish();
 });
