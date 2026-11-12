@@ -21,6 +21,7 @@ import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { BottomTabNavigationProp } from "@react-navigation/bottom-tabs";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { apiFetch } from "../../lib/api";
+import { normalizeUsage, normalizeUsageDetail } from "../../lib/usage";
 import { signOut, useAuthSession } from "../../lib/auth";
 import { LoginButtons } from "../../components/LoginButtons";
 import AudioRecord from "react-native-audio-record";
@@ -78,6 +79,9 @@ const PERSONALITY_TEMPLATES = [
   { label: "魔法使い", prompt: "あなたは不思議な魔法使いです。「〜じゃよ」「ふむふむ」など、神秘的で優しい口調で話してください。" },
   { label: "フリー入力", prompt: "" },
 ];
+
+// 描画で例外が出てもアプリを終了させず、この画面だけ「表示できませんでした」にする（components/ScreenError.tsx）
+export { ErrorBoundary } from "../../components/ScreenError";
 
 export default function Settings() {
   const ownerId = useOwnerId();
@@ -157,8 +161,7 @@ export default function Settings() {
     setUsageLoading(true);
     try {
       const res = await apiFetch(`/usage?owner_id=${encodeURIComponent(ownerId)}&month=${month}`);
-      const data = await res.json();
-      setUsageData(data);
+      setUsageData(normalizeUsage(await res.json()));
     } catch (e) {
       console.error("[Usage] error:", e);
     } finally {
@@ -252,7 +255,7 @@ export default function Settings() {
     if (characters.length === 0) loadCharacters();
     apiFetch(`/usage/detail?owner_id=${encodeURIComponent(ownerId)}&date=${date}`)
       .then(r => r.json())
-      .then(data => setUsageDetailData(data))
+      .then(data => setUsageDetailData(normalizeUsageDetail(data)))
       .catch(e => console.error("[UsageDetail] error:", e))
       .finally(() => setUsageDetailLoading(false));
   };
