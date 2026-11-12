@@ -45,6 +45,9 @@ const TTS_LOG_GROUPS = process.env.TTS_LOG_GROUPS
     "/aws/lambda/toytalker-backchannel-for-esp32-lambda",
   ];
 
+// 鍵発行Lambdaのロググループ。ESP32 が起動時に送る版と OTA の結果（ota_last / ota_fails / ota_bad）を読む
+const STT_TOKEN_LOG_GROUP = process.env.STT_TOKEN_LOG_GROUP || "/aws/lambda/toytalk-soniox-stt-lambda";
+
 // 請求額をAPIで取れない社は、確認先のURLだけ案内する
 const MANUAL_CHECK_URLS = {
   cartesia: "https://play.cartesia.ai/usage",
@@ -280,6 +283,34 @@ async function findMissingPriceWarnings(month) {
   }
 }
 
+// ---- 5c. ESP32 の版と OTA の失敗（docs/esp32-ota-settings-plan.md） ----
+// 起動時の鍵取得の行（fw 付き）を機器ごとにまとめる。発行の誤り（rollback / sha256）はその場で警報が鳴るので、
+// ここは「古い版に取り残された機器」「失敗が続く機器（電波が弱い家の候補）」を月に一度見るためのもの。
+// 別名を元の項目と同じ名前（fw など）にすると値が返らない（2026-11-12 に実ログで確認）
+const FIRMWARE_QUERY = 'filter kind = "stt-token" and fw like /./'
+  + ' | stats latest(fw) as ver, count(*) as boots, max(ota_fails) as max_fails, latest(ota_last) as last_result, latest(ota_bad) as bad_ver by device_id'
+  + ' | limit 1000';
+
+/** Insights の集計行 → { device_id, fw, boots, maxFails, last, bad } */
+export function firmwareRowOf(row) {
+  const get = (f) => row.find((x) => x.field === f)?.value;
+  const deviceId = get("device_id");
+  if (!deviceId) return null;
+  return {
+    deviceId, fw: get("ver") ?? "?", boots: Number(get("boots")) || 0,
+    maxFails: Number(get("max_fails")) || 0, last: get("last_result") || null, bad: get("bad_ver") || null,
+  };
+}
+
+async function aggregateFirmware(month) {
+  const { start, end } = monthRange(month);
+  const rows = await insightsQuery([STT_TOKEN_LOG_GROUP], FIRMWARE_QUERY, start.getTime(), end.getTime(), Date.now() + 60_000);
+  const devices = rows.map(firmwareRowOf).filter(Boolean);
+  const versions = {};
+  for (const d of devices) versions[d.fw] = (versions[d.fw] || 0) + 1;
+  return { devices, versions };
+}
+
 // ---- 5b. TTSの切り替え回数とピーク同時本数（docs/tts-fallback-and-notifications.md の4） ----
 // Scale / Enterprise へ上げる時期の判断材料。Cartesia の同時接続上限は組織単位なので、全Lambdaを合わせて数える。
 
@@ -413,7 +444,7 @@ async function aggregateTtsTraces(month, { budgetMs = 120_000 } = {}) {
 const fmtJst = (ms) => new Date(ms + 9 * 3600_000).toISOString().slice(0, 16).replace("T", " ");
 
 // ---- 6. レポート組み立て ----
-function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing, staleDays, notes, tts, wallets }) {
+function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing, staleDays, notes, tts, wallets, firmware }) {
   const L = [];
   L.push(`ToyTalker 月次コスト確認レポート（対象月: ${month}）`);
   L.push(`生成: ${new Date().toISOString()}  マージン: ${margin}`);
@@ -506,6 +537,25 @@ function buildReport({ month, fx, prices, margin, usage, actuals, stale, missing
   }
   L.push("");
 
+  L.push(`■ ESP32 のファーム（${month} に起動した機器。発行の誤りはその場で警報が届く）`);
+  if (!firmware || firmware.status === "error") {
+    L.push(`  取得失敗（${firmware?.error ?? "集計なし"}）`);
+  } else if (firmware.devices.length === 0) {
+    L.push("  起動の記録がありません");
+  } else {
+    const byVersion = Object.entries(firmware.versions).sort((a, b) => b[1] - a[1]);
+    L.push(`  版の分布: ${byVersion.map(([v, n]) => `${v} × ${n} 台`).join(" / ")}`);
+    // 3回は本体が間を空け始める回数（OtaUpdater.h の BACKOFF_AFTER）
+    const trouble = firmware.devices.filter((d) => d.maxFails >= 3 || d.bad);
+    if (trouble.length === 0) L.push("  更新の失敗が続いた機器・ロールバックした機器: なし");
+    for (const d of trouble) {
+      L.push(`  ※ ${d.deviceId}（${d.fw}、起動 ${d.boots} 回）: `
+        + [d.maxFails >= 3 ? `更新の失敗が最大 ${d.maxFails} 回続いた（最後の結果 ${d.last ?? "-"}。電波の弱い家の候補）` : null,
+          d.bad ? `${d.bad} をロールバックして試していない` : null].filter(Boolean).join("、"));
+    }
+  }
+  L.push("");
+
   L.push("■ 前払いポイントの残高（toytalker-wallets、生成時点）");
   if (wallets.status === "error") {
     L.push(`  取得失敗（${wallets.error}）`);
@@ -566,12 +616,13 @@ export const handler = async (event = {}) => {
   const missing = await findMissingPriceWarnings(month);
   const tts = await safe(() => aggregateTtsTraces(month));
   const wallets = await safe(() => aggregateWallets());
+  const firmware = await safe(() => aggregateFirmware(month));
 
   // 対象月の為替行の有無（無ければ本文Lambdaは150円で計算していた）
   const monthRate = (await ddb.send(new GetCommand({ TableName: EXCHANGE_RATES_TABLE, Key: { month, currency: "JPY" } }))).Item;
   if (!monthRate) notes.push(`${month} の為替行が無く、その月の記録は既定の ${FX_FALLBACK_RATE} 円で計算されています`);
 
-  const report = buildReport({ month, fx, prices, margin, usage, actuals: { openai, anthropic, elevenlabs }, stale, missing, staleDays, notes, tts, wallets });
+  const report = buildReport({ month, fx, prices, margin, usage, actuals: { openai, anthropic, elevenlabs }, stale, missing, staleDays, notes, tts, wallets, firmware });
   console.log(report);
 
   let published = false;

@@ -255,6 +255,13 @@ export const handler = async (event, context) => {
       if (firmware) {
         result.firmware = firmware;
         trace.set({ ota_offer: firmware.version });
+        // 発行の誤りの疑い（即時の警報。CDK の OtaBrokenAlarm がこの項目を数える）: いま勧めている版を、
+        // この機器がロールバックしたか、SHA 不一致で拒んだ。電源断・通信の失敗は家の事情なので入れない（月次で見る）。
+        // 勧める版が無いとき（版を戻した後など）は、本体が前回の結果を送り続けても鳴らさない
+        const last = otaWord(query.ota_last, 24);
+        if ((last === "rollback" && otaWord(query.ota_bad, 32) === firmware.version) || last === "sha256") {
+          trace.set({ ota_alert: true });
+        }
       }
     }
 

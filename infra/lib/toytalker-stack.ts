@@ -416,7 +416,7 @@ const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 300,
     format: "esm",
     description: "Monthly ops report: FX rate, recorded cost vs provider bills, price table checks",
-    env: ["OPS_SNS_TOPIC_ARN", "RECORDING_LOG_GROUPS", "TTS_LOG_GROUPS"],
+    env: ["OPS_SNS_TOPIC_ARN", "RECORDING_LOG_GROUPS", "TTS_LOG_GROUPS", "STT_TOKEN_LOG_GROUP"],
     secrets: ["ELEVENLABS_API_KEY", "OPENAI_ADMIN_KEY", "ANTHROPIC_ADMIN_KEY"],
     warm: false,
     selfWarm: false,
@@ -515,6 +515,7 @@ export class ToyTalkerStack extends cdk.Stack {
       OPS_SNS_TOPIC_ARN: opsTopic.topicArn,
       RECORDING_LOG_GROUPS: JSON.stringify(RECORDING_FUNCTION_KEYS.map((k) => `/aws/lambda/${nameOf(k).name}`)),
       TTS_LOG_GROUPS: JSON.stringify(TTS_FUNCTION_KEYS.map((k) => `/aws/lambda/${nameOf(k).name}`)),
+      STT_TOKEN_LOG_GROUP: `/aws/lambda/${nameOf("stt-token").name}`, // 月次レポートが ESP32 の版と OTA の失敗を読む
     };
 
     const functions = new Map<string, lambda.Function>();
@@ -689,7 +690,7 @@ export class ToyTalkerStack extends cdk.Stack {
       // （FilterLogEvents で頭から読むと1か月分が300秒に収まらなくなった。2026-11-01）
       opsFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ["logs:StartQuery"],
-        resources: TTS_FUNCTION_KEYS.map((k) => logGroups.get(k)!.logGroupArn),
+        resources: [...TTS_FUNCTION_KEYS, "stt-token"].map((k) => logGroups.get(k)!.logGroupArn),
       }));
       opsFn.addToRolePolicy(new iam.PolicyStatement({
         actions: ["logs:GetQueryResults", "logs:StopQuery"],
@@ -1337,6 +1338,20 @@ export class ToyTalkerStack extends cdk.Stack {
       period,
       label: name,
     });
+    // 発行したファームの誤りの疑い（落ちる版・マニフェストの SHA 違い）。鍵発行 Lambda が1行ログに ota_alert: true を
+    // 出したら1件目で知らせる（backend/toytalk-soniox-stt-lambda）。警報は状態が変わったときに1通で、台数ぶんは届かない
+    const otaMetricName = `ota-broken-${config.stage}`;
+    new logs.MetricFilter(this, "OtaBrokenFilter", {
+      logGroup: logGroups.get("stt-token")!,
+      filterPattern: logs.FilterPattern.booleanValue("$.ota_alert", true),
+      metricNamespace: namespace,
+      metricName: otaMetricName,
+      metricValue: "1",
+      unit: cw.Unit.COUNT,
+    });
+    alarm("OtaBrokenAlarm", "ota-broken",
+      new cw.Metric({ namespace, metricName: otaMetricName, statistic: "Sum", period }),
+      1, `ToyTalker ${config.stage}: a device rolled back or rejected (sha256) the firmware being offered. Check the published version and manifest. See stt-token Lambda logs: filter ota_alert = true (ota_last, ota_bad, ota_offer, device_id)`);
     alarm("ApiInvocationsAlarm", "api-invocations",
       sumOf("inv", (fn) => fn.metricInvocations({ period, statistic: "Sum" })),
       INVOCATIONS_PER_5MIN, `ToyTalker ${config.stage}: ${INVOCATIONS_PER_5MIN}+ API Lambda invocations in 5 minutes (abuse or runaway client)`);
