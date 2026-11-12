@@ -1165,10 +1165,10 @@ export default function Settings() {
                   return <PieChart slices={slices} />;
                 })()}
 
-                {/* 会話ごとの詳細 */}
+                {/* 会話ごとの詳細（読み上げの行も並ぶ。キャラクター名の位置に「読み上げ」と出す） */}
                 {convos.map((c: any, i: number) => {
                   const time = c.timestamp ? new Date(c.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "";
-                  const charName = characters.find(ch => ch.character_id === c.character_id)?.name ?? c.character_id ?? "";
+                  const charName = c.source === "tts" ? "読み上げ" : characters.find(ch => ch.character_id === c.character_id)?.name ?? c.character_id ?? "";
                   const devLabel = c.device_name || (c.device_id === "app" ? "アプリ" : (c.device_id ?? ""));
                   return (
                     <View key={i} style={s.detailCard}>

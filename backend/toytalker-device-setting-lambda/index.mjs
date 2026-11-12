@@ -621,10 +621,13 @@ async function route(method, path, event, body, identity, who, trace) {
       } catch (e) {}
 
       // 金額は台帳から（ref で chat-logs の返答の行と結ぶ）。台帳が無い古い行は chat-logs のコスト列、それも無ければ計算し直す
+      // 読み上げは会話ではないので ref が無く、chat-logs にも行が無い。台帳の行だけで出す
       const ledgerByRef = new Map();
+      const readAloudRows = [];
       for (const row of await listLedgerBetween(ownerId, dayStart, dayEnd)) {
-        if (row.type !== "consume" || !row.ref || (deviceId && row.device_id !== deviceId)) continue;
-        ledgerByRef.set(`${row.device_id}|${row.ref}`, row);
+        if (row.type !== "consume" || (deviceId && row.device_id !== deviceId)) continue;
+        if (row.ref) ledgerByRef.set(`${row.device_id}|${row.ref}`, row);
+        else if (row.source === "tts") readAloudRows.push(row);
       }
 
       // user→assistantペアで組み立て
@@ -680,6 +683,24 @@ async function route(method, path, event, body, identity, who, trace) {
           assistant_message: null,
           character_id: row.character_id ?? "default",
           ...costsFromLedger(row),
+        });
+      }
+      // 読み上げ（source: "tts"）。STT と LLM は使わないので null、キャラクターも無い。アプリは source を見て「読み上げ」と出す
+      for (const row of readAloudRows) {
+        conversations.push({
+          timestamp: row.timestamp,
+          session_id: null,
+          source: "tts",
+          device_id: row.device_id,
+          device_name: deviceNameMap[row.device_id] ?? null,
+          user_message: null,
+          assistant_message: null,
+          character_id: null,
+          stt: null,
+          llm: null,
+          tts: { cost: row.cost_tts ?? 0, characters: row.tts_chars, provider: row.tts_provider, model: row.tts_provider },
+          tool: null,
+          total: -(Number(row.amount_jpy) || 0),
         });
       }
       conversations.sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
