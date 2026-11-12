@@ -21,13 +21,9 @@ OTA実装セッションの引き継ぎ。新しいセッションでは最初�
 
 ## 3. やり残し
 
-### OTAの残り検証（3件、実機とS3操作が要る）
+### OTAの残り検証（3件）
 
-発行スクリプトと S3 の書き換えは自動判定で止まるので、ユーザーが `!` 付きで実行する（例: `! bash devices/mcu/esp32_s3/tools/publish-firmware.sh beta --no-build`）。
-
-1. **途中電源断**: 0.7.3（版だけ上げる）を beta に発行し、ダウンロード中（`[OTA] progress` の途中）に電源を切る。0.7.2 で起動し `attempt=2/3` で再試行して成功することを見る。
-2. **SHA改ざん**: `manifest.json` の `versions.<版>.sha256` を1文字変えて置き、電源入れ直し。`[OTA] sha256 mismatch` → `fail: stage=sha256` で拒否し、0.7.2 のまま録音に入ることを見る。終わったら正しい値に戻す。
-3. **ロールバック**: `startNormalOperation()` の鍵取得前で `abort()` する版を発行。新版が落ちてブートローダーが旧版へ戻り（起動ログに rollback の記録）、旧版が同じ目標版を3回試して `skip: attempts=3 reached limit` で止まることを見る。試験後は目標版を戻す（マニフェストの beta を 0.7.2 へ）。
+済（2026-11-11〜12）。結果は [ESP32ファーム](esp32-firmware.md) の「OTA の検証と失敗の扱い」。
 
 ### OTAの運用上の未了
 
