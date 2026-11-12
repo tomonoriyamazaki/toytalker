@@ -1288,6 +1288,9 @@ export class ToyTalkerStack extends cdk.Stack {
    *   - api-rejected: 5分間に 401/403 が REJECTED_PER_5MIN 件以上（トークン無し・不正トークン・他人の資源・未登録機）
    *   - api-invocations: アプリ・ESP32から呼ばれる Lambda の呼び出し合計が5分で INVOCATIONS_PER_5MIN 件以上（費用燃やし・連打）
    *   - api-errors: 同 Lambda のエラー（例外で落ちた呼び出し）が5分で ERRORS_PER_5MIN 件以上
+   *   - wallet-consume-failed: 使った分を台帳に書けず、残高から引けなかった（backend/shared/wallet.mjs の "[wallet] consume error"）が
+   *     5分で1件以上。やり直しても書けなかったときだけ出るログなので、1件でも知らせる。通知はアラームの状態が変わったときの1通で、
+   *     失敗の件数ぶんは来ない。直し方は docs/pricing-and-cost-model.md の 11.2
    */
   private createApiAlarms(
     config: StageConfig,
@@ -1313,6 +1316,19 @@ export class ToyTalkerStack extends cdk.Stack {
         ),
         metricNamespace: namespace,
         metricName: rejectedMetricName,
+        metricValue: "1",
+        unit: cw.Unit.COUNT,
+      });
+    }
+    // 消費を台帳に書く Lambda（会話2本と読み上げ）。文言は wallet.mjs の recordConsume と揃える
+    const consumeFailedMetricName = `wallet-consume-failed-${config.stage}`;
+    for (const key of ["chat-app", "chat-mcu", "read-aloud-app"]) {
+      const { id } = resolveNames(FUNCTIONS.find((s) => s.key === key)!, config);
+      new logs.MetricFilter(this, `${id}ConsumeFailedFilter`, {
+        logGroup: logGroups.get(key)!,
+        filterPattern: logs.FilterPattern.allTerms("[wallet] consume error"),
+        metricNamespace: namespace,
+        metricName: consumeFailedMetricName,
         metricValue: "1",
         unit: cw.Unit.COUNT,
       });
@@ -1358,5 +1374,8 @@ export class ToyTalkerStack extends cdk.Stack {
     alarm("ApiErrorsAlarm", "api-errors",
       sumOf("err", (fn) => fn.metricErrors({ period, statistic: "Sum" })),
       ERRORS_PER_5MIN, `ToyTalker ${config.stage}: ${ERRORS_PER_5MIN}+ API Lambda errors in 5 minutes`);
+    alarm("WalletConsumeFailedAlarm", "wallet-consume-failed",
+      new cw.Metric({ namespace, metricName: consumeFailedMetricName, statistic: "Sum", period }),
+      1, `ToyTalker ${config.stage}: usage was not charged to the wallet ledger (retries exhausted). See Lambda logs: filter "[wallet] consume error" (owner_id, sk, amount_jpy, reasons) and fix with an adjust row`);
   }
 }

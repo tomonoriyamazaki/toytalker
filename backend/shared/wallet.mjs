@@ -48,17 +48,21 @@ const ddbExact = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallO
  */
 export async function recordConsume({ ownerId, deviceId, timestamp, source, amountJpy, detail = {} }) {
   if (!ownerId || !deviceId || !timestamp) return false;
+  const sk = `${timestamp}#consume#${deviceId}`;
+  const amount = -(Number(amountJpy) || 0);
   try {
     await appendAndAdd(ownerId, {
-      [LEDGER_SK]: `${timestamp}#consume#${deviceId}`,
+      [LEDGER_SK]: sk,
       type: "consume",
-      amount_jpy: -(Number(amountJpy) || 0),
+      amount_jpy: amount,
       timestamp, device_id: deviceId, source,
       ...detail,
     }, { touch: true });
     return true;
   } catch (e) {
-    console.error("[wallet] consume error:", e?.name ?? e);
+    // 引けなかった分を後から adjust で直せるように、誰の・どの行の・いくらかと、取り消しの理由を残す（文章は無い）。
+    // reasons は [台帳の行, 財布] の順。台帳が ConditionalCheckFailed なら同じキーの行が先にある、TransactionConflict ならやり直しても同時の書き込みに負けた
+    console.error("[wallet] consume error:", e?.name ?? e, JSON.stringify({ reasons: cancelCodes(e), owner_id: ownerId, sk, amount_jpy: amount, source }));
     return false;
   }
 }
@@ -248,13 +252,29 @@ function isDuplicate(e) {
   return e?.name === "TransactionCanceledException" && (e.CancellationReasons ?? [])[0]?.Code === "ConditionalCheckFailed";
 }
 
+/** TransactWrite が取り消された理由（項目ごとの Code。[台帳の行, 財布] の順）。取り消し以外の失敗は null */
+function cancelCodes(e) {
+  return e?.name === "TransactionCanceledException" ? (e.CancellationReasons ?? []).map((r) => r?.Code ?? "None") : null;
+}
+
+// やり直せば通る取り消し。TransactionConflict は同じ財布への書き込みが同時に走ったとき（同じ持ち主の本体とアプリが同時に話し終えた、
+// 会話と購入が重なった等）に負けた側へ返る。SDK はこれをやり直さない。取り消しは何も書かれていないので、同じ行をもう一度書いてよい
+const RETRY_CODES = new Set(["TransactionConflict", "ThrottlingError", "ProvisionedThroughputExceeded"]);
+// やり直す前の待ち（ミリ秒）。同時に負けた同士がまた重ならないよう、0.5〜1.5倍にばらす。全部待って2秒ほど
+const RETRY_DELAYS_MS = [20, 40, 80, 160, 320, 640];
+
+function isRetryable(e) {
+  const codes = cancelCodes(e);
+  return Boolean(codes) && !codes.includes("ConditionalCheckFailed") && codes.some((c) => RETRY_CODES.has(c));
+}
+
 /**
  * 台帳に1行足し（同じキーの行があれば失敗）、同じ額を残高に足す。1つのトランザクションで書く。
- * touch なら最終利用日（有効期限の起点）も今にする
+ * touch なら最終利用日（有効期限の起点）も今にする。同時の書き込みに負けたときはやり直す（RETRY_DELAYS_MS）
  */
 async function appendAndAdd(ownerId, row, { touch }) {
   const now = new Date().toISOString();
-  await ddb.send(new TransactWriteCommand({
+  const input = {
     TransactItems: [
       {
         Put: {
@@ -272,7 +292,16 @@ async function appendAndAdd(ownerId, row, { touch }) {
         },
       },
     ],
-  }));
+  };
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await ddb.send(new TransactWriteCommand(input));
+      return;
+    } catch (e) {
+      if (attempt >= RETRY_DELAYS_MS.length || !isRetryable(e)) throw e;
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt] * (0.5 + Math.random())));
+    }
+  }
 }
 
 /**

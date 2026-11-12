@@ -83,6 +83,8 @@ export function normalizeUsageDetail(data: unknown) {
     }));
     return {
       timestamp: str(c.timestamp),
+      // "tts" は読み上げ（会話ではないので文章もキャラクターも無い）。会話の行には無い
+      source: str(c.source),
       device_id: str(c.device_id),
       device_name: str(c.device_name),
       character_id: str(c.character_id),

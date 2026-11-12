@@ -71,7 +71,7 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 
 ## Lambdaログの見方（2026-10-28、ロードマップ9）
 
-会話経路のLambda（本文2本・相槌2本・Soniox鍵発行・読み上げ）は、1リクエストにつき1行のJSONを出す（`backend/shared/trace.mjs`）。**会話の文章（発話・返答・検索語・相槌）はログに無い。** 正本は `chat-logs` テーブル。新しいログを足すときも文章を入れない。月次Lambdaは `[Pricing] missing price for <key>` の文字列を拾うので、この警告の形だけは変えない。
+会話経路のLambda（本文2本・相槌2本・Soniox鍵発行・読み上げ）は、1リクエストにつき1行のJSONを出す（`backend/shared/trace.mjs`）。**会話の文章（発話・返答・検索語・相槌）はログに無い。** 正本は `chat-logs` テーブル。新しいログを足すときも文章を入れない。月次Lambdaは `[Pricing] missing price for <key>` の文字列を拾うので、この警告の形だけは変えない。同じく `[wallet] consume error`（使った分を台帳に書けなかった。`backend/shared/wallet.mjs`）はアラームのメトリクスフィルタが拾うので、先頭の文言を変えない。見方と直し方は [原価と課金の考え方](../docs/pricing-and-cost-model.md) の 11.2。
 
 | 項目 | 意味 |
 |---|---|
@@ -127,7 +127,7 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 
 ## 利用者認証（Cognito、ロードマップ4）
 
-状態・仕組み・各社側の設定・確認の仕方は [docs/auth.md](../docs/auth.md)。CDK は `lib/toytalker-stack.ts` の `createAuth`（ユーザープール `toytalker-auth-<環境>`、managed login、アプリ用クライアント、外部IdP）と `createApiAlarms`（401/403・呼び出し数・エラー数のアラーム → 月次レポートと同じ SNS）。環境ごとの設定は `config/stages.ts` の `auth`。deploy の出力 `UserPoolId` / `UserPoolClientId` / `AuthDomain` をアプリ（`app/lib/auth.ts`）と各社側の設定に使う。
+状態・仕組み・各社側の設定・確認の仕方は [docs/auth.md](../docs/auth.md)。CDK は `lib/toytalker-stack.ts` の `createAuth`（ユーザープール `toytalker-auth-<環境>`、managed login、アプリ用クライアント、外部IdP）と `createApiAlarms`（401/403・呼び出し数・エラー数のアラームと、使った分を台帳に書けなかったときのアラーム `wallet-consume-failed` → 月次レポートと同じ SNS）。環境ごとの設定は `config/stages.ts` の `auth`。deploy の出力 `UserPoolId` / `UserPoolClientId` / `AuthDomain` をアプリ（`app/lib/auth.ts`）と各社側の設定に使う。
 
 ## バックアップと復元（AWS Backup、ロードマップ10）
 
