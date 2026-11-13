@@ -4,9 +4,10 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
 import { tableName } from "./tables.mjs";
+import { dataClientConfig } from "./region.mjs";
 
 const BILLING_TABLE = tableName("billing");
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true } });
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient(dataClientConfig), { marshallOptions: { removeUndefinedValues: true } });
 
 /** 単発で買える額（円、税込み。11.1 / 11.9）。サーバーがこの中から決め、クライアントの自由な額は受け取らない */
 export const BUY_AMOUNTS = [500, 1000, 3000];
