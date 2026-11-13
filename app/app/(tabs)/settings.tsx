@@ -1424,6 +1424,7 @@ export default function Settings() {
         </View>
         <ScrollView contentContainerStyle={s.wrap}>
           {[
+            { ver: "0.8.9", date: "20261113", desc: "利用状況の詳細に読み上げを表示、表示のエラーでアプリが終了する問題を修正" },
             { ver: "0.8.8", date: "20261108", desc: "画面を消しても会話が続くように、話し終わりの待ち時間を選べるように、返答の文字を声に合わせて表示して自動でスクロール、ポイント残高の表示、ボイス登録で声の加工と同意の確認を追加" },
             { ver: "0.8.7", date: "20261031", desc: "ログイン機能を追加（Google / Apple）、アプリ名をToyTalkerに変更、音声認識の準備が時間切れで会話が始まらない問題を修正" },
             { ver: "0.8.6", date: "20260913", desc: "料金にTools項目を追加、Cartesiaのクローンボイス作成に対応" },

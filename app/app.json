@@ -2,7 +2,7 @@
   "expo": {
     "name": "ToyTalker",
     "slug": "toytalk",
-    "version": "0.8.8",
+    "version": "0.8.9",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "toytalk",
@@ -10,7 +10,7 @@
     "newArchEnabled": true,
     "ios": {
       "bundleIdentifier": "com.zakicorp.toytalk",
-      "buildNumber": "26",
+      "buildNumber": "27",
       "supportsTablet": false,
       "infoPlist": {
         "ITSAppUsesNonExemptEncryption": false,
