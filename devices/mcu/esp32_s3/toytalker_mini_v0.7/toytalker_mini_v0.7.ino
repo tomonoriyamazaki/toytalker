@@ -38,6 +38,8 @@
 #include "OtaUpdater.h"
 #include "PowerSense.h"
 #include "TurnReport.h"
+#include "PlaybackLimiter.h"
+#include <Preferences.h>
 #include "AmazonRootCA.h"
 #include "SonioxRootCA.h"
 #include "DeviceAuth.h"
@@ -651,7 +653,47 @@ Message conversationHistory[MAX_HISTORY * 2];
 int historyCount = 0;
 
 // ==== 音量調整 ====
-const float VOLUME = 1.5;  // デジタルゲイン（クリップ保護あり）。2.0はノイズ増の割に音量差わずかで、1.5がスイートスポット
+// 0.7.20: 「VOLUME 倍して山を切る」をやめ、リミッター（PlaybackLimiter.h）で全体を持ち上げる。
+// 倍率は NVS の audio/gain（無ければ PLAYBACK_GAIN_DEFAULT）。聞き比べ用にシリアルから変えられる:
+// 数字1文字 1〜8 → 1.5 / 2 / 2.5 / 3 / 4 / 5 / 6 / 8 倍（次の返答から。NVS に残る）。0 は既定へ戻す。
+// e / f で EQ（低い音を削り 3kHz を持ち上げる）のあり・なし（保存しない。既定はあり）。
+const float PLAYBACK_GAIN_DEFAULT = 6.0f;  // 2026-11-13 に試験機で聞いて決めた（EQ あり。絞りが効くのは返答の4割前後、音割れ0）
+static PlaybackLimiter playbackLimiter;
+
+void setPlaybackGain(float gain, bool save) {
+  playbackLimiter.setGain(gain);
+  if (save) {
+    Preferences prefs;
+    if (prefs.begin("audio", false)) {
+      prefs.putFloat("gain", playbackLimiter.gain());
+      prefs.end();
+    }
+  }
+  Serial.printf("[VOLUME] gain=%.2f saved=%d\n", playbackLimiter.gain(), save);
+}
+
+void loadPlaybackGain() {
+  float gain = PLAYBACK_GAIN_DEFAULT;
+  Preferences prefs;
+  if (prefs.begin("audio", true)) {
+    gain = prefs.getFloat("gain", PLAYBACK_GAIN_DEFAULT);
+    prefs.end();
+  }
+  setPlaybackGain(gain, false);
+}
+
+// 聞き取り中の loop() から。シリアルの数字1文字で倍率を変える（試験用）
+void pollPlaybackGainSerial() {
+  static const float table[] = {PLAYBACK_GAIN_DEFAULT, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f};
+  while (Serial.available() > 0) {
+    const int c = Serial.read();
+    if (c >= '0' && c <= '8') setPlaybackGain(table[c - '0'], true);
+    else if (c == 'e' || c == 'f') {  // e = EQ あり、f = EQ なし（聞き比べ用。保存しない）
+      playbackLimiter.setEq(c == 'e');
+      Serial.printf("[VOLUME] eq=%d\n", playbackLimiter.eq());
+    }
+  }
+}
 
 // ==== TTS設定 ====
 const char* TTS_PROVIDER = "ElevenLabs";
@@ -903,15 +945,7 @@ void addToHistory(const String& role, const String& content) {
 
 // ==== mono → stereo 変換 ====
 void monoToStereo(int16_t* mono, int16_t* stereo, size_t samples) {
-  for (size_t i = 0; i < samples; i++) {
-    // クリップ保護: int16範囲を超えたら飽和させる（オーバーフローによる波形破壊を防ぐ）
-    int32_t v = (int32_t)(mono[i] * VOLUME);
-    if (v > 32767) v = 32767;
-    else if (v < -32768) v = -32768;
-    int16_t sample = (int16_t)v;
-    stereo[2*i]     = sample;
-    stereo[2*i + 1] = sample;
-  }
+  playbackLimiter.process(mono, stereo, samples);
 }
 
 // ==== I2S 録音設定 (STT) ====
@@ -2048,6 +2082,8 @@ void sendToLambdaAndPlay(const String& text) {
   ttsFirstPcmLogged = false;
   ttsFirstWriteAtMs.store(0);
   ttsPcmBytes = 0;
+  playbackLimiter.reset();
+  playbackLimiter.resetStats();
   ttsSegments = 0;
   ttsRingWaitMs = 0;
   sonioxServiceMaxMs = 0;
@@ -2384,6 +2420,13 @@ void sendToLambdaAndPlay(const String& text) {
                    (voiceTriggerMs.load() ? "aec" : "button") : "done", t0);
   Serial.printf("⏱️ end+[%lums] Amp off\n", millis() - tEnd);
   statsPrint();  // このターンのWiFi/再生品質サマリ
+  {
+    // 届いた音声の大きさ（in_*）と、リミッターを通した後（out_rms）。倍率を決める材料（相槌も含む）
+    const auto& lv = playbackLimiter.stats();
+    Serial.printf("[PCM_LEVEL] eq=%d gain=%.2f in_peak=%u in_rms=%lu out_rms=%lu limited_pct=%lu min_reduction=%.2f hard_clips=%lu samples=%lu\n",
+                  playbackLimiter.eq(), playbackLimiter.gain(), lv.inPeak, (unsigned long)lv.inRms(), (unsigned long)lv.outRms(),
+                  (unsigned long)lv.limitedPct(), lv.minReduction, (unsigned long)lv.hardClips, (unsigned long)lv.samples);
+  }
 
   addToHistory("user", text);
   if (responseText.length() > 0) addToHistory("assistant", responseText);
@@ -2796,6 +2839,7 @@ void setup() {
 
   WiFi.onEvent(WiFiEvent);
 
+  loadPlaybackGain();
   // LED初期化（digitalWriteのみ、PWMなし）
   pinMode(PIN_LED, OUTPUT);
   digitalWrite(PIN_LED, HIGH);
@@ -3096,6 +3140,7 @@ void loop() {
   if (currentMode != MODE_NORMAL) return;  // 長押しで BLE 設定へ入った
   watchSttConnection();
   if (idleSleeping) return;
+  pollPlaybackGainSerial();
 
   // ボタンデバウンス
   int reading = digitalRead(PIN_BUTTON);
