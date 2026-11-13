@@ -6,12 +6,13 @@
 // 5分ごとの読み直しは、SecureString 1件の復号ごとに KMS Decrypt を1回呼ぶため、温めping経由で月17万回になっていた。
 // 急ぎで反映したいときは設定を1つ触って容器を入れ替える（docs/security-review-2026-10-25.md の入れ替え手順）。
 import { SSMClient, GetParametersCommand } from "@aws-sdk/client-ssm";
+import { dataClientConfig } from "./region.mjs";
 
 const CHUNK = 10; // GetParameters の上限
 
 const params = JSON.parse(process.env.SECRET_PARAMS || "{}");
 // 死んだ接続で待たされないよう短めに切る（切れたら SDK が新しい接続で再試行する）
-const ssm = new SSMClient({ requestHandler: { connectionTimeout: 2000, requestTimeout: 3000 } });
+const ssm = new SSMClient({ ...dataClientConfig, requestHandler: { connectionTimeout: 2000, requestTimeout: 3000 } });
 
 let values = {};
 let loaded = false;

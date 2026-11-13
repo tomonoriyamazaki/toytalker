@@ -1,11 +1,12 @@
 import * as cdk from "aws-cdk-lib";
 import { AwsSolutionsChecks, ServerlessChecks } from "cdk-nag";
 import { STSClient, GetCallerIdentityCommand } from "@aws-sdk/client-sts";
-import { edgeStackName, getStage, stackName } from "../config/stages.js";
+import { edgeStackName, getStage, satelliteStackName, stackName } from "../config/stages.js";
 import { assertSecretsExist, loadSecrets } from "../lib/secrets.js";
 import { ToyTalkerStack } from "../lib/toytalker-stack.js";
 import { ToyTalkerOrgStack } from "../lib/toytalker-org-stack.js";
 import { ToyTalkerEdgeStack } from "../lib/toytalker-edge-stack.js";
+import { ToyTalkerSatelliteStack } from "../lib/toytalker-satellite-stack.js";
 
 const app = new cdk.App();
 const config = getStage(app.node.tryGetContext("stage"));
@@ -56,6 +57,18 @@ new ToyTalkerStack(app, stackName(config), {
   terminationProtection: true,
   description: `ToyTalker ${config.stage}: Lambda, DynamoDB, S3, SNS, warmer, monthly ops, CloudFront API domain`,
 });
+
+// データとは別のリージョンに置く会話用 Lambda（config.satellites）。実験用なので消せるようにしておく（保護なし）。
+// 初回はそのリージョンの `cdk bootstrap` が要る
+if (!importPhase) {
+  for (const { region } of config.satellites ?? []) {
+    new ToyTalkerSatelliteStack(app, satelliteStackName(config, region), {
+      env: { account: config.account, region },
+      config,
+      description: `ToyTalker ${config.stage} satellite (${region}): chat Lambda that reads data in ${config.region}`,
+    });
+  }
+}
 
 // 組織全体で1つの資源（CloudTrail 組織トレイル）は管理アカウントの環境にだけ出す
 if (config.organizationId) {

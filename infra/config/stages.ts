@@ -26,6 +26,30 @@ export interface SttWaitSetting {
   readonly grace_ms: number;
 }
 
+/**
+ * 別リージョンに置く会話用 Lambda（StageConfig.satellites）。
+ *
+ * 足す順番: (1) region だけ書いてそのリージョンのスタックを deploy する → (2) 出力の Function URL のホスト名を urlHosts に書いて
+ * 本体スタックを deploy する（固定ドメインに経路 `<経路>-<短縮名>` と振り分けができる）→ (3) 確かめてから countries を書く。
+ * やめる順番は逆: countries を空に → urlHosts を消して本体を deploy → そのリージョンのスタックを `cdk destroy` → ここから消す。
+ */
+export interface SatelliteConfig {
+  /** 置くリージョン（例 us-west-2） */
+  readonly region: string;
+  /**
+   * そのリージョンの Function URL のホスト名（Lambda の機能名 → ホスト名。スタックの出力 `<機能>FunctionUrl` から）。
+   * 書くと本体スタックの CloudFront に、そこへ行く経路（`/chat-mcu-usw2` など。国に関係なく必ずそのリージョン）と、
+   * 元の経路（`/chat-mcu`）での振り分けができる。スタック間の参照にしないのは、片方だけ消せるようにするため。
+   * ホスト名は Function URL を作り直さない限り変わらない
+   */
+  readonly urlHosts?: Readonly<Record<string, string>>;
+  /**
+   * 元の経路（`/chat-mcu`）への要求をこのリージョンへ送る国（CloudFront-Viewer-Country。ISO 3166-1 alpha-2）。
+   * 空なら国では振り分けない（専用の経路と、要求ヘッダー `x-toytalker-region: <短縮名>` での指定だけ）
+   */
+  readonly countries: readonly string[];
+}
+
 export interface StageConfig {
   readonly stage: StageName;
   /** AWSアカウントID。デプロイ前に呼び出し元の資格情報と一致するか確認する（bin/toytalker.ts） */
@@ -122,6 +146,13 @@ export interface StageConfig {
    */
   readonly supportMail?: { readonly domain: string; readonly addresses: readonly string[] };
   /**
+   * データ（DynamoDB・SSM）とは別のリージョンにも置く会話用 Lambda（lib/toytalker-satellite-stack.ts）。
+   * リージョンごとにスタック `<スタック名>-<短縮名>`（us-west-2 → `-usw2`）を作り、ESP32 本文の Lambda と Function URL だけを置く。
+   * データは `region` のものを読む（環境変数 DATA_REGION）。2026-11-13: 海外からの距離の影響を測る実験（RnD のオレゴン）。
+   * 無い環境は作らない。型と、足す・やめる順番は SatelliteConfig
+   */
+  readonly satellites?: readonly SatelliteConfig[];
+  /**
    * Organizations の組織ID。管理アカウントの環境（RnD）にだけ置く。これがある環境では
    * 組織全体で1つの資源（CloudTrail 組織トレイル）を持つスタック `toytalker-org` も合成する。
    */
@@ -195,6 +226,12 @@ export const stages: Record<StageName, StageConfig> = {
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: false }, // Stripe は sandbox（2026-11-02 作成）
     supportMail: { domain: "zakicorp.com", addresses: ["support@zakicorp.com", "toytalker-support@zakicorp.com"] }, // 2026-11-08。DNS と転送は Cloudflare
+    // 2026-11-13。海外からの距離の影響を測る実験（オレゴン）。国での振り分けはまだしない（経路 /chat-mcu-usw2 とヘッダー指定だけ）
+    satellites: [{
+      region: "us-west-2",
+      urlHosts: { "chat-mcu": "nekzerzjzx7izwqknwtidko3sq0rnpaa.lambda-url.us-west-2.on.aws" },
+      countries: [],
+    }],
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
       lambdaRoleArn: "arn:aws:iam::342082316736:role/toytalk-lambda-role-dev",
@@ -255,6 +292,17 @@ export function stackName(config: StageConfig): string {
 /** CloudFront 用に us-east-1 に置く資源（ACM 証明書・WAF）のスタック名。本体スタックが参照する */
 export function edgeStackName(config: StageConfig): string {
   return `${stackName(config)}-edge`;
+}
+
+/** リージョンの短縮名。`us-west-2` → `usw2`、`ap-northeast-1` → `apn1`。スタック名・CloudFront の経路・振り分けの指定に使う */
+export function regionShort(region: string): string {
+  const [area, direction, number] = region.split("-");
+  return `${area}${direction?.[0] ?? ""}${number ?? ""}`;
+}
+
+/** 別リージョンに置く会話用 Lambda のスタック名。`us-west-2` → `<スタック名>-usw2` */
+export function satelliteStackName(config: StageConfig, region: string): string {
+  return `${stackName(config)}-${regionShort(region)}`;
 }
 
 export function getStage(name: unknown): StageConfig {

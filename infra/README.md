@@ -126,6 +126,36 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 4. `curl -s https://api-rnd.zakicorp.com/voices | head -c 200`（設定Lambda）と `curl -s "https://api-rnd.zakicorp.com/stt-token?ttl=60"`（鍵発行）で通ることを確かめる。本文のある POST は `x-amz-content-sha256` 付きで
 5. アプリ（EAS ビルド）と試験機（ファーム 0.7.4 を beta に発行して OTA）を切り替え、実機で会話・相槌・読み上げ・設定画面を確かめる。Lambda ログに `edge: "cloudfront"` と `country` が出る
 
+## 別リージョンの Lambda と振り分け（海外対応、ロードマップ36）
+
+海外の利用者に近いリージョンにも会話用の Lambda を置き、CloudFront で行き先を振り分ける仕組み（2026-11-13、RnD のオレゴン us-west-2）。設定は `config/stages.ts` の `satellites`、スタックは `lib/toytalker-satellite-stack.ts`（`ToyTalker-rnd-usw2`）、振り分けは `lib/toytalker-stack.ts` の `createApiDistribution` と `routeFunctionCode`。
+
+- **置いているもの**: ESP32 本文の Lambda 1本（`toytalker-chat-mcu-rnd`、us-west-2）と Function URL、ロググループ。相槌・鍵発行・アプリ用は東京だけ。
+- **データは東京のまま**: 環境変数 `DATA_REGION` を渡すと、`backend/shared/region.mjs` が DynamoDB と SSM のクライアントを東京へ向ける。権限も東京のテーブル・パラメータの ARN。テーブルの読み込みは容器の初回だけ遅い（実測 0.4〜0.9 秒、以後はキャッシュで数 ms）。
+- **入口（固定ドメイン `api-rnd.zakicorp.com`）**:
+
+| 要求 | 行き先 |
+|---|---|
+| `/chat-mcu-usw2` | 必ずオレゴン |
+| `/chat-mcu` + ヘッダー `x-toytalker-region: usw2` | オレゴン |
+| `/chat-mcu` + ヘッダー `x-toytalker-region: <それ以外>` | 東京（国を見ない。現地から東京と比べるとき） |
+| `/chat-mcu`（ヘッダーなし） | `satellites` の `countries` にある国ならオレゴン、それ以外は東京。**今は `countries` が空なので全部東京** |
+
+- **振り分けは CloudFront Functions**（`toytalker-api-route-chat-mcu-rnd`、viewer request）。例外が出ても要求は通す。別リージョンへ送ったときだけ us-east-1 の `/aws/cloudfront/function/toytalker-api-route-chat-mcu-rnd` に `route chat-mcu-usw2 country=JP by=header` の1行を書く（国コードだけ）。要求の本文は読めないので、機器ごとの振り分けはできない。
+- **どちらが処理したかの見分け方**: ロググループがリージョンごとに別（東京 `/aws/lambda/toytalk-api-stream-for-esp32-lambda`、オレゴン `/aws/lambda/toytalker-chat-mcu-rnd`）。項目は同じ（上の「Lambdaログの見方」）。
+- **確かめ方**（本文のある要求は SHA-256 を添える。上の「固定ドメイン」）:
+
+```
+B='{"messages":[{"role":"user","content":"すきなどうぶつをおしえて"}]}'; H=$(printf '%s' "$B" | sha256sum | cut -d' ' -f1)
+curl -s -o /dev/null -w "%{http_code} first_byte=%{time_starttransfer}s total=%{time_total}s\n" -X POST \
+  -H "content-type: application/json" -H "x-amz-content-sha256: $H" -H "x-toytalker-region: usw2" -d "$B" https://api-rnd.zakicorp.com/chat-mcu
+```
+
+- **国での振り分けを始めるとき**: `countries` に国コード（`["US"]` など）を書いて `cdk deploy --context stage=rnd ToyTalker-rnd ToyTalker-rnd-usw2`。オレゴンに温めルール（5分ごと）も一緒にできる。
+- **リージョンを足す・やめる順番**は `config/stages.ts` の `SatelliteConfig` のコメント。初回はそのリージョンの `cdk bootstrap` が要る（us-west-2 は 2026-11-13 済）。
+- **分かっていること（2026-11-13、日本の PC から各2〜4回）**: LLM（Gemini）と TTS（OpenAI）の待ちは東京とオレゴンでほぼ同じ。差は距離の分で、最初の1バイトまで東京 0.10〜0.13 秒・オレゴン 0.2〜0.5 秒（CloudFront 経由、温まった状態）。声が日本にあるもの（ZakiCorp・ずんだもん）をオレゴンから呼んだときの差は未計測。
+- **残り**: 本番で使うなら DynamoDB の複製（グローバルテーブル。残高のテーブルは書く場所を1つに決める）、相槌・鍵発行も置くか、の検討。
+
 ## 利用者認証（Cognito、ロードマップ4）
 
 状態・仕組み・各社側の設定・確認の仕方は [docs/auth.md](../docs/auth.md)。CDK は `lib/toytalker-stack.ts` の `createAuth`（ユーザープール `toytalker-auth-<環境>`、managed login、アプリ用クライアント、外部IdP）と `createApiAlarms`（401/403・呼び出し数・エラー数のアラームと、使った分を台帳に書けなかったときのアラーム `wallet-consume-failed` → 月次レポートと同じ SNS）。環境ごとの設定は `config/stages.ts` の `auth`。deploy の出力 `UserPoolId` / `UserPoolClientId` / `AuthDomain` をアプリ（`app/lib/auth.ts`）と各社側の設定に使う。

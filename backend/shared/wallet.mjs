@@ -16,6 +16,7 @@ import { DynamoDBClient, TransactWriteItemsCommand } from "@aws-sdk/client-dynam
 import { DynamoDBDocumentClient, GetCommand, QueryCommand, ScanCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { tableName } from "./tables.mjs";
 import { jstDayRange } from "./jst.mjs";
+import { dataClientConfig } from "./region.mjs";
 
 const WALLETS_TABLE = tableName("wallets");
 const LEDGER_TABLE = tableName("wallet-ledger");
@@ -28,13 +29,13 @@ export const EXPIRY_WARN_DAYS = EXPIRY_DAYS - 30;
 const DAY_MS = 24 * 60 * 60 * 1000;
 
 // 内訳の値が undefined（モデル名が取れなかった等）でも書けるようにする。落とさないと行ごと失敗する
-const raw = new DynamoDBClient({});
+const raw = new DynamoDBClient(dataClientConfig);
 const ddb = DynamoDBDocumentClient.from(raw, { marshallOptions: { removeUndefinedValues: true } });
 // 残高を DynamoDB の数値の文字列のまま読む（wrapNumbers）。残高は consume の積み重ねで JavaScript の数値より長い桁になっていて
 // （例 975.01661000000000052）、Number にすると丸まり「読んだときのまま」の条件が一致しない。失効の処理だけがこちらを使う。
 // 元のクライアントは別に作る。DynamoDBDocumentClient.from は渡したクライアントの config に変換の設定を書き込むので、
 // 同じ raw から2つ作ると後の設定が先の ddb にもかかる（2026-11-08〜11、台帳の数値が { value: "…" } で返り、アプリの利用状況の詳細が落ちた）
-const ddbExact = DynamoDBDocumentClient.from(new DynamoDBClient({}), { marshallOptions: { removeUndefinedValues: true }, unmarshallOptions: { wrapNumbers: true } });
+const ddbExact = DynamoDBDocumentClient.from(new DynamoDBClient(dataClientConfig), { marshallOptions: { removeUndefinedValues: true }, unmarshallOptions: { wrapNumbers: true } });
 
 /**
  * 1回分の消費を台帳に書き、残高から引く。失敗しても会話は止めないので投げずに false を返す。

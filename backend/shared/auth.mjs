@@ -21,6 +21,7 @@ import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { tableName } from "./tables.mjs";
+import { dataClientConfig } from "./region.mjs";
 
 /** トークンを載せるヘッダー名（小文字。Function URL はヘッダー名を小文字で渡す）。アプリは app/lib/api.ts */
 export const TOKEN_HEADER = "x-toytalker-token";
@@ -34,7 +35,7 @@ const CLIENT_ID = process.env.COGNITO_CLIENT_ID || "";
 const CLIENT_IDS = [CLIENT_ID, process.env.COGNITO_WEB_CLIENT_ID || ""].filter(Boolean);
 const USERS_TABLE = tableName("users");
 
-const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const ddb = DynamoDBDocumentClient.from(new DynamoDBClient(dataClientConfig));
 // JWKS（公開鍵）は初回検証で取りに行き、容器の間は保持する。鍵が替わったら自動で取り直す（ライブラリの既定）
 const verifier = USER_POOL_ID && CLIENT_ID
   ? CognitoJwtVerifier.create({ userPoolId: USER_POOL_ID, tokenUse: "id", clientId: CLIENT_IDS })

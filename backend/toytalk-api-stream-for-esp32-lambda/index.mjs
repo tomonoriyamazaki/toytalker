@@ -10,6 +10,7 @@
   import { Agent, setGlobalDispatcher } from "undici";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
+  import { DATA_REGION } from "../shared/region.mjs";
   import { recordConsume, checkBalance } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
@@ -48,7 +49,7 @@ import { checkDeviceKey, deviceGate } from "../shared/auth.mjs";
     })).catch(() => {});
   }
 
-  const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
+  const ddbClient = new DynamoDBClient({ region: DATA_REGION ?? "ap-northeast-1" });
   const ddb = DynamoDBDocumentClient.from(ddbClient);
   const DEVICES_TABLE    = tableName("devices");
   const VOICES_TABLE     = tableName("voices");
