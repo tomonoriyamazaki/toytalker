@@ -152,6 +152,7 @@ curl -s -o /dev/null -w "%{http_code} first_byte=%{time_starttransfer}s total=%{
   -H "content-type: application/json" -H "x-amz-content-sha256: $H" -H "x-toytalker-region: usw2" -d "$B" https://api-rnd.zakicorp.com/chat-mcu
 ```
 
+- **ESP32 本文の Lambda を直したら両方へ出す**: オレゴンの Lambda は東京と同じコード（`backend/toytalk-api-stream-for-esp32-lambda` と `backend/shared`）から作る。`cdk deploy --context stage=rnd ToyTalker-rnd ToyTalker-rnd-usw2` のように両方を指定する（`ToyTalker-rnd` だけだとオレゴンが古い版のまま残る）。揃っているかは `cdk diff` に同じ2つを渡して見る。
 - **国での振り分けを始めるとき**: `countries` に国コード（`["US"]` など）を書いて `cdk deploy --context stage=rnd ToyTalker-rnd ToyTalker-rnd-usw2`。オレゴンに温めルール（5分ごと）も一緒にできる。
 - **リージョンを足す・やめる順番**は `config/stages.ts` の `SatelliteConfig` のコメント。初回はそのリージョンの `cdk bootstrap` が要る（us-west-2 は 2026-11-13 済）。
 - **分かっていること（2026-11-13、日本の PC から各2〜4回）**: LLM（Gemini）と TTS（OpenAI）の待ちは東京とオレゴンでほぼ同じ。差は距離の分で、最初の1バイトまで東京 0.10〜0.13 秒・オレゴン 0.2〜0.5 秒（CloudFront 経由、温まった状態）。声が日本にあるもの（ZakiCorp・ずんだもん）をオレゴンから呼んだときの差は未計測。
