@@ -15,7 +15,8 @@
      （CLI は inherits を解決しないため。`from` と `compatible_printers` は残さないと弾かれる）
   2. process に外装用の上書きを入れる: 壁 3 周、サポートはプレートからの通常サポートのみ（吊り具の下だけに付く）、
      橋はサポート無し（USB 穴・スイッチ穴の上）、小さな張り出しは無視、インフィル 15%
-  3. 蓋の STL を X 軸回りに 180° 回して上面をプレート側にする（爪と突起が上に伸びてサポート不要になる）
+  3. 蓋の STL を X 軸回りに 180° 回して上面をプレート側にする（爪と突起が上に伸びてサポート不要になる）。
+     _knob.stl（スイッチのつまみ）があれば、外面を下に寝かせて一緒に並べる
   4. bambu-studio.exe を CLI で呼び、並べてスライスし、3MF を書き出す。続けて PNG も書き出す
      （--export-png は他の動作と同時に付けられないので 2 回呼ぶ）
 """
@@ -61,15 +62,16 @@ def flatten(kind: str, name: str) -> dict:
     return out
 
 
-def flip_lid(src: str, dst: str) -> None:
-    """バイナリ STL を X 軸回りに 180° 回し（y→-y, z→-z）、底が z=0 になるよう持ち上げる。"""
+def flip_lid(src: str, dst: str, quarter: bool = False) -> None:
+    """バイナリ STL を X 軸回りに 180° 回し（y→-y, z→-z）、底が z=0 になるよう持ち上げる。
+    quarter=True なら -90°（y→z, z→-y。つまみ用: 外面 +Y を下に寝かせる）。"""
     with open(src, "rb") as f:
         data = f.read()
     cnt = struct.unpack_from("<I", data, 80)[0]
     tris = []
     for i in range(cnt):
         vals = struct.unpack_from("<12f", data, 84 + i * 50)
-        rot = lambda p: (p[0], -p[1], -p[2])
+        rot = (lambda p: (p[0], p[2], -p[1])) if quarter else (lambda p: (p[0], -p[1], -p[2]))
         n = rot(vals[0:3])
         v = [rot(vals[3:6]), rot(vals[6:9]), rot(vals[9:12])]
         tris.append((n, [v[0], v[2], v[1]]))  # 頂点順を入れ替えて面の向きを保つ
@@ -99,6 +101,9 @@ def main() -> int:
     ap.add_argument("--machine", default="Bambu Lab P2S 0.4 nozzle")
     ap.add_argument("--process", default="0.20mm Standard @BBL P2S")
     ap.add_argument("--filament", default="Bambu PLA Basic @BBL P2S")
+    ap.add_argument("--skip-lid", action="store_true", help="蓋を並べない（蓋が前の版と同じで刷り直さないとき）")
+    ap.add_argument("--knob-only", type=int, metavar="N", help="つまみ（_knob.stl）だけを版ごとに N 個並べる（小さくて剥がれやすいので予備を刷る）")
+    ap.add_argument("--brim", type=float, metavar="MM", help="外周にブリム（1 層のつば）を付ける幅。つまみだけ刷るときは 5 くらい")
     ap.add_argument("--infill", default="15%", help="sparse_infill_density")
     a = ap.parse_args()
 
@@ -126,6 +131,10 @@ def main() -> int:
     fila = flatten("filament", a.filament)
     proc.update(PROCESS_OVERRIDES)
     proc["sparse_infill_density"] = a.infill
+    if a.brim:
+        proc["brim_type"] = "outer_only"
+        proc["brim_width"] = str(a.brim)
+        proc["brim_object_gap"] = "0.1"
     proc["name"] = f"{a.process} - {base}"
     proc["compatible_printers"] = [a.machine]
     fila["compatible_printers"] = [a.machine]
@@ -138,11 +147,23 @@ def main() -> int:
     models = []
     for v, box, lid in parts:
         tag = v.replace(".", "_")
-        lid_flipped = os.path.join(work, f"lid_{tag}.stl")
-        flip_lid(lid, lid_flipped)
-        box_copy = os.path.join(work, f"box_{tag}.stl")
-        shutil.copy(box, box_copy)
-        models += [box_copy, lid_flipped]
+        if not a.knob_only:
+            box_copy = os.path.join(work, f"box_{tag}.stl")
+            shutil.copy(box, box_copy)
+            models.append(box_copy)
+        if not a.skip_lid and not a.knob_only:
+            lid_flipped = os.path.join(work, f"lid_{tag}.stl")
+            flip_lid(lid, lid_flipped)
+            models.append(lid_flipped)
+        knob = os.path.join(here, f"toytalker_mini_{v}_knob.stl")
+        if os.path.exists(knob):
+            knob_flat = os.path.join(work, f"knob_{tag}.stl")
+            flip_lid(knob, knob_flat, quarter=True)
+            models.append(knob_flat)
+            for n in range(1, a.knob_only or 1):
+                extra = os.path.join(work, f"knob_{tag}_{n}.stl")
+                shutil.copy(knob_flat, extra)
+                models.append(extra)
 
     plate_name = f"{base}_plate.3mf"
     rc = run_cli([
