@@ -4,6 +4,32 @@
 
 方針: 開発は基本Macのローカルセッションで行う。自宅Windows PC（TTSサーバー）の面倒を見るときだけRemote Controlを使う。
 
+## 0. 配布機の USB 書き込み（2026-11-15。ロードマップ6）
+
+配布機（西川さん・中島さん）は OTA 非対応の旧ファームなので、MacBook から USB で書き換える。**これが最後の USB 書き込み**で、以後は OTA で届く。束の中身は [ESP32ファーム](esp32-firmware.md) の「11月配布版に入れるもの」。書き込みは本体をつないだ PC でしかできないので、Windows のセッションを Remote Control で操作するのではなく、**Mac のローカルで Claude Code を使う**。
+
+**書く版**: 試験機で確かめて発行済みの版を番号で指定する（`beta` は試験版を指していることがあるので、チャネル名では決めない）。**いまの候補は 0.7.20**（2026-11-13。OTA の直しの実機確認の後、最後の良い版に直す。確定したらここを上書きする）。
+
+### 前の日までに（Mac で一度通す。試験機を使う）
+
+1. 道具: 下の「2. Macのセットアップ」の `arduino-cli` と ESP32 コア 3.3.11。ライブラリは Windows と同じ版を入れる: `arduino-cli lib install "ArduinoJson@7.4.3" "WebSockets@2.7.2"`（ビルドが通ればよい。アプリ本体は下のとおり S3 の .bin を書くので、手元のビルドの中身は使わない）。
+2. AWS は SSO（長期キーは無い。下の `aws configure` の記述は古い）。`~/.aws/config` に Windows と同じ `[sso-session toytalker]`（`sso_start_url = https://d-95671d6109.awsapps.com/start`、`sso_region = ap-northeast-1`）と `[profile toytalker-rnd]`（`sso_account_id = 342082316736`、`sso_role_name = AdministratorAccess`、`region = ap-northeast-1`）を書き、`aws sso login --profile toytalker-rnd`。
+3. `git pull` して、試し実行（本体に触らない）: `AWS_PROFILE=toytalker-rnd bash devices/mcu/esp32_s3/tools/flash-published.sh <版> --dry-run`。「書くのは発行済みの <版>」まで出ればよい。
+4. 試験機をつないで本番と同じ書き込み: `AWS_PROFILE=toytalker-rnd bash devices/mcu/esp32_s3/tools/flash-published.sh <版>`（ポートは `/dev/cu.usbmodem*` が1つなら自動。複数あれば `arduino-cli board list` で確かめて2つ目の引数に渡す）。
+5. 確かめる: 再起動後に Wi-Fi 設定が残っていて会話できること、サーバーのログ（鍵発行 `toytalk-soniox-stt-lambda`）に `fw: "<版>"` と `device_key` が出ること。**Wi-Fi 設定が残るかはここで初めて分かる**（NVS は消さない書き方だが、Mac から通したことは無い）。
+
+`flash-published.sh` は、手元でビルドした bootloader・パーティション表と、**S3 から取って SHA-256 を照合した発行済みのアプリ本体**を一緒に書く。手元のビルドはライブラリの版や OS の違いで試験機と同じ中身になる保証が無いので、アプリ本体には使わない。Windows（Git Bash）でも同じスクリプトが動く（`--dry-run` は 2026-11-13 に確認。**実際の書き込みはこのスクリプトでは未確認**）。
+
+### 当日
+
+持っていくもの: MacBook、データ通信できる USB-C ケーブル（充電専用は不可）、スマホ（アプリとテザリング）。会場に入る前に `aws sso login` と `--dry-run` を済ませておく（S3 から取るので通信が要る）。
+
+1. 本体を USB でつなぎ、`flash-published.sh <版>` で書く。通常は自動で書き込みモードに入る（試験機は Windows からこれで書けた）。入れずに失敗したら、基板の BOOT スイッチ（GPIO0。[ピン割当](../devices/KiCad/toytalker_mini_v0.3/PINMAP.md)）を押しながら USB をつなぎ直して、もう一度書く（配布機で試したことは無い。ケースを開ける道具も持っていく）。
+2. 書いた後、本体は自動で再起動する。**会場には持ち主の家の Wi-Fi が無い**ので、そのままでは Wi-Fi に失敗して BLE 設定（LED が速い点滅）に入る。Wi-Fi 設定そのものは消えないので、家に持ち帰ればつながる。
+3. その場で最後まで確かめるなら、アプリの BLE 設定で本体をスマホのテザリングにつなぐ → 会話できること、ログに `fw` と `device_key: "enrolled"`（デバイス鍵の初回登録。次の要求から `match`）が出ることを見る → **持ち主の家の Wi-Fi へは、帰宅後に持ち主がアプリから設定し直す**（やり方を伝える）。確かめを省くなら、シリアルの `[BUILD] fw=<版>` だけ見て渡し、最初の通信はあとでログで確かめる。どちらにするかは当日までに決める。
+4. 渡すときに伝えること: 黙って3分たつと音が鳴って休む（LED がゆっくり明滅。故障ではない。ボタンで戻る）、音量が上がった、以後の更新は電源を入れ直すと自動で入る。
+5. 2台とも新版になり、ログの `device_key` が `match` だけになったら、`infra/config/stages.ts` の `directFunctionUrls` と `deviceKeyEnroll` を false にする（Windows 側で。ロードマップ3・6）。
+
 ## 1. 出発前にWindows側でやること
 
 | # | 項目 | 状態 |
@@ -56,7 +82,7 @@ brew install git node@22 awscli arduino-cli
 npm install -g @anthropic-ai/claude-code
 git clone https://github.com/tomonoriyamazaki/toytalker.git
 cd toytalker
-aws configure   # Windowsと同じIAMキー、region=ap-northeast-1、output=json
+# AWS は SSO（2026-10-25 から。長期キーは無い）。設定は上の「0. 配布機の USB 書き込み」の 2
 ```
 
 - Node はWindows側が v22.19.0。同じメジャーにする。
