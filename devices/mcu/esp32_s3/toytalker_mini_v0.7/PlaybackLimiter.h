@@ -128,7 +128,7 @@ class PlaybackLimiter {
   static constexpr float ATTACK = 0.08f;
   static constexpr float RELEASE = 0.00035f;
   float gain_ = 1.5f;
-  bool eq_ = true;
+  bool eq_ = false;  // 既定はなし（2026-11-13: +6dB の持ち上げで再生中ずっとシャラシャラした音が乗った。外すと消えた）
   float env_ = 0;
   float delay_[LOOKAHEAD] = {};
   float abs_[LOOKAHEAD] = {};

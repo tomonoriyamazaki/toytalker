@@ -658,7 +658,7 @@ int historyCount = 0;
 // 0.7.20: 「VOLUME 倍して山を切る」をやめ、リミッター（PlaybackLimiter.h）で全体を持ち上げる。
 // 倍率は NVS の audio/gain（無ければ PLAYBACK_GAIN_DEFAULT）。聞き比べ用にシリアルから変えられる:
 // 数字1文字 1〜8 → 1.5 / 2 / 2.5 / 3 / 4 / 5 / 6 / 8 倍（次の返答から。NVS に残る）。0 は既定へ戻す。
-// e / f で EQ（低い音を削り 3kHz を持ち上げる）のあり・なし（保存しない。既定はあり）。
+// e / f で EQ（低い音を削り 3kHz を持ち上げる）のあり・なし（保存しない。既定はなし＝0.7.25。聞き比べ用に残してある）。
 const float PLAYBACK_GAIN_DEFAULT = 6.0f;  // 2026-11-13 に試験機で聞いて決めた（EQ あり。絞りが効くのは返答の4割前後、音割れ0）
 static PlaybackLimiter playbackLimiter;
 
