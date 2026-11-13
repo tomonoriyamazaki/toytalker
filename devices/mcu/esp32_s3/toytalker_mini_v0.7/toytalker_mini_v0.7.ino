@@ -250,6 +250,24 @@ static bool sttWsWaitPending = false;    // 録音開始時に Soniox が未接�
 static uint32_t lastTextChangeMs = 0;    // 途中結果の文字が最後に変わった時刻
 static uint32_t sonioxDisconnects = 0, sonioxErrors = 0;  // 前の要求から数える
 static bool sonioxClosingOnPurpose = false;  // 自分で切るとき（再生中の先行接続の張り直し）。切断の回数に数えない
+// ---- 待ち受けの見張り（0.7.19、ロードマップ20・24）----
+// 切れたら戻す: 聞き取り中のはず（sttWanted）なのに Soniox とつながっていなければ、loop() がつなぎ直す。
+//   以前は DISCONNECTED で isRecording を false にするだけで、電源を入れ直すまで無反応だった。
+// 無音なら休む: 文字が出ないまま STT_IDLE_SLEEP_MS 聞き続けたら、Soniox を閉じて休む（Soniox は無音でも
+//   接続の時間で課金する）。休み中は LED がゆっくり明滅し、ボタンを押すと聞き取りに戻る。
+const unsigned long STT_IDLE_SLEEP_MS = 180000;    // アプリ（ロードマップ24）と同じ3分
+const unsigned long STT_RECOVER_FIRST_MS = 1500;   // 切れたのに気づいてから、つなぎ直すまで
+const unsigned long STT_RECOVER_MAX_MS = 30000;    // 続けて失敗したら倍々でここまで間を空ける
+const unsigned long STT_RECOVER_STABLE_MS = 30000; // これだけつながっていたら、間を最初の値に戻す
+const unsigned long IDLE_BREATH_MS = 4000;         // 休み中の LED の明滅1回の長さ
+static bool sttWanted = false;       // 聞き取り中のはず（startSTTRecording で true、返答の送信・休み・BLE で false）
+static bool sttRecovering = false;   // つなぎ直しの startSTTRecording（無音の時計を巻き戻さない）
+static bool idleSleeping = false;    // 休み中
+static uint32_t sttIdleSinceMs = 0;  // この待ち受けを始めた時刻
+static uint32_t sttDownSinceMs = 0;  // 切れているのに気づいた時刻（0 = つながっている）
+static uint32_t sttUpSinceMs = 0;    // つながった時刻（0 = 切れている）
+static uint32_t sttRecoverWaitMs = STT_RECOVER_FIRST_MS;
+static uint32_t idleSleepStartMs = 0;
 bool armed = false;
 bool isRecording = false;
 bool endpointDetected = false;
@@ -2050,6 +2068,7 @@ void sendToLambdaAndPlay(const String& text) {
   lastI2sWriteMs.store(0, std::memory_order_relaxed);
 
   if (isRecording) isRecording = false;
+  sttWanted = false;  // 返答の間は見張らない（戻るときに startSTTRecording が立てる）
   logMemoryCheckpoint("before_playback");
 
   // バックチャネルタスク完了待ち
@@ -2504,6 +2523,8 @@ void startSTTRecording() {
   unsigned long t0 = millis();
   sttRestartMs = t0;
   sttRecordStartMs = t0;
+  sttWanted = false;  // マイクが使えず戻るときは見張らない。録音を始められたら下で立てる
+  if (!sttRecovering) sttIdleSinceMs = t0;  // つなぎ直しでは無音の時計を巻き戻さない
   sttProgress = SttReport{};
   sttWsWaitPending = false;
   sonioxPlaybackPhase = false;
@@ -2584,6 +2605,7 @@ void startSTTRecording() {
     ws.enableHeartbeat(15000, 3000, 2);
   }
   isRecording = true;
+  sttWanted = true;
   if (sonioxIsConnected()) sttProgress.wsWaitMs = millis() - t0;
   else sttWsWaitPending = true;  // sonioxConnectionReady で埋める
   const auto buttonTiming = bargeInRequested.buttonTiming();
@@ -2873,6 +2895,157 @@ void setup() {
   }
 }
 
+// ==== 待ち受けの見張り: 無音なら休む・切れたら戻す（0.7.19）====
+// 休みに入る合図の音（下がっていく短い音）。返答の再生と同じ順で I2S を切り替える:
+// マイクを止める → 再生を作る → アンプ ON → 書く → アンプ OFF → 再生を消す。マイクは起きるときに作り直す。
+void playSleepChime() {
+  if (!pauseMicForPlaybackTest()) return;
+  if (!setupI2SPlay()) {
+    resetMicAfterPlaybackTest();
+    return;
+  }
+  bargeInRequested.beginTurn();
+  if (bargeInRequested.enableAmp(PIN_AMP_SD)) {
+    delay(50);
+    static int16_t buf[480];  // ステレオ240フレーム（10ms）
+    const uint32_t totalFrames = SAMPLE_RATE_TTS * 350 / 1000;
+    float phase = 0;
+    size_t written = 0;
+    for (uint32_t done = 0; done < totalFrames && !bargeInRequested;) {
+      const uint32_t n = min((uint32_t)240, totalFrames - done);
+      for (uint32_t i = 0; i < n; i++) {
+        const float t = (float)(done + i) / totalFrames;          // 0→1
+        const float freq = 880.0f - 550.0f * t;                   // 880Hz → 330Hz
+        const float env = (t < 0.05f ? t / 0.05f : 1.0f) * (1.0f - t) * (1.0f - t);  // 立ち上がり5%、あとは消えていく
+        phase += 2.0f * PI * freq / SAMPLE_RATE_TTS;
+        if (phase > 2.0f * PI) phase -= 2.0f * PI;
+        const int16_t v = (int16_t)(sinf(phase) * env * 9000.0f);
+        buf[2 * i] = buf[2 * i + 1] = v;
+      }
+      writePlaybackI2s(buf, n * 4, &written, portMAX_DELAY);
+      done += n;
+    }
+    delay(400);  // DMA（最大 0.34 秒ぶん）に残った音が出終わるまで
+  }
+  digitalWrite(PIN_AMP_SD, LOW);
+  ampOn = false;
+  bargeInRequested = false;
+  resetMicAfterPlaybackTest();
+  releaseI2sChannel(playbackTx);
+}
+
+// 休み中の LED（PWM）をやめて、いつもの digitalWrite に戻す
+void leaveIdleSleepLed() {
+  idleSleeping = false;
+  ledcDetach(PIN_LED);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, LOW);
+}
+
+void enterIdleSleep(uint32_t idleMs) {
+  Serial.printf("[IDLE] sleep: no text for %lus; closing Soniox (button to wake)\n", (unsigned long)(idleMs / 1000));
+  sttWanted = false;
+  isRecording = false;
+  sttDownSinceMs = sttUpSinceMs = 0;
+  sttRecoverWaitMs = STT_RECOVER_FIRST_MS;
+  if (sonioxPreconnect.ownsClient()) sonioxPreconnect.cancel();
+  else {
+    sonioxClosingOnPurpose = true;  // 切断の回数に数えない
+    ws.disconnect();
+    sonioxClosingOnPurpose = false;
+  }
+  sonioxPreconnectPending = false;
+  partialText = "";
+  sonioxFinalBuf = "";
+  armed = false;
+  endpointDetected = false;
+  sttGrace = SttGraceState{};
+  clearBackchannelCache();
+  playSleepChime();
+  // LED は休み中だけ PWM でゆっくり明滅させる（ほかの状態は digitalWrite のまま。休み中は音を出さない）
+  if (ledTimer) timerAlarm(ledTimer, 0, false, 0);
+  setLEDMode(LED_OFF);
+  ledcAttach(PIN_LED, 5000, 8);
+  ledcWrite(PIN_LED, 0);
+  idleSleepStartMs = millis();
+  idleSleeping = true;
+}
+
+void exitIdleSleep(const char* why) {
+  Serial.printf("[IDLE] wake (%s) after %lus\n", why, (unsigned long)((millis() - idleSleepStartMs) / 1000));
+  leaveIdleSleepLed();
+  bargeInRequested = false;  // 起こすために押したボタンを「再生の中断」として残さない
+  startSTTRecording();
+}
+
+// 休み中の loop()。ws.loop() は呼ばない（ライブラリが自分でつなぎ直してしまう）
+void serviceIdleSleep() {
+  static uint32_t lowSinceMs = 0;
+  finishSonioxPreconnect();  // 取り消した先行接続があれば回収する
+  handleButtonLongPress();
+  if (currentMode != MODE_NORMAL || !idleSleeping) return;  // 長押しで BLE 設定へ入った
+  if (digitalRead(PIN_BUTTON) == LOW) {
+    if (!lowSinceMs) lowSinceMs = millis() | 1;
+    else if (millis() - lowSinceMs >= debounceDelay) {
+      lowSinceMs = 0;
+      exitIdleSleep("button");
+      return;
+    }
+  } else {
+    lowSinceMs = 0;
+  }
+  // 明滅: 0 → 明るい → 0 を IDLE_BREATH_MS で1回。目に自然に見えるよう2乗する
+  const float x = 0.5f - 0.5f * cosf(2.0f * PI * ((millis() - idleSleepStartMs) % IDLE_BREATH_MS) / IDLE_BREATH_MS);
+  ledcWrite(PIN_LED, (uint32_t)(x * x * 255.0f));
+  delay(10);
+}
+
+// 聞き取り中の loop() から毎回呼ぶ
+void watchSttConnection() {
+  if (!sttWanted) {
+    sttDownSinceMs = sttUpSinceMs = 0;
+    return;
+  }
+  const uint32_t now = millis();
+  // 無音なら休む。文字が出ている間（partialText あり）は発話の途中なので数えない
+  uint32_t idleMs = now - sttIdleSinceMs;
+  if (lastTextChangeMs && now - lastTextChangeMs < idleMs) idleMs = now - lastTextChangeMs;
+  if (partialText.length() == 0 && idleMs >= STT_IDLE_SLEEP_MS) {
+    enterIdleSleep(idleMs);
+    return;
+  }
+  // 切れたら戻す。ライブラリの自動再接続でつながっても isRecording は false のままなので、両方を見る
+  if (sonioxPreconnect.ownsClient()) return;  // 先行接続ワーカーが接続中。結果を待つ
+  if (isRecording && sonioxIsConnected()) {
+    sttDownSinceMs = 0;
+    if (!sttUpSinceMs) sttUpSinceMs = now | 1;
+    else if (now - sttUpSinceMs >= STT_RECOVER_STABLE_MS) sttRecoverWaitMs = STT_RECOVER_FIRST_MS;
+    return;
+  }
+  sttUpSinceMs = 0;
+  if (!wifiGotIP) {  // Wi-Fi が戻ってから数え始める
+    sttDownSinceMs = 0;
+    return;
+  }
+  if (!sttDownSinceMs) {
+    sttDownSinceMs = now | 1;
+    return;
+  }
+  if (now - sttDownSinceMs < sttRecoverWaitMs) return;
+  const uint32_t nextWaitMs = min(sttRecoverWaitMs * 2, (uint32_t)STT_RECOVER_MAX_MS);
+  Serial.printf("[STT_RECOVER] not listening for %lums (recording=%d ws=%d); reconnecting, next wait %lums\n",
+                (unsigned long)(now - sttDownSinceMs), isRecording, ws.isConnected(), (unsigned long)nextWaitMs);
+  sttRecoverWaitMs = nextWaitMs;
+  sonioxClosingOnPurpose = true;  // 自動再接続で半端につながった接続を捨てる。切断の回数には数えない
+  ws.disconnect();
+  sonioxClosingOnPurpose = false;
+  sonioxPreconnectPending = false;
+  sttRecovering = true;
+  startSTTRecording();  // 鍵が古ければ取り直してから、新しく接続する
+  sttRecovering = false;
+  sttDownSinceMs = millis() | 1;  // 次の待ちはここから数える
+}
+
 // ==== ボタン長押し処理 ====
 void handleButtonLongPress() {
   bool pressed = (digitalRead(PIN_BUTTON) == LOW);
@@ -2884,6 +3057,8 @@ void handleButtonLongPress() {
       if (currentMode == MODE_NORMAL) {
         Serial.println("🔘 Long press detected - Entering BLE mode");
         isRecording = false;
+        sttWanted = false;
+        if (idleSleeping) leaveIdleSleepLed();
         sonioxPlaybackPhase = false;
         if (sonioxPreconnect.ownsClient()) sonioxPreconnect.cancel();
         else ws.disconnect();
@@ -2911,8 +3086,16 @@ void loop() {
     return;
   }
 
+  if (idleSleeping) {
+    serviceIdleSleep();
+    return;
+  }
+
   serviceSoniox("recording_loop");
   handleButtonLongPress();
+  if (currentMode != MODE_NORMAL) return;  // 長押しで BLE 設定へ入った
+  watchSttConnection();
+  if (idleSleeping) return;
 
   // ボタンデバウンス
   int reading = digitalRead(PIN_BUTTON);
