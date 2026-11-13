@@ -19,15 +19,36 @@ export const BACKCHANNEL_LLM_MODEL = "gemini-3.5-flash-lite";
 
 // ---- Web検索ツール ----
 
+// say: 検索の間に声で伝える一言。「調べるね」を文章で言わせると、言うだけで検索しない・言って調べずに答える（作り話）が
+// 2問目以降で半分近く起きた（素の Gemini 3.5 Flash Lite、2026-11-13）。一言を呼び出しの中に入れると、言った時点で必ず検索が
+// 始まっている。say を足すと Gemini は引数の形を崩すことがある（50回中9〜26回）ので、Gemini 側は VALIDATED で呼ぶ（streamGemini）
 export const WEB_SEARCH_TOOL = {
   name: "web_search",
   description: "子供の質問に答えるためにウェブ検索する。知識にない最新情報や具体的な事実を調べるときに使う。",
   parameters: {
     type: "object",
-    properties: { query: { type: "string", description: "検索クエリ" } },
-    required: ["query"],
+    properties: {
+      say: { type: "string", description: "検索している間に相手へ声で伝える短い一言。あなたのキャラクターの口調で、毎回違う表現にする（例:「調べてみるね」「ちょっと待ってね」）。15文字以内" },
+      query: { type: "string", description: "検索クエリ" },
+    },
+    required: ["say", "query"],
   },
 };
+
+const SAY_MAX_CHARS = 40;
+/** web_search の引数を { query, say } に直す。形が崩れていたら、取れるものだけ取る（無ければ null）。
+ *  say は文として読めるよう、終わりの句点を補う */
+export function searchCallArgs(args) {
+  const str = (v) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const a = args && typeof args === "object" ? args : {};
+  const query = str(a.query);
+  // 入れ子で届いた say（{ say: { say: "..." } } など）は中の文字列を拾う。検索語と同じ文は一言ではない
+  let say = str(a.say);
+  if (!say && a.say && typeof a.say === "object") say = str(a.say.say) ?? str(a.say.description);
+  if (say && (say.length > SAY_MAX_CHARS || say === query)) say = null;
+  if (say && !/[。！？!?…]$/.test(say)) say += "。";
+  return { query, say };
+}
 
 // 外部の有料APIを呼ぶツールの課金情報。ここに無いツール（デバイス設定変更など）は無料扱いで、
 // かかるLLMトークンはLLM側に含まれる。単価は toytalker-api-unit-prices の `${provider}#tool` 行。
@@ -38,8 +59,8 @@ export const PAID_TOOLS = {
 // 検索結果と一緒に渡す指示。検索直後のターンだけに効かせ、通常ターンの口調には影響させない。
 export const TOOL_RESULT_INSTRUCTION = "この検索結果をもとに答えてください。「調べてみるね」「調べてきたよ」「お待たせ」「調べたところ」のような前置き・報告・お礼は入れず、答えの中身から話し始めてください。もう一度検索はできません。口調や温かさはいつも通りのキャラクターのままで、そのあとも自然に会話を続けてください。";
 
-// システムプロンプトに足す検索の案内。「調べるね」はキャラクターの口調で言わせたいのでモデルに言わせる
-export const SEARCH_TOOL_HINT = "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。検索する前に、短い一言（例:「調べてみるね」「ちょっと待ってね」など、毎回違う表現）を添えてから検索してください。";
+// システムプロンプトに足す検索の案内。検索前の一言はここで頼まず、ツールの say で言わせる（上の WEB_SEARCH_TOOL）
+export const SEARCH_TOOL_HINT = "\nウェブ検索ツールが使えます。最新情報や具体的な事実を調べたいときに使ってください。";
 
 /** 「調べてみるね」「ちょっと待ってね、今すぐ調べるね」のような、これから調べると言うだけの1文か。
  *  検索結果を渡した後の返答の1文目にこれが来たら読み上げずに捨てる（検索前にも言っているので2回になる。2026-11-09/10 に ESP32 で確認。ロードマップ30）。
@@ -275,6 +296,9 @@ function streamGemini(messages, model, tools, choice, usage, trace) {
   const body = { contents, generationConfig: { temperature: 0.7, thinkingConfig: geminiThinkingConfig(model) } };
   if (systemMsg) body.systemInstruction = { parts: [{ text: systemMsg.content }] };
   if (tools) body.tools = [{ function_declarations: tools }];
+  // 既定（auto）は VALIDATED: 文章で答えるか呼ぶかはモデルが決め、呼ぶときは引数をスキーマどおりにさせる（AUTO だと say が入れ子に
+  // なったり検索語が抜けたりした。VALIDATED は100回中0回、速さは同じ。2026-11-13）
+  if (tools && choice === "auto") body.toolConfig = { functionCallingConfig: { mode: "VALIDATED" } };
   if (choice === "none") body.toolConfig = { functionCallingConfig: { mode: "NONE" } };
   if (choice === "required") body.toolConfig = { functionCallingConfig: { mode: "ANY" } };
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse&key=${secret("GOOGLE_API_KEY")}`;

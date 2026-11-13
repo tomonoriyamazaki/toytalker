@@ -81,6 +81,7 @@ aws sts assume-root --target-principal <アカウントID> --task-policy-arn arn
 | `edge` `country` | 経路（2026-10-29）。`cloudfront` = 固定ドメイン経由で、`country` に `CloudFront-Viewer-Country` の国コード（JP など）。`direct` = Function URL を直接呼ぶ旧ファーム・旧アプリで、`country` は null。`direct` が無くなったら Function URL を IAM 認証にする（下の「固定ドメイン」） |
 | `llm` `tts` `voice` `character_id` `has_personality` | 使った設定 |
 | `marks` | 段階の経過時刻（リクエスト開始からのms）。本文は `secrets`（SSM鍵）→ `config`（DynamoDB）→ `llm_start` → `llm_first_token` →（検索時 `tool_call` → `llm2_start` → `llm2_first_token`）→ `llm_done` → `done_sent` → `usage_saved` |
+| `tool` `search_say` `search_forced` `preface_dropped` `nested_tool` | 検索したターンだけ（ロードマップ30）。`tool` は呼んだツール名、`search_say` は検索ツールの引数 `say`（検索の間の一言）を鳴らした。残りは保険が働いた印で、増えたら `say` 方式が外れている: `search_forced` = 「調べるね」と言っただけで終わったので検索を強制、`preface_dropped` = 検索後の返答の頭の「調べるね」を捨てた、`nested_tool` = 検索後にもう一度検索を求めた |
 | `ext` | 外部サービス呼び出し。`service`（gemini / openai / anthropic / brave / soniox / cartesia …）、`status`、`ms`（応答ヘッダが返るまで）、`at`（開始時刻）。TTSは失敗したときだけ載る |
 | `segments` | 本文のTTS 1文ごと。`text_at`（LLMから文が揃った時刻）、`tts_ms`、`first_chunk_ms`（ZakiCorpのストリーミングだけ）、`bytes`、`trim_ms`（無音を削った量）、`sent_at`（音声を書き終えた時刻）、`attempts`、`fallback`、`error` |
 | `errors` | `where`、`status`、`message`（160字まで。外部サービスのエラー本文に入力文が混ざることがあるため短く切る） |
