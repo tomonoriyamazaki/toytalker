@@ -11,7 +11,7 @@
   import { tableName } from "../shared/tables.mjs";
   import { recordConsume, checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
-  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
+  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, searchCallArgs, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
   import { startTrace, describeClient, describePrevTurn, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
 
@@ -1048,13 +1048,24 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
 
         let toolResult;
         if (call.name === "web_search") {
+          const { query, say } = searchCallArgs(call.args);
+          // 検索の間の一言（ツールの say）を鳴らしながら検索する。文章でもう何か言っていれば重ねない
+          let saying = null;
+          if (say && !textAll.trim()) {
+            trace.set({ search_say: true });
+            textAll += say;
+            saying = emitSegment(say);
+          }
           try {
-            toolResult = await searchWeb(call.args.query, 3, trace);
+            if (!query) throw new Error("web_search: no query in tool args");
+            toolResult = await searchWeb(query, 3, trace);
             toolCalls.web_search = (toolCalls.web_search ?? 0) + 1;
           } catch (e) {
             trace.error("web_search", e);
             toolResult = [{ title: "検索エラー", snippet: "検索に失敗しました", url: "" }];
           }
+          // 一言の音声を書き終えてから次の文へ（音声の書き込みは1本ずつ）
+          if (saying) await saying;
         } else {
           toolResult = { error: `Unknown tool: ${call.name}` };
         }
