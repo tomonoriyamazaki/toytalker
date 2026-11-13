@@ -3,6 +3,7 @@
 使い方（このフォルダで）:
     python slice_p2s.py v0.6
     python slice_p2s.py v0.7 --filament "Bambu PLA Matte @BBL P2S" --infill 20%
+    python slice_p2s.py v0.6.3_sw02 v0.6.3_sw02_thin --name v0.6.3_sw02_both   （複数の版を 1 枚のプレートに並べる）
 
 入力:  toytalker_mini_<版>_box.stl / _lid.stl（Fusion の exportManager でボディごとに書き出したもの。単位 mm、
        モデル座標のまま = 箱は開口が上、蓋は上面が上）
@@ -93,7 +94,8 @@ def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("version", help="v0.6 のような版。toytalker_mini_<版>_box.stl / _lid.stl を読む")
+    ap.add_argument("version", nargs="+", help="v0.6 のような版。toytalker_mini_<版>_box.stl / _lid.stl を読む。複数書くと 1 枚に並べる")
+    ap.add_argument("--name", help="複数の版を並べるときの出力名（toytalker_mini_<name>_plate.3mf）。省くと版を + でつなぐ")
     ap.add_argument("--machine", default="Bambu Lab P2S 0.4 nozzle")
     ap.add_argument("--process", default="0.20mm Standard @BBL P2S")
     ap.add_argument("--filament", default="Bambu PLA Basic @BBL P2S")
@@ -101,13 +103,13 @@ def main() -> int:
     a = ap.parse_args()
 
     here = os.path.dirname(os.path.abspath(__file__))
-    base = f"toytalker_mini_{a.version}"
-    box = os.path.join(here, f"{base}_box.stl")
-    lid = os.path.join(here, f"{base}_lid.stl")
-    for p in (box, lid):
-        if not os.path.exists(p):
-            print("見つからない:", p)
-            return 1
+    base = f"toytalker_mini_{a.name or '+'.join(a.version)}"
+    parts = [(v, os.path.join(here, f"toytalker_mini_{v}_box.stl"), os.path.join(here, f"toytalker_mini_{v}_lid.stl")) for v in a.version]
+    for _, box, lid in parts:
+        for p in (box, lid):
+            if not os.path.exists(p):
+                print("見つからない:", p)
+                return 1
     if not os.path.exists(BS_EXE):
         print("Bambu Studio が見つからない:", BS_EXE)
         return 1
@@ -133,10 +135,14 @@ def main() -> int:
         with open(paths[kind], "w", encoding="utf-8") as f:
             json.dump(d, f, ensure_ascii=False, indent=1)
 
-    lid_flipped = os.path.join(work, "lid_flipped.stl")
-    flip_lid(lid, lid_flipped)
-    box_copy = os.path.join(work, "box.stl")
-    shutil.copy(box, box_copy)
+    models = []
+    for v, box, lid in parts:
+        tag = v.replace(".", "_")
+        lid_flipped = os.path.join(work, f"lid_{tag}.stl")
+        flip_lid(lid, lid_flipped)
+        box_copy = os.path.join(work, f"box_{tag}.stl")
+        shutil.copy(box, box_copy)
+        models += [box_copy, lid_flipped]
 
     plate_name = f"{base}_plate.3mf"
     rc = run_cli([
@@ -145,7 +151,7 @@ def main() -> int:
         "--load-filaments", paths["filament"],
         "--arrange", "1", "--orient", "0", "--slice", "0",
         "--export-3mf", plate_name, "--outputdir", out_dir,
-        box_copy, lid_flipped,
+        *models,
     ], log_path)
     result_path = os.path.join(out_dir, "result.json")
     result = json.load(open(result_path, encoding="utf-8")) if os.path.exists(result_path) else {}
