@@ -232,8 +232,10 @@ unsigned long lastPartialMs = 0;
 // 以前の「途中結果が 800ms 更新されなければ送る」予備判定（END_SILENCE_MS）は、Soniox の待ちと関係なく
 // 小さい子の言葉の切れ目で送ってしまうので外した。サーバーから値を受け取る形はロードマップ25（OTA）。
 const unsigned long STT_GRACE_MS = 600;             // 0 なら <end> ですぐ送る（Soniox の既定のまま）
-const unsigned long STT_GRACE_RESUME_MAX_MS = 3000;
-const uint32_t STT_GRACE_SPEECH_RMS = 1200;         // 暫定。[GRACE] の speech_peak_rms / grace_peak_rms を見て詰める
+const unsigned long STT_GRACE_RESUME_MAX_MS = 2000;  // 0.7.24: 3000 → 2000
+// 0.7.24: 1200 → 2500。1200 では周りの音（猶予中の最大 1250〜1980）を声と数えて送信が 2〜6 秒遅れた。
+// 声は 3700〜6600 だった（2026-11-13、試験機、ケースなし）。新しい文字が出れば音量に関係なく待つので、小さい声の続きは文字で拾う
+const uint32_t STT_GRACE_SPEECH_RMS = 2500;         // [GRACE] の speech_peak_rms / grace_peak_rms を見て詰める
 // 救済: Soniox が <end> を送らないまま黙ったとき（通常は Soniox の最大待ちで <end> が来る）
 const unsigned long STT_STALL_MS = 4000;
 struct SttGraceState {
