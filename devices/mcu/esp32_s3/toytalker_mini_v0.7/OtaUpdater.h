@@ -11,8 +11,10 @@
 //   4. Updateライブラリのイメージヘッダ・チップ種別検査
 //
 // 失敗しても再起動せず通常動作へ進む。失敗は2種類に分けて扱う（2026-11-11）:
-//   - ロールバック（入れた版が確認前に落ち、ブートローダーが旧版へ戻した）→ その版は以後試さない。
-//     試し続けると「入れる→落ちる→戻る」が永久に続き、会話できなくなるため。次の版が出れば試す。
+//   - ロールバック（入れた版が確認前に落ち、ブートローダーが旧版へ戻した）→ ROLLBACK_LIMIT回戻ったら
+//     その版は以後試さない。試し続けると「入れる→落ちる→戻る」が永久に続き、会話できなくなるため。
+//     次の版が出れば試す。1回目を見逃すのは、良い版でも入れた直後の起動で確認の前に電源を切られると
+//     同じ形で戻るため（2026-11-13）。
 //   - ダウンロードの失敗（電源断・通信・SHA不一致など）→ 諦めない。ループにならない（そのまま会話へ進む）。
 //     ただし弱いWi-Fiで起動のたびに最大3分待たせないよう、続けてBACKOFF_AFTER回失敗したら
 //     以後はBACKOFF_EVERY回の起動に1回だけ試す。
@@ -34,6 +36,7 @@ namespace ota {
 constexpr const char* ALLOWED_HOST = "toytalker-firmware.s3.ap-northeast-1.amazonaws.com";
 constexpr uint8_t BACKOFF_AFTER = 3;   // 続けてこの回数失敗したら間を空ける
 constexpr uint8_t BACKOFF_EVERY = 5;   // 間を空けた後は、この回数の起動に1回だけ試す
+constexpr uint8_t ROLLBACK_LIMIT = 2;  // 同じ版がこの回数戻ったら、その版は以後試さない
 constexpr size_t MIN_IMAGE_BYTES = 512 * 1024;   // これより小さい "ファーム" は受け付けない
 constexpr size_t IO_BUFFER_BYTES = 16 * 1024;    // PSRAM。Update側は4KBセクタ単位で書く
 constexpr uint32_t HTTP_TIMEOUT_MS = 15000;      // 接続・応答ヘッダ待ち
@@ -136,12 +139,12 @@ inline bool parseManifest(JsonVariantConst fw, Manifest& out, const char*& reaso
 
 // ---- NVS（namespace "ota"）----
 //   ver   : 失敗を数えている目標版        fails : その版で続けて失敗した回数（開始前に足すので電源断も数える）
-//   skip  : 間を空ける残りの起動回数      last  : 前回の試行の結果（started / 失敗の段階 / rollback）
+//   skip  : 間を空ける残りの起動回数      last  : 前回の試行の結果（started / 失敗の段階 / rollback1 / rollback）
 //   pend  : 入れて再起動した版（次の起動で確かめる）
-//   bad   : ロールバックした版（以後試さない）
+//   rb    : 目標版（ver）が戻った回数      bad   : ROLLBACK_LIMIT回戻った版（以後試さない）
 struct State {
   String ver, last, pend, bad;
-  uint8_t fails = 0, skip = 0;
+  uint8_t fails = 0, skip = 0, rb = 0;
 };
 
 inline State loadState() {
@@ -151,6 +154,7 @@ inline State loadState() {
   st.ver = prefs.getString("ver", "");
   st.fails = prefs.getUChar("fails", 0);
   st.skip = prefs.getUChar("skip", 0);
+  st.rb = prefs.getUChar("rb", 0);
   st.last = prefs.getString("last", "");
   st.pend = prefs.getString("pend", "");
   st.bad = prefs.getString("bad", "");
@@ -164,6 +168,7 @@ inline void saveState(const State& st) {
   prefs.putString("ver", st.ver);
   prefs.putUChar("fails", st.fails);
   prefs.putUChar("skip", st.skip);
+  prefs.putUChar("rb", st.rb);
   prefs.putString("last", st.last);
   prefs.putString("pend", st.pend);
   prefs.putString("bad", st.bad);
@@ -182,11 +187,20 @@ inline void checkPreviousUpdate() {
     Serial.printf("[OTA] booted into %s; waiting for confirm\n", st.pend.c_str());
     return;
   }
-  // 入れた版が有効印の前に落ちた（または確認前に電源が切れた）。その版は以後試さない
-  Serial.printf("[OTA] rollback detected: target=%s running=%s; will not retry this version\n",
-                st.pend.c_str(), TOYTALKER_FW_VERSION);
-  st.bad = st.pend;
-  st.last = "rollback";
+  // 入れた版が有効印の前に落ちた（または確認前に電源が切れた）。
+  // 1回目は電源断の巻き添えかもしれないので入れ直す。ROLLBACK_LIMIT回目でその版は以後試さない
+  if (st.ver != st.pend) { st.ver = st.pend; st.fails = 0; st.skip = 0; st.rb = 0; }
+  if (st.rb < 255) st.rb++;
+  if (st.rb >= ROLLBACK_LIMIT) {
+    Serial.printf("[OTA] rollback detected: target=%s running=%s count=%u; will not retry this version\n",
+                  st.pend.c_str(), TOYTALKER_FW_VERSION, st.rb);
+    st.bad = st.pend;
+    st.last = "rollback";
+  } else {
+    Serial.printf("[OTA] rollback detected: target=%s running=%s count=%u; will retry\n",
+                  st.pend.c_str(), TOYTALKER_FW_VERSION, st.rb);
+    st.last = "rollback1";  // サーバーの警報は rollback（打ち切り）だけ。1回目は記録だけ
+  }
   st.pend = "";
   saveState(st);
 }
@@ -196,7 +210,7 @@ inline void markUpdateSucceeded() {
   State st = loadState();
   if (st.pend.isEmpty() || st.pend != TOYTALKER_FW_VERSION) return;
   Serial.printf("[OTA] update to %s succeeded\n", st.pend.c_str());
-  st.pend = ""; st.ver = ""; st.fails = 0; st.skip = 0; st.last = "";
+  st.pend = ""; st.ver = ""; st.fails = 0; st.skip = 0; st.rb = 0; st.last = "";
   saveState(st);
 }
 
@@ -243,7 +257,7 @@ inline Result apply(const Manifest& m) {
     Serial.printf("[OTA] skip: target=%s rolled back before\n", m.version.c_str());
     return Result::Skipped;
   }
-  if (st.ver != m.version) { st.ver = m.version; st.fails = 0; st.skip = 0; }
+  if (st.ver != m.version) { st.ver = m.version; st.fails = 0; st.skip = 0; st.rb = 0; }
   if (st.skip > 0) {
     st.skip--;
     saveState(st);
