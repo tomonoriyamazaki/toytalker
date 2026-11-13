@@ -474,6 +474,19 @@ export class ToyTalkerStack extends cdk.Stack {
       enforceSSL: true, // 平文HTTPでのPublishを拒否するトピックポリシー（2026-10-25）
     });
     opsTopic.applyRemovalPolicy(RETAIN);
+    // CloudWatch のアラームが Publish できるようにする。トピックポリシーを自分で付けると既定の「同じアカウントなら可」が
+    // 無くなり、アラームの通知が「not authorized to perform SNS:Publish」で失敗してメールが来ない
+    // （2026-11-13、OTA の警報の実機確認で発見。2026-11-09 の呼び出し回数の警報も届いていなかった）
+    opsTopic.addToResourcePolicy(new iam.PolicyStatement({
+      sid: "AllowCloudWatchAlarms",
+      principals: [new iam.ServicePrincipal("cloudwatch.amazonaws.com")],
+      actions: ["sns:Publish"],
+      resources: [opsTopic.topicArn],
+      conditions: {
+        StringEquals: { "aws:SourceAccount": this.account },
+        ArnLike: { "aws:SourceArn": `arn:aws:cloudwatch:${this.region}:${this.account}:alarm:*` },
+      },
+    }));
     opsTopic.addSubscription(new subs.EmailSubscription(config.opsEmail));
     for (const sub of opsTopic.node.findAll()) if (sub instanceof sns.CfnSubscription) sub.applyRemovalPolicy(RETAIN);
 
