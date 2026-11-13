@@ -658,7 +658,7 @@ int historyCount = 0;
 // 0.7.20: 「VOLUME 倍して山を切る」をやめ、リミッター（PlaybackLimiter.h）で全体を持ち上げる。
 // 倍率は NVS の audio/gain（無ければ PLAYBACK_GAIN_DEFAULT）。聞き比べ用にシリアルから変えられる:
 // 数字1文字 1〜8 → 1.5 / 2 / 2.5 / 3 / 4 / 5 / 6 / 8 倍（次の返答から。NVS に残る）。0 は既定へ戻す。
-// e / f で EQ（低い音を削り 3kHz を持ち上げる）のあり・なし（保存しない。既定はなし＝0.7.25。聞き比べ用に残してある）。
+// e / f で EQ（低い音を削り 3kHz を持ち上げる）のあり・なし（保存しない。既定はあり＝0.7.26。いまの EQ は低い音を削るだけで、3kHz の持ち上げは 0dB）。
 const float PLAYBACK_GAIN_DEFAULT = 6.0f;  // 2026-11-13 に試験機で聞いて決めた（EQ あり。絞りが効くのは返答の4割前後、音割れ0）
 static PlaybackLimiter playbackLimiter;
 
@@ -693,6 +693,10 @@ void pollPlaybackGainSerial() {
     else if (c == 'e' || c == 'f') {  // e = EQ あり、f = EQ なし（聞き比べ用。保存しない）
       playbackLimiter.setEq(c == 'e');
       Serial.printf("[VOLUME] eq=%d\n", playbackLimiter.eq());
+    } else if (c >= 'a' && c <= 'd') {  // 山の上限: a = 30000（既定）、b = 22000、c = 16000、d = 11000（試験用。保存しない）
+      static const float ceilings[] = {30000.0f, 22000.0f, 16000.0f, 11000.0f};
+      playbackLimiter.setCeiling(ceilings[c - 'a']);
+      Serial.printf("[VOLUME] ceiling=%.0f\n", playbackLimiter.ceiling());
     }
   }
 }
@@ -2425,8 +2429,8 @@ void sendToLambdaAndPlay(const String& text) {
   {
     // 届いた音声の大きさ（in_*）と、リミッターを通した後（out_rms）。倍率を決める材料（相槌も含む）
     const auto& lv = playbackLimiter.stats();
-    Serial.printf("[PCM_LEVEL] eq=%d gain=%.2f in_peak=%u in_rms=%lu out_rms=%lu limited_pct=%lu min_reduction=%.2f hard_clips=%lu samples=%lu\n",
-                  playbackLimiter.eq(), playbackLimiter.gain(), lv.inPeak, (unsigned long)lv.inRms(), (unsigned long)lv.outRms(),
+    Serial.printf("[PCM_LEVEL] eq=%d ceiling=%.0f gain=%.2f in_peak=%u in_rms=%lu out_rms=%lu limited_pct=%lu min_reduction=%.2f hard_clips=%lu samples=%lu\n",
+                  playbackLimiter.eq(), playbackLimiter.ceiling(), playbackLimiter.gain(), lv.inPeak, (unsigned long)lv.inRms(), (unsigned long)lv.outRms(),
                   (unsigned long)lv.limitedPct(), lv.minReduction, (unsigned long)lv.hardClips, (unsigned long)lv.samples);
   }
 

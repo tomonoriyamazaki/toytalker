@@ -22,11 +22,12 @@ class PlaybackLimiter {
  public:
   static constexpr size_t LOOKAHEAD = 48;      // 24kHz で 2ms
   static constexpr float SAMPLE_RATE = 24000.0f;
-  static constexpr float CEILING = 30000.0f;   // int16 の少し手前
+  static constexpr float CEILING = 30000.0f;   // 山の上限の既定。int16 の少し手前
+  static constexpr float CEILING_MIN = 8000.0f;
   static constexpr float GAIN_MIN = 1.0f, GAIN_MAX = 8.0f;
   // EQ の値（聞いて詰める）
   static constexpr float HIGHPASS_HZ = 300.0f;
-  static constexpr float PRESENCE_HZ = 3000.0f, PRESENCE_DB = 6.0f, PRESENCE_Q = 1.0f;
+  static constexpr float PRESENCE_HZ = 3000.0f, PRESENCE_DB = 0.0f, PRESENCE_Q = 1.0f;  // 0dB = 持ち上げなし（+6dB はシャラシャラした）
 
   struct Stats {
     uint32_t samples = 0;
@@ -47,6 +48,10 @@ class PlaybackLimiter {
   }
   void setGain(float g) { gain_ = g < GAIN_MIN ? GAIN_MIN : g > GAIN_MAX ? GAIN_MAX : g; }
   float gain() const { return gain_; }
+  // 山の上限。下げると山だけ低くなり、平均はあまり下がらない（そのぶん声は詰まる）。
+  // 再生音の山がマイクを飽和させて声の割り込みの判定を休ませるので、山を下げて飽和を減らす試験用
+  void setCeiling(float c) { ceiling_ = c < CEILING_MIN ? CEILING_MIN : c > CEILING ? CEILING : c; }
+  float ceiling() const { return ceiling_; }
   void setEq(bool on) { eq_ = on; }
   bool eq() const { return eq_; }
   const Stats& stats() const { return stats_; }
@@ -84,7 +89,7 @@ class PlaybackLimiter {
       else env_ += (level - env_) * RELEASE;              // ゆっくり戻す
 
       float reduction = 1.0f;
-      if (env_ > CEILING) reduction = CEILING / env_;
+      if (env_ > ceiling_) reduction = ceiling_ / env_;
       if (reduction < 0.89f) stats_.limited++;  // 1dB 以上絞った
       if (reduction < stats_.minReduction) stats_.minReduction = reduction;
 
@@ -128,7 +133,8 @@ class PlaybackLimiter {
   static constexpr float ATTACK = 0.08f;
   static constexpr float RELEASE = 0.00035f;
   float gain_ = 1.5f;
-  bool eq_ = false;  // 既定はなし（2026-11-13: +6dB の持ち上げで再生中ずっとシャラシャラした音が乗った。外すと消えた）
+  float ceiling_ = CEILING;
+  bool eq_ = true;  // 既定はあり。中身は低い音を削るだけ（PRESENCE_DB = 0）。削るとマイクの飽和が減り、声の割り込みが通りやすくなる
   float env_ = 0;
   float delay_[LOOKAHEAD] = {};
   float abs_[LOOKAHEAD] = {};
