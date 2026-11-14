@@ -83,7 +83,7 @@ export function describePrevTurn(prev) {
  * 文章は入らない数値と決まった語だけ。知らない項目は捨て、範囲外の値は null にする。
  *   vbat_mv: 電池電圧（mV、未校正。電池なしなら 0 付近）
  *   board_temp_c / chip_temp_c: 基板温度（サーミスタ TH2）/ ESP32 内蔵の温度（℃。読めなければ null）
- *   chg_stat1 / chg_stat2: 充電IC BQ25185 の STAT1/STAT2 のピンの値（1=High, 0=Low）。意味の割り当ては未確認なのでそのまま
+ *   chg_stat1 / chg_stat2: 充電IC BQ25185 の STAT1/STAT2 のピンの値（1=High, 0=Low）。ログにはそのまま出す（意味の割り当ては device-status.mjs の chargeState）
  *   rssi / heap_free / heap_min / max_blk / psram_free / uptime_s: 要求時の電波（dBm）、内部RAMの空き・起動以来の最低・最大の連続領域、
  *     PSRAM の空き（バイト）、起動からの秒（小さければ再起動の直後で、prev は無い）
  *   prev: 前のターン（0.7.7 から）。時刻はそのターンの開始（本体が送信を決めた時）からの ms、0 は「起きなかった」。

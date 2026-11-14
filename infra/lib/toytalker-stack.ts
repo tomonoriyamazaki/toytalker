@@ -312,8 +312,9 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     selfWarm: true,
     readTables: ["devices", "characters", "voices", "llms", "api-unit-prices", "exchange-rates"],
     readWriteTables: ["chat-logs", "usage"],
-    // 1ターンの原価を台帳に足し、残高から引く。始める前に残高を読む（backend/shared/wallet.mjs）
-    updateTables: ["wallets"],
+    // 1ターンの原価を台帳に足し、残高から引く。始める前に残高を読む（backend/shared/wallet.mjs）。
+    // devices は本体の状態（電池・温度・充電）を UpdateItem で残す（backend/shared/device-status.mjs）
+    updateTables: ["wallets", "devices"],
     appendTables: ["wallet-ledger"],
   },
   {

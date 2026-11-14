@@ -15,6 +15,7 @@
 import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, searchCallArgs, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
   import { startTrace, describeClient, describePrevTurn, describeDevice, errorStatus } from "../shared/trace.mjs";
+  import { recordDeviceStatus } from "../shared/device-status.mjs";
 import { checkDeviceKey, deviceGate } from "../shared/auth.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
@@ -745,7 +746,11 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     // 門（未登録機・デバイス鍵）を通ってから始めるので、拒否で返るときに読みかけの要求は残らない
     if (deviceRow?.owner_id) { ownerId = deviceRow.owner_id; trace.set({ owner_id: ownerId }); }
     const balanceCheck = checkBalance(ownerId);
+    // 本体の状態（電池・温度・充電）を機器の行に残す（backend/shared/device-status.mjs。数分おきか充電状態が変わったとき）。
+    // キャラクターの読み込みと並べて待つので、返事は遅れない。失敗しても会話は続ける
+    const statusWrite = deviceRow ? recordDeviceStatus(ddb, DEVICES_TABLE, deviceRow, describeDevice(body.device), requestAt) : null;
     const charConfig = deviceRow ? await resolveCharacterFromDevice(deviceRow) : (loaded ? { registered: false } : null);
+    if (statusWrite) trace.set({ device_status_saved: await statusWrite });
     if (deviceId) {
       if (charConfig?.provider) {
         ttsKey = normalizeModelKey(charConfig.provider) ?? ttsKey;

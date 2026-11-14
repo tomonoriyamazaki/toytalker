@@ -4,6 +4,7 @@ import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import type { BottomTabNavigationProp } from "@react-navigation/bottom-tabs";
 import { useOwnerId } from "../../hooks/useOwnerId";
 import { apiFetch } from "../../lib/api";
+import { DeviceStatus, batteryText, chargeText, tempText, statusAgeText } from "../../lib/deviceStatus";
 import {
   SafeAreaView,
   Text,
@@ -51,6 +52,9 @@ type RegisteredDevice = {
   owner_id: string;
   device_name: string;
   backchannel_enabled?: boolean;
+  // 本体が最後に送った電池・温度・充電状態と、その時刻（会話のたびに更新。lib/deviceStatus.ts）
+  device_status?: DeviceStatus | null;
+  device_status_at?: string | null;
 };
 
 type SessionItem = {
@@ -127,6 +131,8 @@ export default function Toy() {
             owner_id: d.owner_id,
             device_name: d.device_name ?? "",
             backchannel_enabled: d.backchannel_enabled !== false,
+            device_status: d.device_status ?? null,
+            device_status_at: d.device_status_at ?? null,
           }));
           setRegisteredDevices(devices);
           await AsyncStorage.setItem("registeredDevices", JSON.stringify(devices));
@@ -380,8 +386,23 @@ export default function Toy() {
     [navigation]
   );
 
-  const openDeviceSettings = () => {
+  // 本体の状態（電池・温度・充電）を読み直す。失敗したら前の値のまま
+  const refreshDeviceStatus = async (id: string) => {
+    try {
+      const res = await apiFetch(`/devices/${encodeURIComponent(id)}`);
+      if (!res.ok) return;
+      const d = await res.json();
+      setRegisteredDevices((prev) =>
+        prev.map((x) => (x.device_id === id
+          ? { ...x, device_status: d.device_status ?? null, device_status_at: d.device_status_at ?? null }
+          : x))
+      );
+    } catch {}
+  };
+
+  const openDeviceSettings = (id?: string | null) => {
     setScreen("device-settings");
+    if (id) refreshDeviceStatus(id);
   };
 
   const openCharacterSelect = async () => {
@@ -674,6 +695,21 @@ export default function Toy() {
               }}
             />
           </View>
+          <TouchableOpacity style={s.settingRow} onPress={() => deviceId && refreshDeviceStatus(deviceId)}>
+            <View>
+              <Text style={s.settingLabel}>本体の状態</Text>
+              {currentDevice?.device_status && currentDevice.device_status_at ? (
+                <>
+                  <Text style={s.settingValue}>電池: {batteryText(currentDevice.device_status)}</Text>
+                  <Text style={s.settingValue}>充電: {chargeText(currentDevice.device_status)}</Text>
+                  <Text style={s.settingValue}>温度: {tempText(currentDevice.device_status)}</Text>
+                  <Text style={s.settingValue}>{statusAgeText(currentDevice.device_status_at)}の値（タップで更新）</Text>
+                </>
+              ) : (
+                <Text style={s.settingValue}>まだ届いていません（おもちゃと話すと届きます）</Text>
+              )}
+            </View>
+          </TouchableOpacity>
           <TouchableOpacity style={s.settingRow} onPress={openConversationLog}>
             <View>
               <Text style={s.settingLabel}>会話ログ</Text>
@@ -820,7 +856,7 @@ export default function Toy() {
                 style={s.deviceItem}
                 onPress={() => {
                   setDeviceId(device.device_id);
-                  openDeviceSettings();
+                  openDeviceSettings(device.device_id);
                 }}
               >
                 <View>
