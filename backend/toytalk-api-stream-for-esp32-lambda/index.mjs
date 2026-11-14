@@ -587,14 +587,29 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
   // DynamoDBからdevice_idに紐づくキャラクター＆ボイス設定を解決
   // 解決チェーン: device → character(voice_id + personality_prompt) → voice(provider + vendor_id)
-  async function resolveCharacterFromDynamo(deviceId) {
+  //
+  // 読む順（2026-11-14）: 前の結果が無いと次が決まらないので device → character は直列。その先の voice と llm、
+  // および残高（handler の checkBalance。持ち主は device の行で決まる）は並べて読む。往復は最大5回 → 3回。
+  // 東京では1回 3〜4ms なので差は出ないが、データと別のリージョンの Lambda（infra/README の「別リージョンの Lambda と振り分け」）
+  // では1回ごとにリージョン間の往復（約 100ms）が乗る。
+
+  // 機器の行。{ device: 行 } / { device: null }（未登録機。本番では拒む＝deviceGate）/ null（DynamoDB の失敗）
+  async function loadDeviceRow(deviceId) {
     try {
-      const deviceRes = await ddb.send(new GetCommand({
+      const res = await ddb.send(new GetCommand({
         TableName: DEVICES_TABLE,
         Key: { device_id: deviceId },
       }));
-      const device = deviceRes.Item;
-      if (!device) return { registered: false }; // 未登録機。本番では拒む（deviceGate）
+      return { device: res.Item ?? null };
+    } catch (e) {
+      console.error("[DynamoDB] loadDeviceRow error:", e);
+      return null;
+    }
+  }
+
+  // 機器の行からキャラクター・声・LLM を解決する。失敗（null）なら handler は body の値で続ける
+  async function resolveCharacterFromDevice(device) {
+    try {
       const partial = { registered: true, deviceRow: device, ownerId: device.owner_id ?? null, characterId: device.character_id ?? "default" };
 
       let voiceId = null;
@@ -616,24 +631,26 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
       if (!voiceId) voiceId = device.voice_id ?? null;
       if (!voiceId) return partial; // 登録済みだがキャラクター未設定。body の値で続ける
 
-      const voiceRes = await ddb.send(new GetCommand({
-        TableName: VOICES_TABLE,
-        Key: { voice_id: voiceId },
-      }));
+      // 声と LLM 設定は互いに依らないので並べて読む（llm_id 未設定なら読まず、handler 側でデフォルトを充当）
+      const [voiceRes, llmRes] = await Promise.all([
+        ddb.send(new GetCommand({
+          TableName: VOICES_TABLE,
+          Key: { voice_id: voiceId },
+        })),
+        llmId
+          ? ddb.send(new GetCommand({
+              TableName: LLMS_TABLE,
+              Key: { llm_id: llmId },
+            }))
+          : null,
+      ]);
       if (!voiceRes.Item) return partial;
 
-      // LLM設定を解決（llm_id未設定なら null のまま返し、handler側でデフォルトを充当）
       let llmProvider = null;
       let llmModelId  = null;
-      if (llmId) {
-        const llmRes = await ddb.send(new GetCommand({
-          TableName: LLMS_TABLE,
-          Key: { llm_id: llmId },
-        }));
-        if (llmRes.Item) {
-          llmProvider = llmRes.Item.provider;
-          llmModelId  = llmRes.Item.model_id;
-        }
+      if (llmRes?.Item) {
+        llmProvider = llmRes.Item.provider;
+        llmModelId  = llmRes.Item.model_id;
       }
 
       return {
@@ -645,7 +662,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
         llmModelId,
       };
     } catch (e) {
-      console.error("[DynamoDB] resolveCharacterFromDynamo error:", e);
+      console.error("[DynamoDB] resolveCharacterFromDevice error:", e);
       return null;
     }
   }
@@ -712,17 +729,23 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     };
     // ESP32 はログインしない。本番（AUTH_REQUIRED）では devices テーブルに登録済み（= アプリでログインして結び付けた）機器だけ通す（docs/auth.md）。
     // DynamoDB の失敗（null）は従来どおり body の値で続ける
-    const charConfig = deviceId ? await resolveCharacterFromDynamo(deviceId) : { registered: false };
-    if (charConfig?.registered === false) {
+    const loaded = deviceId ? await loadDeviceRow(deviceId) : { device: null };
+    const deviceRow = loaded?.device ?? null;
+    if (loaded && !deviceRow) {
       const gate = deviceGate(null);
       if (gate) return reject(gate);
     }
     // デバイス鍵（なりすまし防止。backend/shared/auth.mjs の checkDeviceKey）。行がある機器だけ照合する
-    if (charConfig?.deviceRow) {
-      const key = await checkDeviceKey(event, charConfig.deviceRow);
+    if (deviceRow) {
+      const key = await checkDeviceKey(event, deviceRow);
       trace.set(key.log);
       if (key.gate) return reject(key.gate);
     }
+    // 持ち主は機器の行で決まる。残高の確認をここで始め、キャラクター以降の読み込みと並べる（待つのは下）。
+    // 門（未登録機・デバイス鍵）を通ってから始めるので、拒否で返るときに読みかけの要求は残らない
+    if (deviceRow?.owner_id) { ownerId = deviceRow.owner_id; trace.set({ owner_id: ownerId }); }
+    const balanceCheck = checkBalance(ownerId);
+    const charConfig = deviceRow ? await resolveCharacterFromDevice(deviceRow) : (loaded ? { registered: false } : null);
     if (deviceId) {
       if (charConfig?.provider) {
         ttsKey = normalizeModelKey(charConfig.provider) ?? ttsKey;
@@ -740,7 +763,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     }
 
     // 残高が0以下なら会話を始めず、止めた理由を一言しゃべって終える（docs/pricing-and-cost-model.md 11.3）
-    if (!(await checkBalance(ownerId)).ok) {
+    if (!(await balanceCheck).ok) {
       trace.set({ status: 402, reason: "no_balance" });
       try { await sendNoBalance(res, trace); } finally { res.end(); trace.finish(); }
       return;
