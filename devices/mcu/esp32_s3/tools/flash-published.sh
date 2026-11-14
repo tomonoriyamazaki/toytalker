@@ -77,14 +77,14 @@ aws s3 cp "s3://$BUCKET/$KEY" "$DOWNLOADED" --region "$REGION" >/dev/null \
 GOT_SHA="$(sha256_of "$DOWNLOADED")"
 GOT_SIZE="$(wc -c < "$DOWNLOADED" | tr -d ' ')"
 if [[ "$GOT_SHA" != "$SHA" || "$GOT_SIZE" != "$SIZE" ]]; then
-  echo "❌ S3 の .bin がマニフェストと違う（期待 sha256=$SHA size=$SIZE / 実際 sha256=$GOT_SHA size=$GOT_SIZE）" >&2
+  echo "❌ S3 の .bin がマニフェストと違う（期待 sha256=$SHA size=$SIZE / 実際 sha256=$GOT_SHA size=${GOT_SIZE}）" >&2
   exit 1
 fi
 grep -a -q "\"fw\":\"$VERSION\"" "$DOWNLOADED" \
   || { echo "❌ .bin の中に \"fw\":\"$VERSION\" が無い（別の版の中身）" >&2; exit 1; }
 cp "$DOWNLOADED" "$APP_BIN"
 rm -f "$BUILD_DIR/$SKETCH_NAME.ino.merged.bin"   # 手元のビルドを含む結合ファイルは使わせない
-echo "✅ 書くのは発行済みの $VERSION（sha256=$SHA size=$SIZE）"
+echo "✅ 書くのは発行済みの ${VERSION}（sha256=$SHA size=${SIZE}）"
 
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "🧪 --dry-run: 本体には書かない"
