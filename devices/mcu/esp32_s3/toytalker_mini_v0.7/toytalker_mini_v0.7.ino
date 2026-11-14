@@ -935,7 +935,8 @@ void IRAM_ATTR onLEDTimer() {
 //   - 2回押し（DOUBLE_PRESS_MS 以内）→ 休む（無音3分を待たずに自分で止める）。3回目が来ないのを DOUBLE_PRESS_MS 待ってから
 //   - 3回押し → 会話モードとキーホルダーモードを切り替える（0.7.31）
 //   - 休み中の1回押し → 聞き取りに戻る
-//   - BLE 設定中の1回押し → 設定をやめて、保存済みの Wi-Fi で起動し直す
+//   - BLE 設定中の1回押し → 設定をやめて、保存済みの Wi-Fi で起動し直す（3回目が来ないのを待ってから）
+//   - BLE 設定中の3回押し → キーホルダーモードへ（Wi-Fi の無い場所でも切り替えられるように。0.7.32）
 // 長押し（BLE 設定へ）は従来どおり handleButtonLongPress が見る。
 const uint32_t DOUBLE_PRESS_MS = 600;
 static volatile uint32_t buttonPressSeq = 0;                              // 押すたびに 1 増える
@@ -3113,7 +3114,7 @@ void playChime(const ChimeTone* tones, size_t count) {
 // ==== ボイスキーホルダーモード（0.7.31）====
 // voices 区画に入れてある声を、ボタンを押すたびに1つ鳴らす。Wi-Fi もマイクも使わない。
 //   - 押す → 次の声（順番はシャッフル。鳴っている途中で押すと、止めて次の声）
-//   - 3回押し → 会話モードへ（会話モードからも3回押しで来る）
+//   - 3回押し → 会話モードへ（会話モードからも、BLE 設定中＝Wi-Fi につながらない時からも、3回押しで来る）
 // モードは NVS（mode/keyholder）に残し、切り替えは再起動で行う（電源を入れ直しても同じモードで始まる）。
 // 入れ物の形と ADPCM の展開は VoiceKeyholder.h、声を作って書く道具は tools/make-voices.mjs。
 static voicekey::Store voiceStore;
@@ -3363,13 +3364,27 @@ void loop() {
     finishSonioxPreconnect(); // collect cancelled job without touching a running socket
     {
       // 1回押し: BLE 設定をやめて起動し直す（保存済みの Wi-Fi で通常の動作に戻る）。
-      // Wi-Fi 設定が無い（初回の設定待ち）ときは戻る先が無いので何もしない
+      // Wi-Fi 設定が無い（初回の設定待ち）ときは戻る先が無いので何もしない。
+      // 3回押し: キーホルダーモードへ（0.7.32）。Wi-Fi の無い場所では起動するとここ（BLE 設定）に来るので、
+      // ここで受けないと外で切り替えられない。1回押しは、3回目が来ないのを DOUBLE_PRESS_MS 待ってから扱う
+      static uint32_t blePressPendingMs = 0;
       bool isDouble = false;
-      if (takeButtonPress(isDouble) && wifiSSID.length() > 0) {
-        Serial.println("[BLE] button pressed; leaving BLE provisioning (restart with saved Wi-Fi)");
-        Serial.flush();
-        delay(100);
-        ESP.restart();
+      if (takeButtonPress(isDouble)) {
+        if (buttonTakenRun >= 3) {
+          blePressPendingMs = 0;
+          switchDeviceMode(true);  // 切り替えられたら再起動して戻らない。声が無ければ BLE 設定を続ける
+        } else {
+          blePressPendingMs = buttonLastPressMs | 1;
+        }
+      }
+      if (blePressPendingMs && millis() - blePressPendingMs > DOUBLE_PRESS_MS) {
+        blePressPendingMs = 0;
+        if (wifiSSID.length() > 0) {
+          Serial.println("[BLE] button pressed; leaving BLE provisioning (restart with saved Wi-Fi)");
+          Serial.flush();
+          delay(100);
+          ESP.restart();
+        }
       }
     }
     handleButtonLongPress();
