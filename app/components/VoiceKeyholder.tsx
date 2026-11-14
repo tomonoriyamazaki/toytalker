@@ -7,7 +7,9 @@ import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
+  KeyboardAvoidingView,
   Modal,
+  Platform,
   Pressable,
   SafeAreaView,
   ScrollView,
@@ -54,6 +56,9 @@ export default function VoiceKeyholder({ visible, onClose, ownerId, deviceId }: 
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
   const soundRef = useRef<Sound | null>(null);
+  const scrollRef = useRef<ScrollView | null>(null);
+  // 入力欄と「声を作って足す」がキーボードに隠れないよう、いちばん下まで送る（キーボードが出きってから）
+  const showInput = () => setTimeout(() => scrollRef.current?.scrollToEnd({ animated: true }), 300);
 
   const stopPlayback = () => {
     try {
@@ -208,7 +213,8 @@ export default function VoiceKeyholder({ visible, onClose, ownerId, deviceId }: 
           <View style={{ width: 56 }} />
         </View>
 
-        <ScrollView contentContainerStyle={st.body} keyboardShouldPersistTaps="handled">
+        <KeyboardAvoidingView style={st.flex} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView ref={scrollRef} contentContainerStyle={st.body} keyboardShouldPersistTaps="handled">
           <Text style={st.help}>
             おもちゃのボタンを3回つづけて押すと、ここに入れた声をボタンで鳴らすモードになります（Wi-Fi のない場所でも鳴ります）。もう一度3回押すと、おはなしモードに戻ります。
           </Text>
@@ -258,6 +264,7 @@ export default function VoiceKeyholder({ visible, onClose, ownerId, deviceId }: 
                 maxLength={MAX_TEXT}
                 multiline
                 editable={!busy}
+                onFocus={showInput}
               />
               <TouchableOpacity
                 style={[st.addBtn, (busy || full || !text.trim()) && st.addBtnDisabled]}
@@ -274,6 +281,7 @@ export default function VoiceKeyholder({ visible, onClose, ownerId, deviceId }: 
 
           {message ? <Text style={st.message}>{message}</Text> : null}
         </ScrollView>
+        </KeyboardAvoidingView>
 
         <Modal visible={pickerOpen} transparent animationType="fade" onRequestClose={() => setPickerOpen(false)}>
           <Pressable style={st.pickerOverlay} onPress={() => setPickerOpen(false)}>
@@ -311,6 +319,7 @@ export default function VoiceKeyholder({ visible, onClose, ownerId, deviceId }: 
 
 const st = StyleSheet.create({
   root: { flex: 1, backgroundColor: "#f5f5f5" },
+  flex: { flex: 1 },
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 12, paddingVertical: 12, backgroundColor: "#fff", borderBottomWidth: 1, borderBottomColor: "#e0e0e0" },
   backBtn: { width: 56 },
   backText: { fontSize: 16, color: "#007AFF" },
