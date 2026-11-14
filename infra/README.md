@@ -188,7 +188,7 @@ aws backup describe-backup-vault --backup-vault-name toytalker-backup-rnd   # Lo
 4. Gmail: 設定 → アカウントとインポート → 「他のメールアドレスを追加」をアドレスごとに（名前「ToyTalker サポート」で `toytalker-support@zakicorp.com`、名前「ZakiCorp」で `support@zakicorp.com`）、「エイリアスとして扱う」はオン → SMTP サーバー `email-smtp.ap-northeast-1.amazonaws.com`、ポート 587、上のユーザー名とパスワード、「TLS を使用したセキュリティで保護された接続」→ Gmail が確認コードを support@ へ送るので、転送で届いたメールのコードを入れる。「受信したアドレスで返信する」をオンにする。
 5. 自分宛に1通送り、送信元が support@ で「経由」の表示が無く、ヘッダーの DKIM が `zakicorp.com` で pass になっていることを見る。
 
-鍵が漏れたら `aws iam delete-access-key` で即無効。作り直しは 3 から（SMTP パスワードはシークレットから一方向に作るので、無くしたら鍵ごと作り直す。Gmail 側のユーザー名も変わる）。IAM の資源は `identity/*`（sandbox の間は受信者の検証済み識別子も許可に要る。2026-11-08 に拒否で確認）。送信元は `ses:FromAddress` の条件で `addresses` に限る。2026-11-08 に RnD で 1〜5 を実施し、試験送信で SPF・DKIM の PASS と「経由」無しを確認済み。本番アクセスは申請中。
+鍵が漏れたら `aws iam delete-access-key` で即無効。作り直しは 3 から（SMTP パスワードはシークレットから一方向に作るので、無くしたら鍵ごと作り直す。Gmail 側のユーザー名も変わる）。IAM の資源は `identity/*`（sandbox の間は受信者の検証済み識別子も許可に要る。2026-11-08 に拒否で確認）。送信元は `ses:FromAddress` の条件で `addresses` に限る。2026-11-08 に RnD で 1〜5 を実施し、試験送信で SPF・DKIM の PASS と「経由」無しを確認済み。本番アクセスは 2026-11-14 に却下され、同日に再審査を依頼中（また却下なら SMTP の中継へ替える。[ロードマップ](../docs/roadmap.md) 7 の (d)）。
 
 ## 新しい環境の立ち上げ（STGで2026-10-15に実施）
 
