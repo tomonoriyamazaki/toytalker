@@ -56,6 +56,8 @@ type RegisteredDevice = {
   device_status?: DeviceStatus | null;
   device_status_at?: string | null;
   voice_barge_enabled?: boolean;
+  // 本体の音量の段階。決めていなければ本体の既定（大と同じ）
+  volume_level?: "low" | "mid" | "high";
 };
 
 type SessionItem = {
@@ -135,6 +137,7 @@ export default function Toy() {
             device_status: d.device_status ?? null,
             device_status_at: d.device_status_at ?? null,
             voice_barge_enabled: d.voice_barge_enabled !== false,
+            volume_level: d.volume_level ?? "high",
           }));
           setRegisteredDevices(devices);
           await AsyncStorage.setItem("registeredDevices", JSON.stringify(devices));
@@ -736,6 +739,38 @@ export default function Toy() {
               }}
             />
           </View>
+          <View style={s.settingRow}>
+            <Text style={s.settingLabel}>音量</Text>
+            <View style={s.levelRow}>
+              {([["low", "小"], ["mid", "中"], ["high", "大"]] as const).map(([level, label]) => {
+                const selected = (currentDevice?.volume_level ?? "high") === level;
+                return (
+                  <TouchableOpacity
+                    key={level}
+                    style={[s.levelButton, selected && s.levelButtonSelected]}
+                    onPress={async () => {
+                      if (selected) return;
+                      setRegisteredDevices((prev) => {
+                        const updated = prev.map((d) => (d.device_id === deviceId ? { ...d, volume_level: level } : d));
+                        AsyncStorage.setItem("registeredDevices", JSON.stringify(updated));
+                        return updated;
+                      });
+                      try {
+                        await apiFetch(`/devices/${encodeURIComponent(deviceId!)}`, {
+                          method: "PUT",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ volume_level: level }),
+                        });
+                      } catch {}
+                      Alert.alert("設定を変更しました", "おもちゃの電源を入れ直してください");
+                    }}
+                  >
+                    <Text style={[s.levelButtonText, selected && s.levelButtonTextSelected]}>{label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
           <TouchableOpacity style={s.settingRow} onPress={openConversationLog}>
             <View>
               <Text style={s.settingLabel}>会話ログ</Text>
@@ -933,6 +968,11 @@ const s = StyleSheet.create({
   settingRow:            { backgroundColor: "#fff", padding: 16, borderRadius: 12, borderWidth: 1, borderColor: "#e0e0e0", flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   settingLabel:          { fontSize: 15, fontWeight: "600" },
   settingValue:          { fontSize: 13, color: "#666", marginTop: 2 },
+  levelRow:              { flexDirection: "row", gap: 8 },
+  levelButton:           { paddingVertical: 8, paddingHorizontal: 16, borderRadius: 8, borderWidth: 1, borderColor: "#ccc", backgroundColor: "#fff" },
+  levelButtonSelected:   { borderColor: "#007AFF", backgroundColor: "#007AFF" },
+  levelButtonText:       { fontSize: 15, color: "#333" },
+  levelButtonTextSelected: { color: "#fff", fontWeight: "600" },
   // キャラクター選択画面
   characterItem:         { backgroundColor: "#fff", padding: 16, borderRadius: 12, borderWidth: 1, borderColor: "#e0e0e0", marginBottom: 8 },
   characterItemSelected: { borderColor: "#007AFF", backgroundColor: "#f0f7ff" },

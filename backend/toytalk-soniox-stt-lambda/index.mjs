@@ -245,9 +245,12 @@ export const handler = async (event, context) => {
       result.backchannel_enabled = deviceSettings.Item.backchannel_enabled !== false;
       // 声の割り込み（アプリのスイッチ）。ファーム 0.7.9 以降が起動時に読む。古いファームは知らない項目として無視する
       result.voice_barge_enabled = deviceSettings.Item.voice_barge_enabled !== false;
+      // 音量の段階（アプリの選択。low / mid / high）。決めていない機器には返さない（本体は自分の既定のまま）。ファーム 0.7.33 以降が起動時に読む
+      const volumeLevel = ["low", "mid", "high"].includes(deviceSettings.Item.volume_level) ? deviceSettings.Item.volume_level : null;
+      if (volumeLevel) result.volume_level = volumeLevel;
       trace.set({
         device_registered: true, backchannel_enabled: result.backchannel_enabled,
-        voice_barge_enabled: result.voice_barge_enabled,
+        voice_barge_enabled: result.voice_barge_enabled, volume_level: volumeLevel,
       });
     } else if (deviceId) {
       trace.set({ device_registered: false });

@@ -697,6 +697,22 @@ void loadPlaybackGain() {
   setPlaybackGain(gain, false);
 }
 
+// アプリの音量（鍵発行の応答の volume_level）。段階を倍率へ直すのは本体側（基板やスピーカーで変わるため）。
+// NVS には書かない（正はサーバー。届かない機器は NVS か既定のまま）。知らない語は無視する
+void applyVolumeLevel(const char* level) {
+  if (!level) return;
+  float gain;
+  if (strcmp(level, "low") == 0) gain = 2.0f;
+  else if (strcmp(level, "mid") == 0) gain = 4.0f;
+  else if (strcmp(level, "high") == 0) gain = PLAYBACK_GAIN_DEFAULT;
+  else {
+    Serial.printf("[VOLUME] unknown level=%s; keep gain=%.2f\n", level, playbackLimiter.gain());
+    return;
+  }
+  Serial.printf("[VOLUME] level=%s\n", level);
+  setPlaybackGain(gain, false);
+}
+
 // 聞き取り中の loop() から。シリアルの数字1文字で倍率を変える（試験用）
 void pollPlaybackGainSerial() {
   static const float table[] = {PLAYBACK_GAIN_DEFAULT, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f};
@@ -2914,6 +2930,10 @@ void startNormalOperation() {
   // 声の割り込み（スマホの設定。届かなければ ON のまま）。反映は起動時
   if (doc.containsKey("voice_barge_enabled")) {
     voiceBargeEnabled = doc["voice_barge_enabled"].as<bool>();
+  }
+  // 音量（スマホの設定。届かなければ NVS か既定のまま）。反映は起動時
+  if (doc.containsKey("volume_level")) {
+    applyVolumeLevel(doc["volume_level"].as<const char*>());
   }
   Serial.printf("🔊 Backchannel: %s, STT: %s, voice barge-in: %s\n", backchannelEnabled ? "ON" : "OFF",
                 sonioxModel.c_str(), voiceBargeEnabled ? "ON" : "OFF");

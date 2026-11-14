@@ -380,12 +380,13 @@ async function route(method, path, event, body, identity, who, trace) {
       return response(200, publicDeviceRow(result.Item)); // 鍵のハッシュは返さない
     }
 
-    // ---- PUT /devices/{device_id} ---- デバイス設定更新（character_id / device_name / backchannel_enabled / voice_barge_enabled / fw_channel / fw_target）
+    // ---- PUT /devices/{device_id} ---- デバイス設定更新（character_id / device_name / backchannel_enabled / voice_barge_enabled / volume_level / fw_channel / fw_target）
     // fw_channel は OTA の配布チャネル（stable|beta）、fw_target は版の固定（空文字で解除）。docs/esp32-ota-settings-plan.md
+    // volume_level は本体の音量の段階（low / mid / high）。倍率へ直すのは本体（基板やスピーカーで変わるため）
     // voice_barge_enabled は声の割り込み（返答の途中で声で止める）。鍵発行 Lambda が本体へ返し、本体は起動時に読む
     if (method === "PUT" && path.startsWith("/devices/")) {
       const device_id = decodeURIComponent(path.split("/")[2]);
-      const { character_id, device_name, backchannel_enabled, voice_barge_enabled, fw_channel, fw_target } = body;
+      const { character_id, device_name, backchannel_enabled, voice_barge_enabled, volume_level, fw_channel, fw_target } = body;
       const existing = await ddb.send(new GetCommand({ TableName: DEVICES_TABLE, Key: { device_id } }));
       if (!existing.Item) return response(404, { error: "Device not found" });
       const gate = ownerGate(identity, ownerId, existing.Item);
@@ -401,6 +402,10 @@ async function route(method, path, event, body, identity, who, trace) {
         if (typeof voice_barge_enabled !== "boolean") return response(400, { error: "voice_barge_enabled must be a boolean" });
         updates.push("voice_barge_enabled = :vb"); vals[":vb"] = voice_barge_enabled;
       }
+      if (volume_level !== undefined) {
+        if (!["low", "mid", "high"].includes(volume_level)) return response(400, { error: "volume_level must be low, mid, or high" });
+        updates.push("volume_level = :vl"); vals[":vl"] = volume_level;
+      }
       if (fw_channel !== undefined) {
         if (fw_channel !== "stable" && fw_channel !== "beta") return response(400, { error: "fw_channel must be stable or beta" });
         updates.push("fw_channel = :fc"); vals[":fc"] = fw_channel;
@@ -411,7 +416,7 @@ async function route(method, path, event, body, identity, who, trace) {
         else { updates.push("fw_target = :ft"); vals[":ft"] = fw_target; }
       }
       if (updates.length === 1 && removes.length === 0) {
-        return response(400, { error: "character_id, device_name, backchannel_enabled, voice_barge_enabled, fw_channel, or fw_target is required" });
+        return response(400, { error: "character_id, device_name, backchannel_enabled, voice_barge_enabled, volume_level, fw_channel, or fw_target is required" });
       }
 
       await ddb.send(new UpdateCommand({
