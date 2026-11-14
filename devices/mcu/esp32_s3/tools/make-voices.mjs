@@ -6,6 +6,7 @@
 //   node devices/mcu/esp32_s3/tools/make-voices.mjs a.mp3 b.wav c.m4a            # voices.bin を作る（既定は .local/voices/voices.bin）
 //   node devices/mcu/esp32_s3/tools/make-voices.mjs *.mp3 --out my.bin           # 出力先を変える
 //   node devices/mcu/esp32_s3/tools/make-voices.mjs *.mp3 --flash COM12          # 作って、そのまま本体の voices 区画へ書く
+//   node devices/mcu/esp32_s3/tools/make-voices.mjs --image voices.bin --flash /dev/cu.usbmodem101   # 作ってある voices.bin を書くだけ（ffmpeg 不要）
 //   node devices/mcu/esp32_s3/tools/make-voices.mjs --erase --flash COM12        # voices 区画を空にする（声なしに戻す）
 //
 // 音声は 24kHz モノラルにそろえ、前後の無音を落とし、山を PEAK にそろえてから IMA ADPCM（4bit）にする。
@@ -130,9 +131,10 @@ function findEsptool() {
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const args = process.argv.slice(2);
 const inputs = [];
-let out = join(repoRoot, ".local/voices/voices.bin"), port = null, erase = false;
+let out = join(repoRoot, ".local/voices/voices.bin"), port = null, erase = false, prebuilt = null;
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--out") out = resolve(args[++i]);
+  else if (args[i] === "--image") prebuilt = resolve(args[++i]);
   else if (args[i] === "--flash") port = args[++i];
   else if (args[i] === "--erase") erase = true;
   else if (args[i].startsWith("--")) { console.error(`unknown option: ${args[i]}`); process.exit(2); }
@@ -145,6 +147,15 @@ if (erase) {
   if (!port) { console.error("--erase は --flash <ポート> と一緒に使う"); process.exit(2); }
   image = Buffer.alloc(4096, 0xff);  // 先頭のセクタを消せば、本体は「声なし」と見る
   console.log("voices 区画の先頭を空にする");
+} else if (prebuilt) {
+  // 作ってある voices.bin をそのまま書く（別の PC で作ったものを持ってきたとき）。形と CRC だけ確かめる
+  if (!port || inputs.length > 0) { console.error("--image は --flash <ポート> と一緒に、音声ファイルなしで使う"); process.exit(2); }
+  image = readFileSync(prebuilt);
+  const ok = image.length >= HEADER_BYTES && image.toString("latin1", 0, 4) === "TTVK" && image.readUInt32LE(8) === image.length
+    && image.length <= partition.size && crc32(image.subarray(HEADER_BYTES)) === image.readUInt32LE(12);
+  if (!ok) { console.error(`❌ ${prebuilt} は voices の中身ではない（先頭・大きさ・CRC のどれかが合わない）`); process.exit(1); }
+  out = prebuilt;
+  console.log(`${prebuilt}: ${image.readUInt8(5)} 件 ${image.length} バイト（区画 ${partition.size} バイトの ${(image.length * 100 / partition.size).toFixed(0)}%）`);
 } else {
   if (inputs.length === 0 || inputs.length > MAX_CLIPS) {
     console.error(`音声ファイルを 1〜${MAX_CLIPS} 個渡す（usage はこのファイルの先頭）`);
