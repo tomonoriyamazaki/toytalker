@@ -1,0 +1,10 @@
+# ToyTalker mini の区画表（フラッシュ 4MB）。スケッチのフォルダにあるこのファイルが、ボード設定の no_fs より優先される。
+# no_fs との差: アプリの枠を 0x1F0000 → 0x1C0000（1,835,008 バイト）に縮め、空いた 0x60000（384KB）を音声の置き場 voices にした。
+# 区画表は USB 書き込みでしか変わらない（OTA は .bin だけを入れ替える）。.bin はどちらの区画表でも同じものが動く。
+# Name,   Type, SubType, Offset,  Size, Flags
+nvs,      data, nvs,     0x9000,  0x5000,
+otadata,  data, ota,     0xe000,  0x2000,
+app0,     app,  ota_0,   0x10000, 0x1C0000,
+app1,     app,  ota_1,   0x1D0000,0x1C0000,
+voices,   data, spiffs,  0x390000,0x60000,
+coredump, data, coredump,0x3F0000,0x10000,
