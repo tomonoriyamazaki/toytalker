@@ -103,6 +103,26 @@ async function buildFirmwareInfo(query, device, manifest) {
 // 2026-11-08 まで機器設定 Lambda しか書いておらず「最後にアプリで設定を触った時刻」になっていた）。
 // ファーム版などは fw を報告する版（0.7.3 以降）だけが書く。
 // 鍵が合わない要求（なりすまし）には書かせない（deviceKeyWriteCondition）。照合そのものは handler の checkDeviceKey
+// ボイスキーホルダーの声（backend/toytalker-tts-only-lambda/keyholder.mjs）。本体（0.7.33〜）は voices 区画に入っている
+// イメージの印を vk で名乗る（CRC32 の 16 進 8 桁。区画はあるが中身が無い・壊れているときは none。区画が無い本体は付けない）
+function voicesTag(query) {
+  const s = query.vk == null ? "" : String(query.vk);
+  return /^([0-9a-f]{8}|none)$/.test(s) ? s : null;
+}
+
+// アプリで足した声（devices の keyholder.image）と本体の印が違えば、署名付き URL を返す。本体が S3 から直接取って入れ替える
+async function buildVoicesInfo(query, device) {
+  const tag = voicesTag(query);
+  const image = device?.keyholder?.image;
+  if (!tag || !image?.key || !image?.sha256 || !image?.size || image.crc === tag) return null;
+  const url = await getSignedUrl(
+    s3,
+    new GetObjectCommand({ Bucket: FIRMWARE_BUCKET, Key: image.key }),
+    { expiresIn: FIRMWARE_URL_TTL_SEC },
+  );
+  return { url, sha256: image.sha256, size: image.size };
+}
+
 function recordDeviceReport(deviceId, query, event) {
   if (!deviceId) return Promise.resolve();
   const now = new Date().toISOString();
@@ -114,6 +134,11 @@ function recordDeviceReport(deviceId, query, event) {
     values[":hw"] = String(query.hw ?? "").slice(0, 16);
     values[":o"] = query.ota === "1";
     values[":p"] = String(query.part ?? "").slice(0, 16);
+  }
+  // 本体に入っている声の印（アプリの「本体に入ったか」の表示に使う）
+  if (voicesTag(query)) {
+    sets.push("voices_crc = :vk");
+    values[":vk"] = voicesTag(query);
   }
   const keyCond = deviceKeyWriteCondition(event);
   return ddb.send(new UpdateCommand({
@@ -272,6 +297,19 @@ export const handler = async (event, context) => {
         }
       }
     }
+
+    // 声の入れ替え。ファームの更新を勧めた回は出さない（本体は更新して再起動するので、次の起動で受け取る）
+    if (deviceSettings?.Item && !result.firmware) {
+      const voices = await buildVoicesInfo(query, deviceSettings.Item).catch((err) => {
+        trace.error("voices_offer", err);
+        return null;
+      });
+      if (voices) {
+        result.voices = voices;
+        trace.set({ voices_offer: voices.size });
+      }
+    }
+    if (voicesTag(query)) trace.set({ voices_crc: voicesTag(query) });
 
     trace.set({ status: 200 });
     return {

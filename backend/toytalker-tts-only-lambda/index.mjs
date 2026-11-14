@@ -16,6 +16,8 @@ import { recordConsume, checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
+import { handleKeyholder } from "./keyholder.mjs";
+import { parseWav } from "./pcm-tts.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
@@ -135,24 +137,6 @@ function pcm16ToMp3Base64(pcmBuf, sampleRate = 24000) {
   const end = enc.flush();
   if (end.length > 0) chunks.push(Buffer.from(end));
   return Buffer.concat(chunks).toString("base64");
-}
-
-// WAVバッファをパースして {pcm, sampleRate} を返す（'data'チャンクを走査）
-function parseWav(wavBuf) {
-  if (wavBuf.length < 44 || wavBuf.toString("ascii", 0, 4) !== "RIFF") {
-    throw new Error("invalid WAV");
-  }
-  const sampleRate = wavBuf.readUInt32LE(24);
-  let off = 12;
-  while (off + 8 <= wavBuf.length) {
-    const id = wavBuf.toString("ascii", off, off + 4);
-    const size = wavBuf.readUInt32LE(off + 4);
-    if (id === "data") {
-      return { pcm: wavBuf.subarray(off + 8, off + 8 + size), sampleRate };
-    }
-    off += 8 + size + (size % 2);
-  }
-  throw new Error("WAV data chunk not found");
 }
 
 async function ttsToBase64OpenAI(text, voice, ttsModel) {
@@ -394,7 +378,8 @@ async function addUsage({ ownerId, deviceId, date, provider, model, costJpy, cos
   }
 }
 
-async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len }) {
+// b64Len は mp3（読み上げ）の長さ。PCM で作ったとき（ボイスキーホルダー）は pcmBytes（24kHz・16bit）を渡す
+async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len, pcmBytes: pcmBytesIn }) {
   try {
     await loadPricingCache();
     const ts = new Date().toISOString();
@@ -406,9 +391,9 @@ async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len }) {
     let cost;
     if (ttsVendor === "openai") {
       // 出力はmp3(128kbps)。mp3バイト数から再生秒数→PCM相当バイト数を概算
-      const mp3Bytes = Math.round(b64Len * 3 / 4);
+      const mp3Bytes = Math.round((b64Len ?? 0) * 3 / 4);
       const durationSec = (mp3Bytes * 8) / (MP3_KBPS * 1000);
-      const pcmBytes = Math.round(durationSec * 24000 * 2);
+      const pcmBytes = pcmBytesIn ?? Math.round(durationSec * 24000 * 2);
       cost = calcTtsCostJpy({ providerApiType: priceKey, characters: chars, pcmBytes, usdJpyRate });
     } else if (ttsVendor === "fishaudio") {
       cost = calcTtsCostJpy({ providerApiType: priceKey, utf8Bytes: Buffer.byteLength(text, "utf8"), usdJpyRate });
@@ -472,6 +457,29 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
   // トークン付きなら users テーブルの owner_id（クライアントの自称は無視）
   ownerId = (await resolveOwner(identity, ownerId)).ownerId ?? "user_123";
   trace.set({ owner_id: ownerId });
+
+  // ボイスキーホルダーの声（本体に入れる声を機器ごとに足す・消す。keyholder.mjs）。応答は JSON
+  if (body.keyholder && typeof body.keyholder === "object") {
+    let result;
+    try {
+      result = await handleKeyholder({
+        req: body.keyholder, identity, ownerId, trace, ddb,
+        deps: { ttsConfigFor: (provider) => TTS_TABLE[normalizeModelKey(provider) ?? TTS_DEFAULT], trackTtsCost },
+      });
+    } catch (e) {
+      trace.error("keyholder", e);
+      result = { statusCode: 500, body: { error: "internal_error" } };
+    }
+    trace.set({ status: result.statusCode, ...(result.body?.error ? { reason: result.body.error } : {}) });
+    trace.finish();
+    const s = awslambda.HttpResponseStream.from(responseStream, {
+      statusCode: result.statusCode,
+      headers: { "Content-Type": "application/json" },
+    });
+    s.write(JSON.stringify(result.body));
+    s.end();
+    return;
+  }
 
   if (!text)    return fail(400, "text is required");
   if (!voiceId) return fail(400, "voice_id is required");

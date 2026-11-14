@@ -408,7 +408,7 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 2048,
     timeoutSeconds: 120,
     format: "esm",
-    env: [...TTS_ENV, ...AUTH_ENV, ...WALLET_ENV],
+    env: [...TTS_ENV, ...AUTH_ENV, ...WALLET_ENV, "FIRMWARE_BUCKET"],
     secrets: [...TTS_SECRETS],
     url: {
       invokeMode: "RESPONSE_STREAM",
@@ -424,7 +424,8 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     selfWarm: false,
     readTables: ["voices", "api-unit-prices", "exchange-rates"],
     readWriteTables: ["usage", "users"],
-    updateTables: ["wallets"],
+    // devices はボイスキーホルダーの声の一覧（keyholder）を UpdateItem で残す（backend/toytalker-tts-only-lambda/keyholder.mjs）
+    updateTables: ["wallets", "devices"],
     appendTables: ["wallet-ledger"],
   },
   {
@@ -695,6 +696,12 @@ export class ToyTalkerStack extends cdk.Stack {
     const firmwareBucket = s3.Bucket.fromBucketName(this, "FirmwareBucket", config.firmwareBucketName);
     if (!importPhase) {
       firmwareBucket.grantRead(functions.get("stt-token")!);
+      // 読み上げLambdaが、ボイスキーホルダーの声（機器ごとの ADPCM と voices.bin）を置く・読む・消す。
+      // 触れるのは esp32s3/voices/ の下だけ（ファームの .bin と manifest.json は書けない）。本体へは上の鍵発行Lambdaが署名付きURLで渡す
+      functions.get("read-aloud-app")!.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+        resources: [firmwareBucket.arnForObjects("esp32s3/voices/*")],
+      }));
       // 平文HTTPのアクセスを拒否（Security Hub S3.5。他のバケットの enforceSSL と同じ文）。バケット本体はCDK管理外のまま、
       // バケットポリシーだけをこのスタックが持つ（ロードマップ9、2026-10-28）。環境のバケットが無いと deploy で止まるので、
       // 新しい環境へ出す前にバケットを作る（置き場所の決定はロードマップ9）
@@ -848,6 +855,8 @@ export class ToyTalkerStack extends cdk.Stack {
     }
     ack("AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:s3:::toytalker-firmware/*]",
       "ファーム配布バケットのオブジェクト全部を読む（manifest と .bin）。バケット1つに限定");
+    ack("AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:s3:::toytalker-firmware/esp32s3/voices/*]",
+      "ボイスキーホルダーの声（機器ごと）を置く・読む・消す。バケット1つの esp32s3/voices/ の下に限定");
     ack("AwsSolutions-IAM5[Resource::<SpeakersBucket6044DDC1.Arn>/*]",
       "クローンボイスの speaker embedding を保存・削除する。バケット1つに限定");
     ack("AwsSolutions-IAM5[Resource::<OpsMonthlyCC65D2A5.Arn>:*]",

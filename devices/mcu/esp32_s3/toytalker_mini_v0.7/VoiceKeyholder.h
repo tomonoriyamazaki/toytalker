@@ -102,6 +102,27 @@ class Store {
   }
 };
 
+// いま voices 区画に入っているイメージの印（CRC32 の 16 進 8 桁）。起動時の鍵取得で名乗り、アプリで足した声と
+// 同じかをサーバーが見る（VoiceSync.h）。中身が無い・壊れているときは "none"。区画が無い本体（古い区画表）は false
+inline bool installedTag(char out[9]) {
+  const esp_partition_t* part =
+    esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "voices");
+  if (!part) return false;
+  strcpy(out, "none");
+  const void* mapped = nullptr;
+  esp_partition_mmap_handle_t handle = 0;
+  if (esp_partition_mmap(part, 0, part->size, ESP_PARTITION_MMAP_DATA, &mapped, &handle) != ESP_OK) return true;
+  const uint8_t* base = static_cast<const uint8_t*>(mapped);
+  if (memcmp(base, "TTVK", 4) == 0 && base[4] == FORMAT_VERSION) {
+    const uint32_t total = readU32(base + 8), stored = readU32(base + 12);
+    if (total >= HEADER_BYTES && total <= part->size && crc32(base + HEADER_BYTES, total - HEADER_BYTES) == stored) {
+      snprintf(out, 9, "%08lx", (unsigned long)stored);
+    }
+  }
+  esp_partition_munmap(handle);
+  return true;
+}
+
 // IMA ADPCM の展開。make-voices.mjs の圧縮と同じ表・同じ計算
 class AdpcmDecoder {
   int32_t predicted_ = 0;

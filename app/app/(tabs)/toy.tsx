@@ -21,6 +21,7 @@ import {
   Switch,
 } from "react-native";
 import { BleManager, Device } from "react-native-ble-plx";
+import VoiceKeyholder from "../../components/VoiceKeyholder";
 
 // BLE UUIDs (ESP32側と一致させる)
 const SERVICE_UUID       = "12345678-1234-1234-1234-123456789abc";
@@ -77,6 +78,7 @@ export { ErrorBoundary } from "../../components/ScreenError";
 
 export default function Toy() {
   const ownerId = useOwnerId();
+  const [keyholderOpen, setKeyholderOpen] = useState(false);  // ボイスキーホルダーの声を選ぶ画面（components/VoiceKeyholder.tsx）
   const [status, setStatus]                         = useState<ConnectionStatus>("disconnected");
   const [bleDevices, setBleDevices]                 = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice]       = useState<Device | null>(null);
@@ -778,10 +780,18 @@ export default function Toy() {
             </View>
             <Text style={s.chevron}>›</Text>
           </TouchableOpacity>
+          <TouchableOpacity style={s.settingRow} onPress={() => setKeyholderOpen(true)}>
+            <View>
+              <Text style={s.settingLabel}>ボイスキーホルダー</Text>
+              <Text style={s.settingValue}>ボタンで鳴らす声を選ぶ</Text>
+            </View>
+            <Text style={s.chevron}>›</Text>
+          </TouchableOpacity>
           <TouchableOpacity style={s.deleteButton} onPress={deleteDevice}>
             <Text style={s.deleteButtonText}>デバイスを削除</Text>
           </TouchableOpacity>
         </ScrollView>
+        <VoiceKeyholder visible={keyholderOpen} onClose={() => setKeyholderOpen(false)} ownerId={ownerId} deviceId={deviceId} />
       </SafeAreaView>
     );
   }

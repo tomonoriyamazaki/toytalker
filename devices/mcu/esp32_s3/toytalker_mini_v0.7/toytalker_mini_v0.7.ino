@@ -44,6 +44,7 @@
 #include "SonioxRootCA.h"
 #include "DeviceAuth.h"
 #include "VoiceKeyholder.h"
+#include "VoiceSync.h"
 #include <esp_ota_ops.h>
 #include <esp_arduino_version.h>
 #include <mbedtls/sha256.h>  // sha256Hex（CloudFront 経由の POST に本文ハッシュを添える）
@@ -2885,6 +2886,9 @@ void startNormalOperation() {
                  + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel()
                  + "&ttl=" + SONIOX_KEY_TTL_SEC
                  + ota::queryParams();  // 前回の更新の結果（ロールバック・続いた失敗）
+  // いま入っている声の印（ボイスキーホルダー）。アプリで足した声と違えば、応答に voices が入る（VoiceSync.h）
+  char voicesTag[9];
+  if (voicekey::installedTag(voicesTag)) initUrl += String("&vk=") + voicesTag;
   String resp;
   const int code = httpGetWithRetry(initUrl, resp, 3);
   if (code != 200) {
@@ -2918,6 +2922,20 @@ void startNormalOperation() {
       logMemoryCheckpoint("after_ota_attempt");
     } else {
       Serial.printf("[OTA] manifest rejected: %s\n", reason);
+    }
+  }
+
+  // アプリで足した声（ボイスキーホルダー）。届いていれば、会話を始める前に入れ替える（0.7.33）。失敗しても会話は続ける
+  if (doc.containsKey("voices")) {
+    voicesync::Offer offer;
+    const char* reason = "";
+    if (voicesync::parseOffer(doc["voices"], offer, reason)) {
+      setLEDMode(LED_BLINK_OTA);
+      voicesync::apply(offer);
+      setLEDMode(LED_BLINK_SLOW);
+      logMemoryCheckpoint("after_voices_sync");
+    } else {
+      Serial.printf("[VOICES] offer rejected: %s\n", reason);
     }
   }
 
