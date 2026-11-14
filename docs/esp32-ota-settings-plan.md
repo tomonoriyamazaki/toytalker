@@ -24,7 +24,7 @@ Partition Schemeは **No FS 4MB (2MB APP x2)** (`no_fs`)。コア3.3.10の定義
 
 - スマホの [`app/app/(tabs)/toy.tsx`](../app/app/(tabs)/toy.tsx) にデバイス別の相槌スイッチがあり、設定用Lambdaの `PUT /devices/{device_id}` で `backchannel_enabled` をDynamoDBへ保存する。画面では「おもちゃの電源を入れ直してください」と案内している。
 - [`toytalk-soniox-stt-lambda`](../backend/toytalk-soniox-stt-lambda/index.mjs) がSoniox一時キーとともに相槌設定を返す。v0.7の `startNormalOperation()` は起動時にこれを読み、`backchannelEnabled` に反映する。会話中の設定再取得はまだない。
-- 音声割り込みは `AecBargeGate.h` の `AEC_BARGE_DETECT_ONLY=false` など、ファーム内の固定設定。スマホのスイッチ・保存APIの項目・本体への同期は未実装。
+- 音声割り込みは `AecBargeGate.h` の `AEC_BARGE_DETECT_ONLY=false` など、ファーム内の固定設定。スマホのスイッチ・保存APIの項目・本体への同期は未実装。→ **2026-11-14 に起動時反映の形で実装**（アプリの「声で止める」、`devices` の `voice_barge_enabled`、一時キー Lambda の応答。相槌と同じ経路）。再起動なしの反映は下の経路で別途。
 
 変更候補は、スマホのデバイス設定に「声で再生を止める」を追加し、相槌と合わせてサーバーへ保存、本体が設定を再取得して会話の合間に反映する構成。音声割り込みONなら声で停止、OFFなら声では停止せず、通常の録音・会話とボタン停止は利用できる動作を想定する。
 

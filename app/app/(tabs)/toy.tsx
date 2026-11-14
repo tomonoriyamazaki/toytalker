@@ -55,6 +55,7 @@ type RegisteredDevice = {
   // 本体が最後に送った電池・温度・充電状態と、その時刻（会話のたびに更新。lib/deviceStatus.ts）
   device_status?: DeviceStatus | null;
   device_status_at?: string | null;
+  voice_barge_enabled?: boolean;
 };
 
 type SessionItem = {
@@ -133,6 +134,7 @@ export default function Toy() {
             backchannel_enabled: d.backchannel_enabled !== false,
             device_status: d.device_status ?? null,
             device_status_at: d.device_status_at ?? null,
+            voice_barge_enabled: d.voice_barge_enabled !== false,
           }));
           setRegisteredDevices(devices);
           await AsyncStorage.setItem("registeredDevices", JSON.stringify(devices));
@@ -704,6 +706,30 @@ export default function Toy() {
                     method: "PUT",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ backchannel_enabled: val }),
+                  });
+                } catch {}
+                Alert.alert("設定を変更しました", "おもちゃの電源を入れ直してください");
+              }}
+            />
+          </View>
+          <View style={s.settingRow}>
+            <View style={{ flex: 1 }}>
+              <Text style={s.settingLabel}>声で止める</Text>
+              <Text style={s.settingValue}>話している途中に声をかけると止まります。オフでもボタンで止められます</Text>
+            </View>
+            <Switch
+              value={currentDevice?.voice_barge_enabled !== false}
+              onValueChange={async (val) => {
+                setRegisteredDevices((prev) => {
+                  const updated = prev.map((d) => (d.device_id === deviceId ? { ...d, voice_barge_enabled: val } : d));
+                  AsyncStorage.setItem("registeredDevices", JSON.stringify(updated));
+                  return updated;
+                });
+                try {
+                  await apiFetch(`/devices/${encodeURIComponent(deviceId!)}`, {
+                    method: "PUT",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ voice_barge_enabled: val }),
                   });
                 } catch {}
                 Alert.alert("設定を変更しました", "おもちゃの電源を入れ直してください");

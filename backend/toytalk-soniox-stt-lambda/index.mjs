@@ -243,7 +243,12 @@ export const handler = async (event, context) => {
     if (!deviceId && STT_OPTIONS) result.stt_options = STT_OPTIONS;
     if (deviceSettings?.Item) {
       result.backchannel_enabled = deviceSettings.Item.backchannel_enabled !== false;
-      trace.set({ device_registered: true, backchannel_enabled: result.backchannel_enabled });
+      // 声の割り込み（アプリのスイッチ）。ファーム 0.7.9 以降が起動時に読む。古いファームは知らない項目として無視する
+      result.voice_barge_enabled = deviceSettings.Item.voice_barge_enabled !== false;
+      trace.set({
+        device_registered: true, backchannel_enabled: result.backchannel_enabled,
+        voice_barge_enabled: result.voice_barge_enabled,
+      });
     } else if (deviceId) {
       trace.set({ device_registered: false });
     }
