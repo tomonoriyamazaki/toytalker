@@ -912,6 +912,27 @@ void IRAM_ATTR onLEDTimer() {
   }
 }
 
+// ==== LED の合図（0.7.27）====
+// 点灯中（録音中）に一瞬だけ消して「いま気づいた」を見せる。使うのは2か所:
+//   ① この発話の最初の文字が出た時（聞こえている）② 発話を確定して Lambda へ送る時（返事を作り始めた）
+// 待たせないよう、消すだけして戻すのは esp_timer の1回きりのタイマーに任せる（送信を遅らせない）。
+// 戻す時に点灯中（LED_ON）でなければ何もしない（点滅や消灯はそれぞれの状態が面倒を見る）。
+const uint32_t LED_BLIP_MS = 90;
+static esp_timer_handle_t ledBlipTimer = nullptr;
+
+void ledBlip() {
+  if (currentLEDMode != LED_ON) return;
+  if (!ledBlipTimer) {
+    esp_timer_create_args_t args = {};
+    args.callback = [](void*) { if (currentLEDMode == LED_ON) digitalWrite(PIN_LED, HIGH); };
+    args.name = "led_blip";
+    if (esp_timer_create(&args, &ledBlipTimer) != ESP_OK) { ledBlipTimer = nullptr; return; }
+  }
+  esp_timer_stop(ledBlipTimer);  // 前の合図が残っていたら数え直す（止まっていればエラーを返すだけ）
+  digitalWrite(PIN_LED, LOW);
+  if (esp_timer_start_once(ledBlipTimer, (uint64_t)LED_BLIP_MS * 1000) != ESP_OK) digitalWrite(PIN_LED, HIGH);
+}
+
 // ==== LED制御関数（digitalWriteのみ）====
 void setLEDMode(LEDMode mode) {
   if (currentLEDMode == mode) return;
@@ -2537,6 +2558,7 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
         if (fullText.length() > 0) {
           // <end> と同じメッセージの確定（途中結果の差し替え）は数えない。数えると last_text_to_end_ms がいつも 0 付近になる
           if (!foundEndToken && fullText != partialText) lastTextChangeMs = millis();
+          if (partialText.length() == 0 && isRecording) ledBlip();  // この発話の最初の文字
           partialText = fullText;
           lastPartialMs = millis();
           armed = true;
@@ -3295,6 +3317,7 @@ void finishUtterance(const char* why) {
   sonioxFinalBuf = "";
   if (text != lastFinalText) {
     lastFinalText = text;
+    ledBlip();  // 発話を確定して送る
     sendToLambdaAndPlay(text);
   }
 }
