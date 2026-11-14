@@ -667,6 +667,21 @@ export default function Toy() {
             autoCapitalize="none"
           />
           <Text style={s.deviceIdText}>{deviceId}</Text>
+          <TouchableOpacity style={s.settingRow} onPress={() => deviceId && refreshDeviceStatus(deviceId)}>
+            <View>
+              <Text style={s.settingLabel}>本体の状態</Text>
+              {currentDevice?.device_status && currentDevice.device_status_at ? (
+                <>
+                  <Text style={s.settingValue}>電池: {batteryText(currentDevice.device_status)}</Text>
+                  <Text style={s.settingValue}>充電: {chargeText(currentDevice.device_status)}</Text>
+                  <Text style={s.settingValue}>温度: {tempText(currentDevice.device_status)}</Text>
+                  <Text style={s.settingValue}>{statusAgeText(currentDevice.device_status_at)}の値（タップで更新）</Text>
+                </>
+              ) : (
+                <Text style={s.settingValue}>まだ届いていません（おもちゃと話すと届きます）</Text>
+              )}
+            </View>
+          </TouchableOpacity>
           <TouchableOpacity style={s.settingRow} onPress={openCharacterSelect}>
             <View>
               <Text style={s.settingLabel}>キャラクター</Text>
@@ -695,21 +710,6 @@ export default function Toy() {
               }}
             />
           </View>
-          <TouchableOpacity style={s.settingRow} onPress={() => deviceId && refreshDeviceStatus(deviceId)}>
-            <View>
-              <Text style={s.settingLabel}>本体の状態</Text>
-              {currentDevice?.device_status && currentDevice.device_status_at ? (
-                <>
-                  <Text style={s.settingValue}>電池: {batteryText(currentDevice.device_status)}</Text>
-                  <Text style={s.settingValue}>充電: {chargeText(currentDevice.device_status)}</Text>
-                  <Text style={s.settingValue}>温度: {tempText(currentDevice.device_status)}</Text>
-                  <Text style={s.settingValue}>{statusAgeText(currentDevice.device_status_at)}の値（タップで更新）</Text>
-                </>
-              ) : (
-                <Text style={s.settingValue}>まだ届いていません（おもちゃと話すと届きます）</Text>
-              )}
-            </View>
-          </TouchableOpacity>
           <TouchableOpacity style={s.settingRow} onPress={openConversationLog}>
             <View>
               <Text style={s.settingLabel}>会話ログ</Text>
