@@ -137,6 +137,15 @@ static PowerReading powerReading;
 static bool powerReadingValid = false;
 static uint32_t powerReadMs = 0;
 
+// 合図の音（playChime）。型と表は、最初の関数定義より前に置く（Arduino の自動プロトタイプのため）
+struct ChimeTone {
+  float fromHz, toHz;  // 0 なら無音（音と音の間）
+  uint16_t ms;
+};
+const ChimeTone CHIME_SLEEP[] = {{880, 330, 350}};
+const ChimeTone CHIME_WAKE[] = {{330, 880, 250}};
+const ChimeTone CHIME_BOOT[] = {{660, 660, 130}, {0, 0, 50}, {990, 990, 200}};
+
 // LED状態（PWMなし、digitalWriteのみ）
 enum LEDMode {
   LED_OFF,
@@ -2891,6 +2900,7 @@ void startNormalOperation() {
   Serial.printf("🔊 Backchannel: %s, STT: %s, voice barge-in: %s\n", backchannelEnabled ? "ON" : "OFF",
                 sonioxModel.c_str(), voiceBargeEnabled ? "ON" : "OFF");
 
+  playChime(CHIME_BOOT, sizeof(CHIME_BOOT) / sizeof(CHIME_BOOT[0]));  // 起動して聞き取りを始める合図
   startSTTRecording();
 }
 
@@ -3026,9 +3036,16 @@ void setup() {
 }
 
 // ==== 待ち受けの見張り: 無音なら休む・切れたら戻す（0.7.19）====
-// 休みに入る合図の音（下がっていく短い音）。返答の再生と同じ順で I2S を切り替える:
-// マイクを止める → 再生を作る → アンプ ON → 書く → アンプ OFF → 再生を消す。マイクは起きるときに作り直す。
-void playSleepChime() {
+// 合図の音（ファームの中で作る短い音）。返答の再生と同じ順で I2S を切り替える:
+// マイクを止める → 再生を作る → アンプ ON → 書く → アンプ OFF → 再生を消す。マイクは録音を始めるときに作り直す。
+//   休みに入る: 下がっていく音 / 休みから戻る: 上がっていく音 / 起動して聞き取りを始める: 2つの音
+void playChime(const ChimeTone* tones, size_t count) {
+  // ボタンを離すまで待つ。ボタンの割り込みは押すたび（離すときの接点の跳ね返りでも）アンプを切るので、
+  // 押している最中に鳴らし始めると音が出ないことがあった（2回押しで休みに入るとき）
+  for (uint32_t waited = 0, released = 0; waited < 1000 && released < 40; waited += 10) {
+    released = digitalRead(PIN_BUTTON) == HIGH ? released + 10 : 0;
+    delay(10);
+  }
   if (!pauseMicForPlaybackTest()) return;
   if (!setupI2SPlay()) {
     resetMicAfterPlaybackTest();
@@ -3038,22 +3055,25 @@ void playSleepChime() {
   if (bargeInRequested.enableAmp(PIN_AMP_SD)) {
     delay(50);
     static int16_t buf[480];  // ステレオ240フレーム（10ms）
-    const uint32_t totalFrames = SAMPLE_RATE_TTS * 350 / 1000;
-    float phase = 0;
     size_t written = 0;
-    for (uint32_t done = 0; done < totalFrames && !bargeInRequested;) {
-      const uint32_t n = min((uint32_t)240, totalFrames - done);
-      for (uint32_t i = 0; i < n; i++) {
-        const float t = (float)(done + i) / totalFrames;          // 0→1
-        const float freq = 880.0f - 550.0f * t;                   // 880Hz → 330Hz
-        const float env = (t < 0.05f ? t / 0.05f : 1.0f) * (1.0f - t) * (1.0f - t);  // 立ち上がり5%、あとは消えていく
-        phase += 2.0f * PI * freq / SAMPLE_RATE_TTS;
-        if (phase > 2.0f * PI) phase -= 2.0f * PI;
-        const int16_t v = (int16_t)(sinf(phase) * env * 9000.0f);
-        buf[2 * i] = buf[2 * i + 1] = v;
+    for (size_t k = 0; k < count && !bargeInRequested; k++) {
+      const ChimeTone& tone = tones[k];
+      const uint32_t totalFrames = (uint32_t)SAMPLE_RATE_TTS * tone.ms / 1000;
+      float phase = 0;
+      for (uint32_t done = 0; done < totalFrames && !bargeInRequested;) {
+        const uint32_t n = min((uint32_t)240, totalFrames - done);
+        for (uint32_t i = 0; i < n; i++) {
+          const float t = (float)(done + i) / totalFrames;                              // 0→1
+          const float freq = tone.fromHz + (tone.toHz - tone.fromHz) * t;
+          const float env = (t < 0.05f ? t / 0.05f : 1.0f) * (1.0f - t) * (1.0f - t);  // 立ち上がり5%、あとは消えていく
+          phase += 2.0f * PI * freq / SAMPLE_RATE_TTS;
+          if (phase > 2.0f * PI) phase -= 2.0f * PI;
+          const int16_t v = tone.fromHz > 0 ? (int16_t)(sinf(phase) * env * 9000.0f) : 0;
+          buf[2 * i] = buf[2 * i + 1] = v;
+        }
+        writePlaybackI2s(buf, n * 4, &written, portMAX_DELAY);
+        done += n;
       }
-      writePlaybackI2s(buf, n * 4, &written, portMAX_DELAY);
-      done += n;
     }
     delay(400);  // DMA（最大 0.34 秒ぶん）に残った音が出終わるまで
   }
@@ -3095,7 +3115,7 @@ void enterIdleSleep(uint32_t idleMs, const char* why = "no text") {
   endpointDetected = false;
   sttGrace = SttGraceState{};
   clearBackchannelCache();
-  playSleepChime();
+  playChime(CHIME_SLEEP, sizeof(CHIME_SLEEP) / sizeof(CHIME_SLEEP[0]));
   // LED は休み中だけ PWM でゆっくり明滅させる（ほかの状態は digitalWrite のまま。休み中は音を出さない）
   if (ledTimer) timerAlarm(ledTimer, 0, false, 0);
   setLEDMode(LED_OFF);
@@ -3108,6 +3128,7 @@ void enterIdleSleep(uint32_t idleMs, const char* why = "no text") {
 void exitIdleSleep(const char* why) {
   Serial.printf("[IDLE] wake (%s) after %lus\n", why, (unsigned long)((millis() - idleSleepStartMs) / 1000));
   leaveIdleSleepLed();
+  playChime(CHIME_WAKE, sizeof(CHIME_WAKE) / sizeof(CHIME_WAKE[0]));
   bargeInRequested = false;  // 起こすために押したボタンを「再生の中断」として残さない
   startSTTRecording();
 }
