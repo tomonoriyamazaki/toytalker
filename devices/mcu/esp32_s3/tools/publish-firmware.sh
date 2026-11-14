@@ -194,6 +194,20 @@ SHA="$(sha256_of "$BIN")"
 SIZE="$(wc -c < "$BIN" | tr -d ' ')"
 echo "📦 size=$SIZE sha256=$SHA"
 
+# アプリの枠に収まるかを確かめる。枠はスケッチの partitions.csv の app0（ボード設定の no_fs より狭い）。
+# arduino-cli の「Maximum is …」はボード設定の値のままなので、枠を超えてもビルドは通る。超えた .bin は本体が OTA で弾く
+APP_SLOT_HEX="$(awk -F, '$1 ~ /^app0/ { gsub(/[ \t\r]/, "", $5); print $5 }' "$SKETCH_DIR/partitions.csv" 2>/dev/null || true)"
+if [[ ! "$APP_SLOT_HEX" =~ ^0x[0-9A-Fa-f]+$ ]]; then
+  echo "❌ $SKETCH_DIR/partitions.csv から app0 の大きさを読めない: '$APP_SLOT_HEX'" >&2
+  exit 1
+fi
+APP_SLOT=$((APP_SLOT_HEX))
+if (( SIZE > APP_SLOT )); then
+  echo "❌ .bin（$SIZE バイト）がアプリの枠（$APP_SLOT バイト）を超えている。発行しない" >&2
+  exit 1
+fi
+echo "📏 app slot=$APP_SLOT free=$((APP_SLOT - SIZE)) ($(( (APP_SLOT - SIZE) * 100 / APP_SLOT ))%)"
+
 if [[ $DRY_RUN -eq 1 ]]; then
   echo "(dry-run) S3 not touched"
   exit 0

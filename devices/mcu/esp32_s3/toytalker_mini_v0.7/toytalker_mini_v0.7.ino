@@ -43,6 +43,8 @@
 #include "AmazonRootCA.h"
 #include "SonioxRootCA.h"
 #include "DeviceAuth.h"
+#include "VoiceKeyholder.h"
+#include <esp_ota_ops.h>
 #include <esp_arduino_version.h>
 #include <mbedtls/sha256.h>  // sha256Hex（CloudFront 経由の POST に本文ハッシュを添える）
 
@@ -68,7 +70,8 @@ Preferences preferences;
 enum DeviceMode {
   MODE_NORMAL,
   MODE_BLE_PROV,
-  MODE_CONNECTING
+  MODE_CONNECTING,
+  MODE_KEYHOLDER   // ボイスキーホルダー（Wi-Fi もマイクも使わず、ボタンで登録済みの声を鳴らす）
 };
 DeviceMode currentMode = MODE_CONNECTING;
 
@@ -145,6 +148,7 @@ struct ChimeTone {
 const ChimeTone CHIME_SLEEP[] = {{880, 330, 350}};
 const ChimeTone CHIME_WAKE[] = {{330, 880, 250}};
 const ChimeTone CHIME_BOOT[] = {{660, 660, 130}, {0, 0, 50}, {990, 990, 200}};
+const ChimeTone CHIME_KEYHOLDER[] = {{523, 523, 90}, {0, 0, 30}, {659, 659, 90}, {0, 0, 30}, {784, 784, 180}};  // キーホルダーモードで起動
 
 // LED状態（PWMなし、digitalWriteのみ）
 enum LEDMode {
@@ -928,13 +932,18 @@ void IRAM_ATTR onLEDTimer() {
 // ==== ボタンの見張り（0.7.28）====
 // 押したことを、loop() が返答の再生などで止まっている間も数えておく（10ms ごとに読む小さなタスク）。
 // 再生を即座に止める割り込み（onBargeInButton）はそのまま。ここは「何回押したか」だけを見る:
-//   - 2回押し（DOUBLE_PRESS_MS 以内）→ 休む（無音3分を待たずに自分で止める）
+//   - 2回押し（DOUBLE_PRESS_MS 以内）→ 休む（無音3分を待たずに自分で止める）。3回目が来ないのを DOUBLE_PRESS_MS 待ってから
+//   - 3回押し → 会話モードとキーホルダーモードを切り替える（0.7.31）
 //   - 休み中の1回押し → 聞き取りに戻る
-//   - BLE 設定中の1回押し → 設定をやめて、保存済みの Wi-Fi で起動し直す
+//   - BLE 設定中の1回押し → 設定をやめて、保存済みの Wi-Fi で起動し直す（3回目が来ないのを待ってから）
+//   - BLE 設定中の3回押し → キーホルダーモードへ（Wi-Fi の無い場所でも切り替えられるように。0.7.32）
 // 長押し（BLE 設定へ）は従来どおり handleButtonLongPress が見る。
 const uint32_t DOUBLE_PRESS_MS = 600;
 static volatile uint32_t buttonPressSeq = 0;                              // 押すたびに 1 増える
 static volatile uint32_t buttonLastPressMs = 0, buttonPrevPressMs = 0;    // 最後とその前に押した時刻
+static volatile uint8_t buttonRun = 0;     // DOUBLE_PRESS_MS 以内の間隔で続けて押した回数（単発 = 1）
+static uint8_t buttonTakenRun = 1;         // takeButtonPress が最後に受け取った押下の、続けて押した回数
+static uint32_t buttonRunFloorSeq = 0;     // この番号までの押下は、続けて押した回数に数えない（休みから起こした押下）
 static uint32_t buttonSeenSeq = 0;         // loop() が受け取り済みの番号
 static uint32_t doublePressFloorMs = 0;    // この時刻の押下は「2回押しの1回目」に数えない（休みから起こした押下）
 
@@ -948,8 +957,11 @@ void buttonWatchTask(void*) {
         down = now;
         differ = 0;
         if (down) {
+          const uint32_t t = millis();
+          const uint8_t run = buttonRun;
+          buttonRun = (buttonPressSeq > 0 && t - buttonLastPressMs <= DOUBLE_PRESS_MS) ? (run < 250 ? run + 1 : run) : 1;
           buttonPrevPressMs = buttonLastPressMs;
-          buttonLastPressMs = millis();
+          buttonLastPressMs = t;
           buttonPressSeq = buttonPressSeq + 1;
         }
       }
@@ -960,19 +972,25 @@ void buttonWatchTask(void*) {
   }
 }
 
-// 新しい押下があれば true。isDouble は、直前の押下から DOUBLE_PRESS_MS 以内に押したか
+// 新しい押下があれば true。isDouble は、直前の押下から DOUBLE_PRESS_MS 以内に押したか。
+// 続けて押した回数（2回押し・3回押し）は buttonTakenRun に入る
 bool takeButtonPress(bool& isDouble) {
   uint32_t seq, last, prev;
+  uint8_t run;
   do {  // タスクが書いている途中の値を読まないよう、番号が変わっていたら読み直す
     seq = buttonPressSeq;
     last = buttonLastPressMs;
     prev = buttonPrevPressMs;
+    run = buttonRun;
   } while (seq != buttonPressSeq);
   isDouble = false;
   if (seq == buttonSeenSeq) return false;
   buttonSeenSeq = seq;
   isDouble = seq >= 2 && prev != doublePressFloorMs && last - prev <= DOUBLE_PRESS_MS
              && millis() - last < 3000;  // 古い押下（長い処理の前のもの）では動かさない
+  if (run < 1 || millis() - last >= 3000) run = 1;
+  if (seq - buttonRunFloorSeq < run) run = (uint8_t)(seq - buttonRunFloorSeq);  // 起こした押下より後だけ数える
+  buttonTakenRun = isDouble ? (run < 2 ? 2 : run) : 1;
   return true;
 }
 
@@ -2957,9 +2975,18 @@ void setup() {
 
   pinMode(PIN_AMP_SD, OUTPUT);
   digitalWrite(PIN_AMP_SD, LOW);
-  attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), onBargeInButton, FALLING);
+  // キーホルダーモードで起動するか（前回のモードを NVS から読む。音声が無ければ会話モードで続ける）
+  const bool keyholderBoot = loadKeyholderMode() && beginKeyholderMode();
+  // 再生を即座に止める割り込みは会話モードだけ（キーホルダーモードの押下は「次を鳴らす」なので、アンプを切らない）
+  if (!keyholderBoot) attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), onBargeInButton, FALLING);
   if (xTaskCreatePinnedToCore(buttonWatchTask, "button", 2048, nullptr, 1, nullptr, 0) != pdPASS) {
     Serial.println("[BUTTON] watch task allocation failed; double press / wake / BLE cancel disabled");
+  }
+  if (keyholderBoot) {
+    // Wi-Fi・マイク・TLS・Soniox は起動しない。合図の音を鳴らして、ボタンを待つ
+    setLEDMode(LED_OFF);
+    playChime(CHIME_KEYHOLDER, sizeof(CHIME_KEYHOLDER) / sizeof(CHIME_KEYHOLDER[0]));
+    return;
   }
 
   if (!tls_memory::init()) {
@@ -3084,6 +3111,110 @@ void playChime(const ChimeTone* tones, size_t count) {
   releaseI2sChannel(playbackTx);
 }
 
+// ==== ボイスキーホルダーモード（0.7.31）====
+// voices 区画に入れてある声を、ボタンを押すたびに1つ鳴らす。Wi-Fi もマイクも使わない。
+//   - 押す → 次の声（順番はシャッフル。鳴っている途中で押すと、止めて次の声）
+//   - 3回押し → 会話モードへ（会話モードからも、BLE 設定中＝Wi-Fi につながらない時からも、3回押しで来る）
+// モードは NVS（mode/keyholder）に残し、切り替えは再起動で行う（電源を入れ直しても同じモードで始まる）。
+// 入れ物の形と ADPCM の展開は VoiceKeyholder.h、声を作って書く道具は tools/make-voices.mjs。
+static voicekey::Store voiceStore;
+static voicekey::Shuffle voiceShuffle;
+
+bool loadKeyholderMode() {
+  Preferences prefs;
+  if (!prefs.begin("mode", true)) return false;  // 一度も切り替えていない本体には名前空間が無い
+  const bool on = prefs.getBool("keyholder", false);
+  prefs.end();
+  return on;
+}
+
+void saveKeyholderMode(bool on) {
+  Preferences prefs;
+  if (!prefs.begin("mode", false)) return;
+  prefs.putBool("keyholder", on);
+  prefs.end();
+}
+
+// 起動時（setup）。鳴らせる声が無ければ、モードを会話に戻して false
+bool beginKeyholderMode() {
+  if (!voiceStore.begin(SAMPLE_RATE_TTS)) {
+    Serial.printf("[KEYHOLDER] no voices (%s); back to conversation mode\n", voiceStore.error());
+    saveKeyholderMode(false);
+    return false;
+  }
+  voiceShuffle.begin(voiceStore.count());
+  currentMode = MODE_KEYHOLDER;
+  Serial.printf("[KEYHOLDER] start clips=%u (3 presses: conversation mode)\n", (unsigned)voiceStore.count());
+  return true;
+}
+
+// モードを保存して再起動する。会話モードから呼んで声が無いときは、何もせず戻る
+void switchDeviceMode(bool toKeyholder) {
+  if (toKeyholder) {
+    // OTA で入れた直後（有効印の前）に再起動すると、ブートローダーが前の版へ戻してしまう
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    const esp_partition_t* running = esp_ota_get_running_partition();
+    if (running && esp_ota_get_state_partition(running, &state) == ESP_OK && state == ESP_OTA_IMG_PENDING_VERIFY) {
+      Serial.println("[KEYHOLDER] firmware not confirmed yet; staying in conversation mode");
+      return;
+    }
+    if (!voiceStore.begin(SAMPLE_RATE_TTS)) {
+      Serial.printf("[KEYHOLDER] no voices (%s); staying in conversation mode\n", voiceStore.error());
+      return;
+    }
+  }
+  saveKeyholderMode(toKeyholder);
+  Serial.printf("[KEYHOLDER] switching to %s mode (restart)\n", toKeyholder ? "keyholder" : "conversation");
+  Serial.flush();
+  setLEDMode(LED_BLINK_FAST);
+  delay(300);
+  ESP.restart();
+}
+
+// 1件鳴らす。鳴らしている間に押されたら、すぐ止めて戻る（その押下は受け取らずに残す）
+void playKeyholderClip(size_t index) {
+  const voicekey::Clip& clip = voiceStore.clip(index);
+  const uint32_t startSeq = buttonPressSeq;
+  const uint32_t t0 = millis();
+  if (!setupI2SPlay()) return;
+  playbackLimiter.reset();
+  digitalWrite(PIN_AMP_SD, HIGH);
+  ampOn = true;
+  setLEDMode(LED_ON);
+  delay(20);
+  static int16_t mono[240], stereo[480];  // 10ms ずつ
+  voicekey::AdpcmDecoder decoder;
+  size_t written = 0;
+  uint32_t done = 0;
+  while (done < clip.samples && buttonPressSeq == startSeq) {
+    const uint32_t n = min((uint32_t)240, clip.samples - done);
+    decoder.decode(clip, done, n, mono);
+    monoToStereo(mono, stereo, n);
+    writePlaybackI2s(stereo, n * 4, &written, portMAX_DELAY);
+    done += n;
+  }
+  // 最後まで鳴らしたら、DMA に残った音（最大 0.34 秒ぶん）が出終わるまで待つ。押されたら待たずに切る
+  for (uint32_t waited = 0; done >= clip.samples && waited < 400 && buttonPressSeq == startSeq; waited += 10) delay(10);
+  const bool interrupted = buttonPressSeq != startSeq;
+  digitalWrite(PIN_AMP_SD, LOW);
+  ampOn = false;
+  releaseI2sChannel(playbackTx);
+  setLEDMode(LED_OFF);
+  Serial.printf("[KEYHOLDER] played clip=%u samples=%lu/%lu ms=%lu interrupted=%d\n", (unsigned)index,
+                (unsigned long)done, (unsigned long)clip.samples, (unsigned long)(millis() - t0), interrupted);
+}
+
+// キーホルダーモードの loop()
+void serviceKeyholder() {
+  bool isDouble = false;
+  if (!takeButtonPress(isDouble)) {
+    delay(10);
+    return;
+  }
+  if (buttonTakenRun >= 3) switchDeviceMode(false);  // 再起動して戻らない
+  playKeyholderClip(voiceShuffle.next());
+}
+
 // 休み中の LED（PWM）をやめて、いつもの digitalWrite に戻す
 void leaveIdleSleepLed() {
   idleSleeping = false;
@@ -3141,6 +3272,7 @@ void serviceIdleSleep() {
   bool isDouble = false;
   if (takeButtonPress(isDouble)) {
     doublePressFloorMs = buttonLastPressMs;  // 起こした押下を、次の2回押しの1回目に数えない
+    buttonRunFloorSeq = buttonSeenSeq;
     exitIdleSleep("button");
     return;
   }
@@ -3224,17 +3356,35 @@ void handleButtonLongPress() {
 
 // ==== LOOP ====
 void loop() {
+  if (currentMode == MODE_KEYHOLDER) {
+    serviceKeyholder();
+    return;
+  }
   if (currentMode == MODE_BLE_PROV) {
     finishSonioxPreconnect(); // collect cancelled job without touching a running socket
     {
       // 1回押し: BLE 設定をやめて起動し直す（保存済みの Wi-Fi で通常の動作に戻る）。
-      // Wi-Fi 設定が無い（初回の設定待ち）ときは戻る先が無いので何もしない
+      // Wi-Fi 設定が無い（初回の設定待ち）ときは戻る先が無いので何もしない。
+      // 3回押し: キーホルダーモードへ（0.7.32）。Wi-Fi の無い場所では起動するとここ（BLE 設定）に来るので、
+      // ここで受けないと外で切り替えられない。1回押しは、3回目が来ないのを DOUBLE_PRESS_MS 待ってから扱う
+      static uint32_t blePressPendingMs = 0;
       bool isDouble = false;
-      if (takeButtonPress(isDouble) && wifiSSID.length() > 0) {
-        Serial.println("[BLE] button pressed; leaving BLE provisioning (restart with saved Wi-Fi)");
-        Serial.flush();
-        delay(100);
-        ESP.restart();
+      if (takeButtonPress(isDouble)) {
+        if (buttonTakenRun >= 3) {
+          blePressPendingMs = 0;
+          switchDeviceMode(true);  // 切り替えられたら再起動して戻らない。声が無ければ BLE 設定を続ける
+        } else {
+          blePressPendingMs = buttonLastPressMs | 1;
+        }
+      }
+      if (blePressPendingMs && millis() - blePressPendingMs > DOUBLE_PRESS_MS) {
+        blePressPendingMs = 0;
+        if (wifiSSID.length() > 0) {
+          Serial.println("[BLE] button pressed; leaving BLE provisioning (restart with saved Wi-Fi)");
+          Serial.flush();
+          delay(100);
+          ESP.restart();
+        }
       }
     }
     handleButtonLongPress();
@@ -3258,8 +3408,19 @@ void loop() {
   watchSttConnection();
   if (idleSleeping) return;
   {
+    // 2回押しは、3回目（モードの切り替え）が来ないのを DOUBLE_PRESS_MS 待ってから休む
+    static uint32_t doublePressPendingMs = 0;
     bool isDouble = false;
-    if (takeButtonPress(isDouble) && isDouble) {
+    if (takeButtonPress(isDouble)) {
+      if (buttonTakenRun >= 3) {
+        doublePressPendingMs = 0;
+        switchDeviceMode(true);  // 切り替えられたら再起動して戻らない。音声が無ければ何もせず続ける
+      } else {
+        doublePressPendingMs = isDouble ? (buttonLastPressMs | 1) : 0;
+      }
+    }
+    if (doublePressPendingMs && millis() - doublePressPendingMs > DOUBLE_PRESS_MS) {
+      doublePressPendingMs = 0;
       enterIdleSleep(0, "double press");
       return;
     }
