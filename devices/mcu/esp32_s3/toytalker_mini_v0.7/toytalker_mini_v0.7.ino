@@ -882,6 +882,10 @@ void startBLE() {
 
   Serial.println("🔵 BLE advertising started - Device name: ToyTalk-Setup");
   currentMode = MODE_BLE_PROV;
+  {
+    bool ignored = false;
+    takeButtonPress(ignored);  // 長押しそのものを「やめる押下」に数えない
+  }
   // 録音中はLEDタイマーが停止しているため再開（長押しでBLEに入った場合の点滅不具合対策）
   if (ledTimer) timerAlarm(ledTimer, 30000, true, 0);
   setLEDMode(LED_BLINK_FAST);
@@ -910,6 +914,57 @@ void IRAM_ATTR onLEDTimer() {
       digitalWrite(PIN_LED, blinkState ? HIGH : LOW);
     }
   }
+}
+
+// ==== ボタンの見張り（0.7.28）====
+// 押したことを、loop() が返答の再生などで止まっている間も数えておく（10ms ごとに読む小さなタスク）。
+// 再生を即座に止める割り込み（onBargeInButton）はそのまま。ここは「何回押したか」だけを見る:
+//   - 2回押し（DOUBLE_PRESS_MS 以内）→ 休む（無音3分を待たずに自分で止める）
+//   - 休み中の1回押し → 聞き取りに戻る
+//   - BLE 設定中の1回押し → 設定をやめて、保存済みの Wi-Fi で起動し直す
+// 長押し（BLE 設定へ）は従来どおり handleButtonLongPress が見る。
+const uint32_t DOUBLE_PRESS_MS = 600;
+static volatile uint32_t buttonPressSeq = 0;                              // 押すたびに 1 増える
+static volatile uint32_t buttonLastPressMs = 0, buttonPrevPressMs = 0;    // 最後とその前に押した時刻
+static uint32_t buttonSeenSeq = 0;         // loop() が受け取り済みの番号
+static uint32_t doublePressFloorMs = 0;    // この時刻の押下は「2回押しの1回目」に数えない（休みから起こした押下）
+
+void buttonWatchTask(void*) {
+  bool down = false;   // チャタリングを除いた状態（30ms 続いたら切り替える）
+  uint8_t differ = 0;
+  for (;;) {
+    const bool now = digitalRead(PIN_BUTTON) == LOW;
+    if (now != down) {
+      if (++differ >= 3) {
+        down = now;
+        differ = 0;
+        if (down) {
+          buttonPrevPressMs = buttonLastPressMs;
+          buttonLastPressMs = millis();
+          buttonPressSeq = buttonPressSeq + 1;
+        }
+      }
+    } else {
+      differ = 0;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
+}
+
+// 新しい押下があれば true。isDouble は、直前の押下から DOUBLE_PRESS_MS 以内に押したか
+bool takeButtonPress(bool& isDouble) {
+  uint32_t seq, last, prev;
+  do {  // タスクが書いている途中の値を読まないよう、番号が変わっていたら読み直す
+    seq = buttonPressSeq;
+    last = buttonLastPressMs;
+    prev = buttonPrevPressMs;
+  } while (seq != buttonPressSeq);
+  isDouble = false;
+  if (seq == buttonSeenSeq) return false;
+  buttonSeenSeq = seq;
+  isDouble = seq >= 2 && prev != doublePressFloorMs && last - prev <= DOUBLE_PRESS_MS
+             && millis() - last < 3000;  // 古い押下（長い処理の前のもの）では動かさない
+  return true;
 }
 
 // ==== LED の合図（0.7.27）====
@@ -2893,6 +2948,9 @@ void setup() {
   pinMode(PIN_AMP_SD, OUTPUT);
   digitalWrite(PIN_AMP_SD, LOW);
   attachInterrupt(digitalPinToInterrupt(PIN_BUTTON), onBargeInButton, FALLING);
+  if (xTaskCreatePinnedToCore(buttonWatchTask, "button", 2048, nullptr, 1, nullptr, 0) != pdPASS) {
+    Serial.println("[BUTTON] watch task allocation failed; double press / wake / BLE cancel disabled");
+  }
 
   if (!tls_memory::init()) {
     Serial.println("[TLS_MEM] startup stopped before network connections");
@@ -3014,8 +3072,12 @@ void leaveIdleSleepLed() {
   digitalWrite(PIN_LED, LOW);
 }
 
-void enterIdleSleep(uint32_t idleMs) {
-  Serial.printf("[IDLE] sleep: no text for %lus; closing Soniox (button to wake)\n", (unsigned long)(idleMs / 1000));
+void enterIdleSleep(uint32_t idleMs, const char* why = "no text") {
+  Serial.printf("[IDLE] sleep (%s, idle %lus); closing Soniox (button to wake)\n", why, (unsigned long)(idleMs / 1000));
+  {
+    bool ignored = false;
+    takeButtonPress(ignored);  // ここまでの押下は受け取り済みにする
+  }
   sttWanted = false;
   isRecording = false;
   sttDownSinceMs = sttUpSinceMs = 0;
@@ -3052,19 +3114,14 @@ void exitIdleSleep(const char* why) {
 
 // 休み中の loop()。ws.loop() は呼ばない（ライブラリが自分でつなぎ直してしまう）
 void serviceIdleSleep() {
-  static uint32_t lowSinceMs = 0;
   finishSonioxPreconnect();  // 取り消した先行接続があれば回収する
   handleButtonLongPress();
   if (currentMode != MODE_NORMAL || !idleSleeping) return;  // 長押しで BLE 設定へ入った
-  if (digitalRead(PIN_BUTTON) == LOW) {
-    if (!lowSinceMs) lowSinceMs = millis() | 1;
-    else if (millis() - lowSinceMs >= debounceDelay) {
-      lowSinceMs = 0;
-      exitIdleSleep("button");
-      return;
-    }
-  } else {
-    lowSinceMs = 0;
+  bool isDouble = false;
+  if (takeButtonPress(isDouble)) {
+    doublePressFloorMs = buttonLastPressMs;  // 起こした押下を、次の2回押しの1回目に数えない
+    exitIdleSleep("button");
+    return;
   }
   // 明滅: 0 → 明るい → 0 を IDLE_BREATH_MS で1回。目に自然に見えるよう2乗する
   const float x = 0.5f - 0.5f * cosf(2.0f * PI * ((millis() - idleSleepStartMs) % IDLE_BREATH_MS) / IDLE_BREATH_MS);
@@ -3148,6 +3205,17 @@ void handleButtonLongPress() {
 void loop() {
   if (currentMode == MODE_BLE_PROV) {
     finishSonioxPreconnect(); // collect cancelled job without touching a running socket
+    {
+      // 1回押し: BLE 設定をやめて起動し直す（保存済みの Wi-Fi で通常の動作に戻る）。
+      // Wi-Fi 設定が無い（初回の設定待ち）ときは戻る先が無いので何もしない
+      bool isDouble = false;
+      if (takeButtonPress(isDouble) && wifiSSID.length() > 0) {
+        Serial.println("[BLE] button pressed; leaving BLE provisioning (restart with saved Wi-Fi)");
+        Serial.flush();
+        delay(100);
+        ESP.restart();
+      }
+    }
     handleButtonLongPress();
     if (!bleDeviceConnected && oldBleDeviceConnected) {
       delay(500);
@@ -3168,6 +3236,13 @@ void loop() {
   if (currentMode != MODE_NORMAL) return;  // 長押しで BLE 設定へ入った
   watchSttConnection();
   if (idleSleeping) return;
+  {
+    bool isDouble = false;
+    if (takeButtonPress(isDouble) && isDouble) {
+      enterIdleSleep(0, "double press");
+      return;
+    }
+  }
   pollPlaybackGainSerial();
 
   // ボタンデバウンス
