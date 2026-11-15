@@ -34,7 +34,7 @@ B の結果で使う LLM と声が変わり、対象年齢と売る国で A・C 
 
 ## B. API 事業者の規約（最初に確かめる）
 
-公表すれば済む話ではなく、規約が許さなければ事業者を替えるしかない。対象は `privacy.html` の表の事業者: Soniox、Google（Gemini）、OpenAI、Anthropic、ElevenLabs、Cartesia、Fish Audio、さくらインターネット、Brave。
+公表すれば済む話ではなく、規約が許さなければ事業者を替えるしかない。**時期: 販売の直前まで待たず、LLM や声まわりに次に手を入れるときに先に済ませる**（結果しだいで主の LLM（いまは Gemini）を替えることになり、後になるほど手戻りが増える。2026-11-15）。対象は `privacy.html` の表の事業者: Soniox、Google（Gemini）、OpenAI、Anthropic、ElevenLabs、Cartesia、Fish Audio、さくらインターネット、Brave。
 
 事業者ごとに確かめること:
 
