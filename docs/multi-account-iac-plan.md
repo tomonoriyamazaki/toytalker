@@ -1,6 +1,6 @@
 # 複数アカウント展開とIaC化の計画（2026-09-15決定）
 
-今のAWSアカウントをRnDにし、STG → 自分用本番 → DG（西川さん）向け本番へ展開するための計画。道具はAWS CDK（TypeScript）。この文書は「何を決めたか、なぜか」を持つ。いまの状態と残作業の順番は [ロードマップ](roadmap.md)、コードと手順は [infra/README.md](../infra/README.md)。
+今のAWSアカウントをRnDにし、STG → 自分用本番 → 西川さん向け本番（`prd-nk`。この文書の「DG向け本番」と同じもの。2026-11-15 に `prd-dg` から改名）へ展開するための計画。**どの環境も自分の AWS 組織の中に作る**（2026-11-15: 会話を溜める懸念から DG 側の環境に置かせてもらう案を出したが、本番系は会話の文章を保存しないと決めたので取り下げた。[先送り項目](deferred-items.md) の「会話ログの保持期間」）。道具はAWS CDK（TypeScript）。この文書は「何を決めたか、なぜか」を持つ。いまの状態と残作業の順番は [ロードマップ](roadmap.md)、コードと手順は [infra/README.md](../infra/README.md)。
 
 ## 決定事項
 
@@ -27,7 +27,7 @@
 | 管理アカウント（ToyTalkerのRnDが同居） | `management` | 342082316736 | `exodjp@gmail.com`（変えない） | `toytalker-rnd`（SSO。`default` も同じSSOに向けた。2026-10-25） | 稼働中。他プロジェクトの資源・公開S3もある。ToyTalker分は CloudFormation `ToyTalker-rnd`、`stages.ts` の `rnd` |
 | STG | `toytalker-stg` | 131746731200 | `exodjp+toytalker-stg@gmail.com` | `toytalker-stg` | 2026-10-14作成（`create-account`、8秒で完了）。2026-10-15 `cdk bootstrap` 済み（`CDKToolkit`）、2026-10-16 SSM鍵11件投入済み（RnDと同じ値）。deployはロードマップ3 |
 | 自分用本番 | `toytalker-prd` | 未作成 | `exodjp+toytalker-prd@gmail.com` | `toytalker-prd` | ロードマップ7 |
-| DG向け本番 | `toytalker-prd-dg` | 未作成 | `exodjp+toytalker-prd-dg@gmail.com` | `toytalker-prd-dg` | ロードマップ7 |
+| DG向け本番 | `toytalker-prd-nk` | 未作成 | `exodjp+toytalker-prd-nk@gmail.com` | `toytalker-prd-nk` | ロードマップ7 |
 | 検証用（2019年参加の旧子アカウント） | `sandbox-1` | 586464890779 | `exodjp+sandbox-1@gmail.com`（旧 `exodjp@nifty.com`、解約済み） | `sandbox-1` | 中身未確認。費用$0。ToyTalkerには使わない |
 | 検証用（同上） | `sandbox-2` | 499135248182 | `exodjp+sandbox-2@gmail.com`（旧 `exodjp@yahoo.co.jp`） | `sandbox-2` | 同上 |
 
@@ -55,7 +55,7 @@
 ### 決めたこと（2026-09-16、秘密と鍵）
 
 - 秘密はSecrets Managerでなく **SSM SecureString**（1件$0.40/月が不要。ローテーション・アカウント間共有を使わないため）。
-- 鍵はAWS管理キー。**CMKは本番アカウントで入れる**（DG向け本番で他の人が入る時点で効く。1鍵約$1/月）。RnD/STGはAWS管理キーのまま（自分1人なので門が増えない。2026-10-15再確認）。対象は環境変数から鍵を外したのでSSMだけ。ロードマップ7の着手時に決める: 自分用本番にも入れるか、DG向け本番で会話ログのDynamoDBにも入れるか（顧客への説明用）。後から足せる（SSMは入れ直し、DynamoDBは稼働中に切替可）。
+- 鍵はAWS管理キー。**CMKは本番アカウントで入れる**（DG向け本番で他の人が入る時点で効く。1鍵約$1/月）。RnD/STGはAWS管理キーのまま（自分1人なので門が増えない。2026-10-15再確認）。対象は環境変数から鍵を外したのでSSMだけ。ロードマップ7の着手時に決める: 自分用本番にも入れるか、DG向け本番で会話ログのDynamoDBにも入れるか（顧客への説明用。**2026-11-15: 本番系は会話の文章を保存しないので、`chat-logs` は調査で一時的に残した分だけになる。それでも入れるかを決める**）。後から足せる（SSMは入れ直し、DynamoDBは稼働中に切替可）。
 - STG用に鍵を分けるのは見送り、RnDと同じ値を写した（2026-10-16）。本番では分ける。
 - ファーム配布バケット `toytalker-firmware` はCDKの管理外（`fromBucketName` で参照のみ）。名前は `stages.ts` の `firmwareBucketName`。ファームは環境に属さず全機共通なので、環境ごとのスタックへ `cdk import` するのは合わない。置くアカウントと管理方法はロードマップ9で決める（2026-10-25）。
 
@@ -110,7 +110,7 @@ RnDでCDKを完成させてから、同じコードをSTG・本番にまっさ�
 
 ## 命名（決定）
 
-2026-09-16に案を出し、2026-10-12に決定。**規則は [命名規則](naming-conventions.md)**（`toytalker-<機能>-<環境>`、環境は `rnd` / `stg` / `prd` / `prd-dg`、種類の接尾辞なし、タグ `project` / `environment`）。ここには既存RnD資源の新旧対応と、改名の影響・順番だけを置く。`stages.ts` の `prod` / `prod-dg` は2026-10-13に `prd` / `prd-dg` へ直した（アカウント未作成なので資源への影響なし）。
+2026-09-16に案を出し、2026-10-12に決定。**規則は [命名規則](naming-conventions.md)**（`toytalker-<機能>-<環境>`、環境は `rnd` / `stg` / `prd` / `prd-nk`、種類の接尾辞なし、タグ `project` / `environment`）。ここには既存RnD資源の新旧対応と、改名の影響・順番だけを置く。`stages.ts` の `prod` / `prod-dg` は2026-10-13に `prd` / `prd-nk` へ直した（アカウント未作成なので資源への影響なし）。
 
 ### Lambda
 

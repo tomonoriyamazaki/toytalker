@@ -253,6 +253,8 @@ const AUTH_ENV = ["AUTH_REQUIRED", "COGNITO_USER_POOL_ID", "COGNITO_CLIENT_ID"] 
 const ESP32_AUTH_ENV = ["AUTH_REQUIRED", "DEVICE_KEY_ENROLL"] as const;
 /** 前払いポイントの残高確認（backend/shared/wallet.mjs の checkBalance）。残高を確かめる Lambda に配る */
 const WALLET_ENV = ["WALLET_STOP_AT_ZERO"] as const;
+/** 会話の文章を chat-logs に残すか（backend/shared/chat-log.mjs）。会話の本文を扱う Lambda に配る */
+const CHAT_LOG_ENV = ["CHAT_LOG_SAVE"] as const;
 
 const TTS_SECRETS = [
   "OPENAI_API_KEY",
@@ -288,6 +290,7 @@ export function configEnv(config: StageConfig): Record<string, string> {
     AUTH_REQUIRED: String(config.auth.required),
     DEVICE_KEY_ENROLL: String(config.deviceKeyEnroll),
     WALLET_STOP_AT_ZERO: String(config.wallet.stopAtZero),
+    CHAT_LOG_SAVE: String(config.chatLog.save),
     CARTESIA_DEFAULT_VOICE_ID: config.cartesiaDefaultVoiceId,
     ZAKICORP_TTS_URL: config.zakicorpTtsUrl,
     SONIOX_MODEL: config.sonioxModel,
@@ -305,7 +308,7 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 120,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, ...ESP32_AUTH_ENV, ...WALLET_ENV],
+    env: [...TTS_ENV, ...ESP32_AUTH_ENV, ...WALLET_ENV, ...CHAT_LOG_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-mcu" },
     warm: true,
@@ -324,7 +327,7 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 2048,
     timeoutSeconds: 120,
     format: "esm",
-    env: [...TTS_ENV, ...AUTH_ENV, ...WALLET_ENV],
+    env: [...TTS_ENV, ...AUTH_ENV, ...WALLET_ENV, ...CHAT_LOG_ENV],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-app" },
     warm: true,

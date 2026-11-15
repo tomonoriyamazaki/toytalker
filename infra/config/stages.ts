@@ -1,7 +1,7 @@
 // 環境ごとの設定。秘密でない値だけを置く（秘密は各アカウントのSSM Parameter Store。lib/secrets.ts）。
 // 選択は `cdk deploy --context stage=<name>`。
 
-export type StageName = "rnd" | "stg" | "prd" | "prd-dg";
+export type StageName = "rnd" | "stg" | "prd" | "prd-nk";
 
 /**
  * アプリの設定画面「音声認識」の選択肢（ロードマップ18）。一時キーLambda（/stt-token）がアプリへ `stt_options` として配り、
@@ -100,6 +100,13 @@ export interface StageConfig {
    * 本番は製造時に鍵を登録する手順（ロードマップ4）が決まるまで true
    */
   readonly deviceKeyEnroll: boolean;
+  /**
+   * 会話の文章（発話・返答）を chat-logs に残すか（backend/shared/chat-log.mjs）。環境変数 CHAT_LOG_SAVE で会話の Lambda へ渡す。
+   * 既定は残さない（2026-11-15決定。子どもの会話を運営側に溜めない）。RnD だけ不具合の調査用に残す。
+   * 行ごとの上書き: devices（ESP32）/ users（アプリ）の行の chat_log（true / false）がこの既定より優先する。デプロイ無しで効く。
+   * 残さない環境でも原価は台帳に書く。アプリの会話履歴画面は空になる
+   */
+  readonly chatLog: { readonly save: boolean };
   /**
    * 利用者認証（ロードマップ4、docs/auth.md）。Cognito ユーザープール `toytalker-auth-<環境>` を作り、Lambda が ID トークンを検証する
    * （backend/shared/auth.mjs）。
@@ -200,6 +207,7 @@ const common = {
   architecture: "x86_64",
   wallet: { stopAtZero: true },
   deviceKeyEnroll: true,
+  chatLog: { save: false },
 } as const;
 
 export const stages: Record<StageName, StageConfig> = {
@@ -215,6 +223,7 @@ export const stages: Record<StageName, StageConfig> = {
     apiDomain: "api-rnd.zakicorp.com",
     directFunctionUrls: true, // 配布機（OTA非対応の旧ファーム）と旧アプリが Function URL を直接呼ぶ間は true。ロードマップ6の書き換え後に false
     wallet: { stopAtZero: false }, // 2026-11-03決定。財布の無い外部テスター等が黙って止まっていたため
+    chatLog: { save: true }, // 開発中の「変な返答をした」を調べる手段。本番系は既定（残さない）
     auth: {
       required: false,
       domainPrefix: "toytalker-auth-rnd",
@@ -268,17 +277,17 @@ export const stages: Record<StageName, StageConfig> = {
     // 1ターン = 本文1 + 相槌1、Soniox鍵は3分に1回。家庭のNATの裏に数台いても 5分で300 には届かない。費用燃やしの天井が目的で、精密な値ではない
     apiRateLimitPer5Min: 300,
   },
-  "prd-dg": {
+  "prd-nk": {
     ...common,
-    stage: "prd-dg",
+    stage: "prd-nk",
     account: "",
     legacyNames: false,
-    tableSuffix: "-prd-dg",
-    speakersBucketName: "toytalker-tts-speakers-prd-dg",
-    firmwareBucketName: "toytalker-firmware-prd-dg",
-    apiDomain: "api-prd-dg.zakicorp.com",
+    tableSuffix: "-prd-nk",
+    speakersBucketName: "toytalker-tts-speakers-prd-nk",
+    firmwareBucketName: "toytalker-firmware-prd-nk",
+    apiDomain: "api-prd-nk.zakicorp.com",
     directFunctionUrls: false,
-    auth: { required: true, domainPrefix: "toytalker-auth-prd-dg" },
+    auth: { required: true, domainPrefix: "toytalker-auth-prd-nk" },
     billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: true },
     apiRateLimitPer5Min: 300,
   },

@@ -17,6 +17,7 @@ import { jstDate } from "../shared/jst.mjs";
   import { startTrace, describeClient, describePrevTurn, describeDevice, errorStatus } from "../shared/trace.mjs";
   import { recordDeviceStatus } from "../shared/device-status.mjs";
 import { checkDeviceKey, deviceGate } from "../shared/auth.mjs";
+import { chatLogEnabled } from "../shared/chat-log.mjs";
 
   // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
   // 会話の間が数秒空くとLLM/TTSへのTLS接続が閉じられ、次のターンで
@@ -745,6 +746,9 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     // 持ち主は機器の行で決まる。残高の確認をここで始め、キャラクター以降の読み込みと並べる（待つのは下）。
     // 門（未登録機・デバイス鍵）を通ってから始めるので、拒否で返るときに読みかけの要求は残らない
     if (deviceRow?.owner_id) { ownerId = deviceRow.owner_id; trace.set({ owner_id: ownerId }); }
+    // 会話の文章を残すか（backend/shared/chat-log.mjs。環境の既定を、機器の行の chat_log が上書きする）
+    const chatLog = chatLogEnabled(deviceRow);
+    trace.set({ chat_log: chatLog });
     const balanceCheck = checkBalance(ownerId);
     // 本体の状態（電池・温度・充電）を機器の行に残す（backend/shared/device-status.mjs。数分おきか充電状態が変わったとき）。
     // キャラクターの読み込みと並べて待つので、返事は遅れない。失敗しても会話は続ける
@@ -797,7 +801,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
 
     // ---- ユーザーメッセージ保存 ----
     const lastUserMsg = messages[messages.length - 1];
-    if (lastUserMsg?.role === "user" && sessionId !== "unknown") {
+    if (lastUserMsg?.role === "user" && sessionId !== "unknown" && chatLog) {
       saveLog({
         "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
         "session_id#timestamp": `session_id#${sessionId}#timestamp#${userTimestamp}`,
@@ -1136,7 +1140,7 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
           toolCostUsd += c.costUsd;
         }
 
-        if (textAll.trim()) await saveLog({
+        if (chatLog && textAll.trim()) await saveLog({
           "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
           "session_id#timestamp": `session_id#${sessionId}#timestamp#${assistantTimestamp}`,
           owner_id: ownerId, device_id: deviceId, source: "esp",

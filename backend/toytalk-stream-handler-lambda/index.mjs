@@ -14,6 +14,7 @@ import { jstDate } from "../shared/jst.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, searchCallArgs, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
   import { startTrace, describeClient, describePrevTurn, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
+import { chatLogEnabled } from "../shared/chat-log.mjs";
 
   // ---- 予備インスタンスの事前ウォームアップ ----
   // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
@@ -734,7 +735,11 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
     // ---- ログ用メタデータ ----
     const sessionId  = typeof body.session_id === "string" ? body.session_id : "unknown";
     // トークン付きなら users テーブルの owner_id（クライアントの自称は無視）。無しなら従来どおり本文の owner_id
-    const ownerId    = (await resolveOwner(identity, typeof body.owner_id === "string" ? body.owner_id : undefined)).ownerId ?? "user_123";
+    const owner      = await resolveOwner(identity, typeof body.owner_id === "string" ? body.owner_id : undefined);
+    const ownerId    = owner.ownerId ?? "user_123";
+    // 会話の文章を残すか（backend/shared/chat-log.mjs。環境の既定を、users の行の chat_log が上書きする）
+    const chatLog    = chatLogEnabled(owner.user);
+    trace.set({ chat_log: chatLog });
     const deviceId   = typeof body.device_id  === "string" ? body.device_id  : "app";
     const userTimestamp = new Date(requestAt).toISOString();
     const backchannelFired = !!body.backchannel_fired;
@@ -787,7 +792,7 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
 
     // ---- ユーザーメッセージ保存 ----
     const lastUserMsg = messages[messages.length - 1];
-    if (lastUserMsg?.role === "user" && sessionId !== "unknown") {
+    if (lastUserMsg?.role === "user" && sessionId !== "unknown" && chatLog) {
       saveLog({
         "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
         "session_id#timestamp": `session_id#${sessionId}#timestamp#${userTimestamp}`,
@@ -1160,7 +1165,7 @@ import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/au
         }
 
         // ログ保存（文章だけ。原価は台帳）
-        if (textAll.trim()) await saveLog({
+        if (chatLog && textAll.trim()) await saveLog({
           "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
           "session_id#timestamp": `session_id#${sessionId}#timestamp#${assistantTimestamp}`,
           owner_id: ownerId, device_id: deviceId, source: "app",

@@ -6,7 +6,7 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 
 **`toytalker-<機能>-<環境>`**。小文字とハイフンだけ。
 
-- 環境は `rnd` / `stg` / `prd` / `prd-dg`（3文字で揃える。`prd-dg` はDG向け本番）。環境＝アカウントなので、環境名は人が読むための印で、一覧の並びや IAM の前方一致には使わない。
+- 環境は `rnd` / `stg` / `prd` / `prd-nk`（3文字で揃える。`prd-nk` は西川さん向け本番。2026-11-15 に `prd-dg` から改名。アカウント未作成なので資源への影響なし）。環境＝アカウントなので、環境名は人が読むための印で、一覧の並びや IAM の前方一致には使わない。
 - 機能名は何語でもよい（`read-aloud-app`、`api-unit-prices`）。名前を機械的に分解する箇所は作らない。
 - 種類の接尾辞（`-lambda` `-table` `-bucket`）は付けない。ARN・ロググループ・コンソールが種類を示す。
 - Lambdaのうち、同じ機能でスマホ向け・ESP32向けの2本があるものは `-app` / `-mcu` を機能名の末尾に付ける（`mcu` は `devices/mcu/` に合わせた名前で、基板が変わっても持つ）。両方から使うものには付けない。
@@ -31,7 +31,7 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 | キー | 値 |
 |---|---|
 | `project` | `toytalker` |
-| `environment` | `rnd` / `stg` / `prd` / `prd-dg` |
+| `environment` | `rnd` / `stg` / `prd` / `prd-nk` |
 
 ### SSM Parameter Store
 
@@ -43,10 +43,10 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 
 | 項目 | 規則 | 例 |
 |---|---|---|
-| 組織上の名前 | ToyTalkerの環境は `toytalker-<環境>`。環境は資源名と同じ `stg` / `prd` / `prd-dg`。ToyTalker以外の検証用は `sandbox-<番号>`。管理アカウントは `management`（他プロジェクトの資源も持ち、ToyTalkerのRnDはここに同居する。RnDであることは `stages.ts` の `rnd` とタグが示す） | `toytalker-stg`、`sandbox-1`、`management` |
+| 組織上の名前 | ToyTalkerの環境は `toytalker-<環境>`。環境は資源名と同じ `stg` / `prd` / `prd-nk`。ToyTalker以外の検証用は `sandbox-<番号>`。管理アカウントは `management`（他プロジェクトの資源も持ち、ToyTalkerのRnDはここに同居する。RnDであることは `stages.ts` の `rnd` とタグが示す） | `toytalker-stg`、`sandbox-1`、`management` |
 | 主メール | `exodjp+<組織上の名前>@gmail.com`（gmailのプラスアドレス。受信箱は1つで、アカウントごとに別アドレスという要件を満たす）。管理アカウント（RnD）だけは既存の `exodjp@gmail.com` のまま | `exodjp+toytalker-stg@gmail.com` |
 | CLIプロファイル名 | 組織上の名前と同じ。Identity Center（SSO）のプロファイルで、アクセスキーは作らない。管理アカウントは当面 `default`（IAMユーザーのアクセスキー）も残る | `--profile toytalker-stg` |
-| `stages.ts` の環境名 | `<環境>` の部分と同じ（`rnd` / `stg` / `prd` / `prd-dg`） | `--context stage=stg` |
+| `stages.ts` の環境名 | `<環境>` の部分と同じ（`rnd` / `stg` / `prd` / `prd-nk`） | `--context stage=stg` |
 
 人の名前（`Tomonori Yamazaki`）は組織上のアカウント名に使わない。3アカウントが同名で区別できなかったため（2026-10-13）。
 
@@ -62,7 +62,7 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 
 ### 固定ドメイン
 
-**`api-<環境>.zakicorp.com`**（2026-10-29決定。`api-rnd` `api-stg` `api-prd` `api-prd-dg`）。正本は `infra/config/stages.ts` の `apiDomain`。CloudFront の別名で、DNS は Cloudflare の CNAME（DNS only）。本番の名前を短くしたくなったら7で見直す。
+**`api-<環境>.zakicorp.com`**（2026-10-29決定。`api-rnd` `api-stg` `api-prd` `api-prd-nk`）。正本は `infra/config/stages.ts` の `apiDomain`。CloudFront の別名で、DNS は Cloudflare の CNAME（DNS only）。本番の名前を短くしたくなったら7で見直す。
 
 ## DynamoDB のキー名・属性名
 
