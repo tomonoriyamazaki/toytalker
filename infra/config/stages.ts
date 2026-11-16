@@ -155,7 +155,7 @@ export interface StageConfig {
   /**
    * データ（DynamoDB・SSM）とは別のリージョンにも置く会話用 Lambda（lib/toytalker-satellite-stack.ts）。
    * リージョンごとにスタック `<スタック名>-<短縮名>`（us-west-2 → `-usw2`）を作り、ESP32 本文の Lambda と Function URL だけを置く。
-   * データは `region` のものを読む（環境変数 DATA_REGION）。2026-11-13: 海外からの距離の影響を測る実験（RnD のオレゴン）。
+   * データは `region` のものを読む（環境変数 DATA_REGION）。2026-11-13〜14 に RnD のオレゴンで試し、利点が無かったので 2026-11-17 に片付けた（今はどの環境にも無い。結果は infra/README）。
    * 無い環境は作らない。型と、足す・やめる順番は SatelliteConfig
    */
   readonly satellites?: readonly SatelliteConfig[];
@@ -235,12 +235,6 @@ export const stages: Record<StageName, StageConfig> = {
     backup: { retentionDays: 35 }, // 2026-10-27決定（同じアカウント、35日）。保管庫名は新規なので最初から新名
     billing: { buyPageUrl: "https://toytalker.zakicorp.com/buy", stripeLivemode: false }, // Stripe は sandbox（2026-11-02 作成）
     supportMail: { domain: "zakicorp.com", addresses: ["support@zakicorp.com", "toytalker-support@zakicorp.com"] }, // 2026-11-08。DNS と転送は Cloudflare
-    // 2026-11-13。海外からの距離の影響を測る実験（オレゴン）。国での振り分けはまだしない（経路 /chat-mcu-usw2 とヘッダー指定だけ）
-    satellites: [{
-      region: "us-west-2",
-      urlHosts: { "chat-mcu": "nekzerzjzx7izwqknwtidko3sq0rnpaa.lambda-url.us-west-2.on.aws" },
-      countries: [],
-    }],
     organizationId: "o-lbme8l7xtz", // RnD = 管理アカウント。toytalker-org スタックをここに出す
     existingRoles: {
       lambdaRoleArn: "arn:aws:iam::342082316736:role/toytalk-lambda-role-dev",

@@ -51,7 +51,7 @@ PCB資料: [PINMAP](../devices/KiCad/toytalker_mini_v0.2/PINMAP.md)、[部品表
 
 **`devices` への記録とアプリ表示は実装済み（2026-11-14、試験機で確認）**:
 
-- 会話Lambda（東京・オレゴン）が機器の行に `device_status`（`vbat_mv` / `board_temp_c` / `chip_temp_c` / `chg_stat1` / `chg_stat2` と、解釈した `charge` / `level`）と `device_status_at` を書く。書くのは前回から5分たったときか、`charge` / `level` が変わったとき。キャラクターの読み込みと並べて待ち、失敗しても会話は続ける。ログの `device_status_saved` で書いたかが分かる。判定は `backend/shared/device-status.mjs`。
+- 会話Lambdaが機器の行に `device_status`（`vbat_mv` / `board_temp_c` / `chip_temp_c` / `chg_stat1` / `chg_stat2` と、解釈した `charge` / `level`）と `device_status_at` を書く。書くのは前回から5分たったときか、`charge` / `level` が変わったとき。キャラクターの読み込みと並べて待ち、失敗しても会話は続ける。ログの `device_status_saved` で書いたかが分かる。判定は `backend/shared/device-status.mjs`。
 - `charge` は上の表6-2 のとおり（`idle` / `charging` / `fault` / `fault_fatal`）。`level` は電圧からの目安（2.5V 未満 `none`、3.95V 以上 `high`、3.7V 以上 `mid`、3.5V 以上 `low`、それ未満 `empty`。充電中は電圧が残量を表さないので null）。しきい値は仮で、電池を付けた機体では未確認。
 - アプリはデバイス設定の一番上に「本体の状態」を出す（`app/lib/deviceStatus.ts`）。2分以内なら「いま」、それより古ければ「◯分前 / 今日 15:40 / 11/13 22:10」。画面を開いたときとタップで読み直す。設定Lambdaは変えていない（`GET /devices` が行をそのまま返す）。
 - **分かっている不足**: 電池なしの機体は STAT2 が行き来するので、表示が会話のたびに「充電中」と「充電していません」で入れ替わり、電池は「多い」と出る（2026-11-14 の試験機で確認）。「電池なし」と出すにはファームが STAT を数秒の間に何回か読んで変わった回数を送る必要がある。`idle` は充電完了と USB なしを区別できない。電圧は未校正。
