@@ -132,9 +132,9 @@ fields @timestamp, session_id, device_id, fw, llm, tts, total_ms, marks.llm_firs
 
 ## 別リージョンの Lambda と振り分け（海外対応、ロードマップ36）
 
-**今はどの環境にも置いていない（2026-11-17 に RnD のオレゴンを片付けた。`satellites` の設定・スタック `ToyTalker-rnd-usw2`・固定ドメインの経路と振り分けは無い）。** 試験機で比べて、途切れは東京経由と同じ、最初の音まではオレゴン経由のほうが遅かったため（下の結果）。仕組みのコードは残してあり、`satellites` を書けば戻せる。以下は置いていたときの構成と結果。
+**今はどの環境にも置いていない（2026-11-17 に RnD のオレゴンを片付けた。`satellites` の設定・スタック `ToyTalker-rnd-usw2`・固定ドメインの経路と振り分けは無い）。** 試験機で比べて、途切れは東京経由と同じ、最初の音まではオレゴン経由のほうが遅かったため（下の結果）。infra 側の仕組みのコード（satellite スタック・振り分けの生成・`satellites` の型）も 2026-11-18 に消した。戻すならコミット `58854dd` の `infra/` から（また置くなら先に DynamoDB の複製から設計し直すので、そのままは使わない見込み）。`backend/shared/region.mjs`（`DATA_REGION`）だけ残っていて、ロードマップ43で消す。以下は置いていたときの構成と結果。
 
-海外の利用者に近いリージョンにも会話用の Lambda を置き、CloudFront で行き先を振り分ける仕組み（2026-11-13、RnD のオレゴン us-west-2）。設定は `config/stages.ts` の `satellites`、スタックは `lib/toytalker-satellite-stack.ts`（`ToyTalker-rnd-usw2`）、振り分けは `lib/toytalker-stack.ts` の `createApiDistribution` と `routeFunctionCode`。
+海外の利用者に近いリージョンにも会話用の Lambda を置き、CloudFront で行き先を振り分ける仕組み（2026-11-13、RnD のオレゴン us-west-2）。設定は `config/stages.ts` の `satellites`、スタックは `lib/toytalker-satellite-stack.ts`（`ToyTalker-rnd-usw2`）、振り分けは `lib/toytalker-stack.ts` の `createApiDistribution` と `routeFunctionCode` だった。
 
 - **置いていたもの**: ESP32 本文の Lambda 1本（`toytalker-chat-mcu-rnd`、us-west-2）と Function URL、ロググループ。相槌・鍵発行・アプリ用は東京だけ。
 - **データは東京のまま**: 環境変数 `DATA_REGION` を渡すと、`backend/shared/region.mjs` が DynamoDB と SSM のクライアントを東京へ向ける。権限も東京のテーブル・パラメータの ARN。テーブルの読み込みは容器の初回だけ遅い（実測 0.4〜0.9 秒、以後はキャッシュで数 ms）。

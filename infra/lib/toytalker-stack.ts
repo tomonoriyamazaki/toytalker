@@ -24,7 +24,7 @@ import * as origins from "aws-cdk-lib/aws-cloudfront-origins";
 import type * as acm from "aws-cdk-lib/aws-certificatemanager";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { regionShort, type StageConfig } from "../config/stages.js";
+import { type StageConfig } from "../config/stages.js";
 import { IDP_SECRETS, SECRET_PARAMS, type SecretName, type Secrets } from "./secrets.js";
 import { CLOUDTRAIL_BUCKET_NAME } from "./toytalker-org-stack.js";
 
@@ -61,42 +61,6 @@ class LambdaUrlOrigin extends origins.HttpOrigin {
       originProperty: { ...config.originProperty!, originAccessControlId: this.oac.originAccessControlId },
     };
   }
-}
-
-/** 行き先のリージョンを指定する要求ヘッダー（値はリージョンの短縮名。例 usw2）。それ以外の値なら国に関係なく本体のリージョン */
-export const REGION_HEADER = "x-toytalker-region";
-
-/**
- * 別リージョンの Lambda への振り分け（CloudFront Functions、viewer request。createApiDistribution が元の経路に付ける）。
- * - ヘッダー REGION_HEADER があれば、その短縮名のオリジンへ（知らない値なら本体のまま。国は見ない）。試験と比較のための指定
- * - 無ければ国（CloudFront-Viewer-Country）で決める。表に無い国は本体のまま
- * - 何が起きても要求は通す（例外で 503 にしない）。別リージョンへ送ったときだけ1行ログを書く
- *   （us-east-1 の `/aws/cloudfront/function/<関数名>`。国コードだけで、送信元IPや本文は書かない）
- * 関数は要求の本文を読めないので、機器ごとの振り分けはできない
- */
-export function routeFunctionCode(byRegion: Readonly<Record<string, string>>, byCountry: Readonly<Record<string, string>>): string {
-  return `import cf from 'cloudfront';
-const BY_REGION = ${JSON.stringify(byRegion)};
-const BY_COUNTRY = ${JSON.stringify(byCountry)};
-const has = (table, key) => typeof key === 'string' && Object.prototype.hasOwnProperty.call(table, key);
-function handler(event) {
-  const request = event.request;
-  try {
-    const asked = request.headers['${REGION_HEADER}'] ? request.headers['${REGION_HEADER}'].value : null;
-    const country = request.headers['cloudfront-viewer-country'] ? request.headers['cloudfront-viewer-country'].value : null;
-    let target = null;
-    if (asked !== null) { if (has(BY_REGION, asked)) target = BY_REGION[asked]; }
-    else if (has(BY_COUNTRY, country)) target = BY_COUNTRY[country];
-    if (target !== null) {
-      cf.selectRequestOriginById(target);
-      console.log('route ' + target + ' country=' + country + ' by=' + (asked !== null ? 'header' : 'country'));
-    }
-  } catch (e) {
-    console.log('route failed: ' + e);
-  }
-  return request;
-}
-`;
 }
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -280,8 +244,7 @@ const RECORDING_FUNCTION_KEYS = ["chat-app", "chat-mcu", "read-aloud-app"] as co
 const TTS_FUNCTION_KEYS = [...RECORDING_FUNCTION_KEYS, "backchannel-app", "backchannel-mcu"] as const;
 
 /**
- * 環境の設定（config/stages.ts）だけで決まる Lambda の環境変数。本体スタックと、別リージョンに置く Lambda
- * （lib/toytalker-satellite-stack.ts）の両方が使う。スタック内の資源から決まる値（Cognito・SNS など）は本体スタックが足す
+ * 環境の設定（config/stages.ts）だけで決まる Lambda の環境変数。スタック内の資源から決まる値（Cognito・SNS など）は本体スタックが足す
  */
 export function configEnv(config: StageConfig): Record<string, string> {
   return {
@@ -942,62 +905,21 @@ export class ToyTalkerStack extends cdk.Stack {
     });
 
     const ORIGIN_TIMEOUTS = { readTimeout: cdk.Duration.seconds(60), keepaliveTimeout: cdk.Duration.seconds(60) };
-    const behaviorWith = (origin: cloudfront.IOrigin, viewerRequest?: cloudfront.IFunction): cloudfront.BehaviorOptions => ({
-      origin,
+    const behaviorFor = (key: string): cloudfront.BehaviorOptions => ({
+      origin: new LambdaUrlOrigin(functions.get(key)!, urls.get(key)!, oac, { originId: key, ...ORIGIN_TIMEOUTS }),
       allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
       cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
       originRequestPolicy,
       viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.HTTPS_ONLY,
       compress: false, // 音声バイナリと SSE。圧縮は効かず、ストリーミングの妨げになる
-      functionAssociations: viewerRequest
-        ? [{ function: viewerRequest, eventType: cloudfront.FunctionEventType.VIEWER_REQUEST }]
-        : undefined,
     });
-    const behaviorFor = (key: string, viewerRequest?: cloudfront.IFunction): cloudfront.BehaviorOptions =>
-      behaviorWith(new LambdaUrlOrigin(functions.get(key)!, urls.get(key)!, oac, { originId: key, ...ORIGIN_TIMEOUTS }), viewerRequest);
     const routed = FUNCTIONS.filter((s) => s.url);
     const defaults = routed.filter((s) => s.url!.route === "default");
     if (defaults.length !== 1) throw new Error(`route "default" の Lambda は1つだけ（今は ${defaults.map((s) => s.key).join(", ")}）`);
     const additionalBehaviors: Record<string, cloudfront.BehaviorOptions> = {};
 
-    // ---- 別リージョンの Lambda（config.satellites の urlHosts。lib/toytalker-satellite-stack.ts） ----
-    // 機能ごとに、(1) そのリージョンへ必ず行く経路 `<経路>-<短縮名>`（例 /chat-mcu-usw2）と、
-    // (2) 元の経路での振り分け（CloudFront Functions。ヘッダー `x-toytalker-region: <短縮名>` の指定か、国）を作る。
-    // オリジンは同じ OAC で署名する（Function URL のホスト名からリージョンが決まる）。
-    const routeFunctions = new Map<string, cloudfront.Function>();
-    const satelliteKeys = new Set((config.satellites ?? []).flatMap((s) => Object.keys(s.urlHosts ?? {})));
-    for (const key of satelliteKeys) {
-      const spec = routed.find((s) => s.key === key);
-      if (!spec || spec.url!.route === "default") throw new Error(`satellites.urlHosts: ${key} は固定の経路を持つ Lambda ではありません`);
-      const byRegion: Record<string, string> = {};
-      const byCountry: Record<string, string> = {};
-      for (const satellite of config.satellites ?? []) {
-        const host = satellite.urlHosts?.[key];
-        if (!host) continue;
-        const short = regionShort(satellite.region);
-        const originId = `${key}-${short}`;
-        additionalBehaviors[`${spec.url!.route}-${short}`] = behaviorWith(new origins.HttpOrigin(host, {
-          originId,
-          originAccessControlId: oac.originAccessControlId,
-          protocolPolicy: cloudfront.OriginProtocolPolicy.HTTPS_ONLY,
-          originSslProtocols: [cloudfront.OriginSslPolicy.TLS_V1_2],
-          ...ORIGIN_TIMEOUTS,
-        }));
-        byRegion[short] = originId;
-        for (const country of satellite.countries) {
-          if (byCountry[country]) throw new Error(`satellites: 国 ${country} が2つのリージョンに書かれています`);
-          byCountry[country] = originId;
-        }
-      }
-      routeFunctions.set(key, new cloudfront.Function(this, `ApiRoute${key.replace(/(^|-)(\w)/g, (_, __, c: string) => c.toUpperCase())}`, {
-        functionName: `toytalker-api-route-${key}-${config.stage}`,
-        comment: `ToyTalker API ${config.stage}: route ${spec.url!.route} to another region by header or viewer country`,
-        runtime: cloudfront.FunctionRuntime.JS_2_0,
-        code: cloudfront.FunctionCode.fromInline(routeFunctionCode(byRegion, byCountry)),
-      }));
-    }
     for (const spec of routed) {
-      if (spec.url!.route !== "default") additionalBehaviors[spec.url!.route] = behaviorFor(spec.key, routeFunctions.get(spec.key));
+      if (spec.url!.route !== "default") additionalBehaviors[spec.url!.route] = behaviorFor(spec.key);
     }
 
     const distribution = new cloudfront.Distribution(this, "ApiDistribution", {
