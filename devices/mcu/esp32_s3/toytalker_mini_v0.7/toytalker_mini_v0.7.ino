@@ -45,6 +45,7 @@
 #include "DeviceAuth.h"
 #include "VoiceKeyholder.h"
 #include "VoiceSync.h"
+#include "SoftApSetup.h"
 #include <esp_ota_ops.h>
 #include <esp_arduino_version.h>
 #include <mbedtls/sha256.h>  // sha256Hex（CloudFront 経由の POST に本文ハッシュを添える）
@@ -867,6 +868,14 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+// ==== SoftAP の設定ページでつながった時（SoftApSetup.h。この後 softap が再起動する）====
+void onSoftApWifiConnected(const String& ssid, const String& password) {
+  saveWiFiCredentials(ssid, password);
+  wifiSSID = ssid;
+  wifiPassword = password;
+  saveDeviceMac(deviceMacAddress);  // startBLE が入れた BLE のアドレス（機器 ID）
+}
+
 // ==== BLE開始 ====
 void startBLE() {
   Serial.println("🔵 Starting BLE...");
@@ -919,6 +928,8 @@ void startBLE() {
   // 録音中はLEDタイマーが停止しているため再開（長押しでBLEに入った場合の点滅不具合対策）
   if (ledTimer) timerAlarm(ledTimer, 30000, true, 0);
   setLEDMode(LED_BLINK_FAST);
+  // 試作（ロードマップ45）: BLE 設定と同じ入り口で、SoftAP の設定ページも立てる。どちらからでも設定できる
+  softap::begin(onSoftApWifiConnected);
 }
 
 // ==== BLE停止 ====
@@ -2840,6 +2851,7 @@ bool tryConnectWiFiOnce(const String& ssid, const String& password) {
 
 // ==== BLEからのWiFi接続試行 ====
 void tryConnectWiFiFromBLE(const String& ssid, const String& password) {
+  softap::suspend();  // この先で Wi-Fi のモードを子機だけに変えるので、設定ページは止める
   sendBLEStatus("CONNECTING");
 
   Serial.printf("📶 Connecting to WiFi from BLE: %s\n", ssid.c_str());
@@ -2869,6 +2881,7 @@ void tryConnectWiFiFromBLE(const String& ssid, const String& password) {
 
   Serial.println("\n❌ WiFi connection failed after all retries");
   sendBLEStatus("FAILED");
+  softap::requestRestart();  // 設定ページを立て直す（loop() 側で）
 }
 
 // ==== 通常動作開始 ====
@@ -3426,6 +3439,18 @@ void loop() {
       }
     }
     handleButtonLongPress();
+    softap::service();
+    {
+      // スマホが SoftAP につないでいる間は BLE の発信を止める（無線は1つで、BLE と分け合うと設定ページの計測が濁る）
+      static bool bleAdvPaused = false;
+      const bool apBusy = softap::stations() > 0;
+      if (apBusy != bleAdvPaused && !bleDeviceConnected && pServer) {
+        bleAdvPaused = apBusy;
+        if (apBusy) BLEDevice::stopAdvertising();
+        else BLEDevice::startAdvertising();
+        Serial.printf("[SOFTAP] ble advertising %s\n", apBusy ? "paused" : "resumed");
+      }
+    }
     if (!bleDeviceConnected && oldBleDeviceConnected) {
       delay(500);
       if (pServer) pServer->startAdvertising();
