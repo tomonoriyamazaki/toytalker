@@ -178,6 +178,7 @@ arduino-cli compile --fqbn esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,Partit
 - [TLSメモリ調査](esp32-s3-tls-memory-investigation-2026-09-06.md) — Stringリーク修正の経緯と、未修正のリスク一覧
 - [v0.5 再生終了の計測](esp32-playback-end-timing.md) — v0.5のみ。v0.7はI2S APIが違う
 - [配布実機の音途切れ報告（2026-09-11）](device-audio-investigation-2026-09-11.md) — サーバー側調査、原因未特定。実機の版照合が未着手
+- [回線ごとの速さの違い（2026-11-18）](esp32-network-latency-2026-11-18.md) — 自宅・テザリング・レンタル Wi-Fi 2種の実測。途切れの回数と聞こえ方のずれ、アプリより遅い分の内訳、計測スケッチの使い方
 - [OTA・設定同期・状態送信](esp32-ota-settings-plan.md) — OTAの仕様・配布手順・実機検証、設定同期の相談記録
 - [OTA引き継ぎ（2026-09-16）](handoff-esp32-ota-2026-09-16.md) — OTA実装後の残タスクと、検索後の誤停止の記録
 - [マイコン（ハード）](mcu.md) — パーツ一覧、基板設計の覚え書き、次の基板改修で行うこと
