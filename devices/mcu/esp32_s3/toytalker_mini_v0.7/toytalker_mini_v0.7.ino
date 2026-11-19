@@ -15,6 +15,7 @@
 #include <ArduinoJson.h>
 #include "StreamCompletion.h"
 #include <driver/i2s_std.h>
+#include <driver/i2s_pdm.h>
 #include <esp_wifi.h>
 #include <esp_mac.h>  // esp_read_mac (BLEアドバタイズ名用)
 #include <BLEDevice.h>
@@ -33,6 +34,7 @@
 #include "AecMonitor.h"
 #include "TlsMemory.h"
 #include "SttMicFilter.h"
+#include "BoardConfig.h"
 #include "SonioxPreconnect.h"
 #include "FirmwareVersion.h"
 #include "OtaUpdater.h"
@@ -116,10 +118,7 @@ const uint32_t SONIOX_KEY_MAX_AGE_MINUTES = 2;   // 2026-10-28から試用。問
 uint32_t sonioxKeyFetchedMs = 0;  // loop() だけが書く。ワーカーは読むだけ
 String sonioxModel = "stt-rt-v4";  // 起動時に1回だけ設定。以後は読み取り専用（ワーカーからも読む）
 
-// ==== I2S PIN ==== (v0.2基板: マイク/アンプでBCLK・WSも分離)
-#define PIN_MIC_BCLK 48
-#define PIN_MIC_WS   33
-#define PIN_MIC_DATA 34
+// ==== I2S PIN ==== マイクのピンと方式は基板の版で変わるので BoardConfig.h の表。ここは全基板で同じもの
 #define PIN_AMP_BCLK 37
 #define PIN_AMP_WS   36
 #define PIN_AMP_DIN  38
@@ -525,7 +524,15 @@ uint32_t i2sTimeoutMs(TickType_t ticks) {
 }
 esp_err_t readMicI2s(void* data, size_t len, size_t* bytes, TickType_t timeout) {
   *bytes = 0;
-  return micRx ? i2s_channel_read(micRx, data, len, bytes, i2sTimeoutMs(timeout)) : ESP_ERR_INVALID_STATE;
+  if (!micRx) return ESP_ERR_INVALID_STATE;
+  const board::Config& b = board::current();
+  if (b.mic != board::Mic::Pdm) return i2s_channel_read(micRx, data, len, bytes, i2sTimeoutMs(timeout));
+  // PDM は 16bit で来る。半分の量を読んで、その場で I2S の生の値と同じ 32bit に広げる（以降の処理は共通）
+  size_t got = 0;
+  esp_err_t err = i2s_channel_read(micRx, data, len / 2, &got, i2sTimeoutMs(timeout));
+  board::expandPdm(data, got / 2, board::pdmScale());
+  *bytes = (got / 2) * 4;
+  return err;
 }
 esp_err_t releaseI2sChannel(i2s_chan_handle_t& channel) {
   if (!channel) return ESP_OK;
@@ -715,12 +722,54 @@ void applyVolumeLevel(const char* level) {
   setPlaybackGain(gain, false);
 }
 
-// 聞き取り中の loop() から。シリアルの数字1文字で倍率を変える（試験用）
-void pollPlaybackGainSerial() {
+// "HW v0.3" の行: 基板の版を NVS に書いて再起動する（USB で最初に書いたときに 1 回。BoardConfig.h）。
+// いまと同じ版なら何もしない（書き込みの道具が、届くまで何度か送る）
+void handleSerialLine(const char* line) {
+  if (strncmp(line, "MIC ", 4) == 0) {  // 試験用: PDM の倍率（1〜60 倍）。保存しない
+    const int gain = atoi(line + 4);
+    if (board::current().mic != board::Mic::Pdm || gain < 1 || gain > 60) {
+      Serial.printf("[BOARD] mic gain ignored (%s)\n", line + 4);
+      return;
+    }
+    board::pdmScaleOverride_ = gain * 16384;
+    aecMonitor.setRxFormat(true, board::pdmScale());
+    Serial.printf("[BOARD] mic gain=%d (not saved)\n", gain);
+    return;
+  }
+  if (strncmp(line, "HW ", 3) != 0) return;
+  if (!board::save(line + 3)) return;
+  Serial.println("[BOARD] restarting");
+  Serial.flush();
+  delay(200);
+  ESP.restart();
+}
+
+// loop() から（どのモードでも）。数字・小文字の1文字は試験用の音の調整、大文字で始まる行は命令
+void pollSerial() {
   static const float table[] = {PLAYBACK_GAIN_DEFAULT, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f};
+  static char line[16];
+  static uint8_t lineLen = 0;   // 0 でなければ行の途中（1文字の命令としては読まない）
+  static uint32_t lineStartMs = 0;
+  if (lineLen && millis() - lineStartMs > 1000) lineLen = 0;  // 途中で途切れた行は捨てる
   while (Serial.available() > 0) {
     const int c = Serial.read();
-    if (c >= '0' && c <= '8') setPlaybackGain(table[c - '0'], true);
+    if (lineLen) {
+      if (c == '\n' || c == '\r') {
+        line[lineLen] = 0;
+        lineLen = 0;
+        handleSerialLine(line);
+      } else if (lineLen < sizeof(line) - 1) {
+        line[lineLen++] = char(c);
+      } else {
+        lineLen = 0;  // 長すぎる行は捨てる
+      }
+      continue;
+    }
+    if (c >= 'A' && c <= 'Z') {
+      line[0] = char(c);
+      lineLen = 1;
+      lineStartMs = millis();
+    } else if (c >= '0' && c <= '8') setPlaybackGain(table[c - '0'], true);
     else if (c == 'e' || c == 'f') {  // e = EQ あり、f = EQ なし（聞き比べ用。保存しない）
       playbackLimiter.setEq(c == 'e');
       Serial.printf("[VOLUME] eq=%d\n", playbackLimiter.eq());
@@ -1108,6 +1157,7 @@ constexpr bool VOICE_RX_RESET_AFTER_PLAYBACK = VOICE_RX_TEST_MODE == VoiceRxTest
 constexpr int MIC_DMA_COUNT =
     (VOICE_RX_TEST_MODE == VoiceRxTestMode::MonitorSmallDma || VOICE_RX_RESET_AFTER_PLAYBACK) ? 4 : 8;
 constexpr int MIC_DMA_FRAMES = 512;  // 1枚32ms。割り込み周期・サンプル形式は変えない
+constexpr int PDM_START_DISCARD_BLOCKS = 2;  // PDM のマイクを作り直した直後に捨てる枚数（setupI2SRecord）
 // モノラル32bitのデータ領域。管理領域は別途必要。通常STTも同じ設定を使う。
 constexpr uint32_t MIC_DMA_DATA_BYTES = MIC_DMA_COUNT * MIC_DMA_FRAMES * sizeof(int32_t);
 static_assert(!AEC_ENABLED || (VOICE_RX_RESET_AFTER_PLAYBACK && MIC_DMA_FRAMES == AEC_MIC_SAMPLES &&
@@ -1367,16 +1417,30 @@ void setupI2SRecord() {
     Serial.printf("[VOICE] mic channel allocation failed=%d\n", err);
     return;
   }
-  i2s_std_config_t cfg = {};
-  cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_STT);
-  cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO);
-  cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-  cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
-  cfg.gpio_cfg.bclk = (gpio_num_t)PIN_MIC_BCLK;
-  cfg.gpio_cfg.ws = (gpio_num_t)PIN_MIC_WS;
-  cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
-  cfg.gpio_cfg.din = (gpio_num_t)PIN_MIC_DATA;
-  err = i2s_channel_init_std_mode(micRx, &cfg);
+  const board::Config& b = board::current();
+  if (b.mic == board::Mic::Pdm) {
+    // PDM のクロックは 16kHz × 128 = 2.048MHz（DSR_16S。既定の DSR_8S は × 64 = 1.024MHz で、
+    // SPH0655 の下限 1.2MHz を下回る）。1枚 512 サンプル・32ms は I2S のときと同じ
+    i2s_pdm_rx_config_t cfg = {};
+    cfg.clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(SAMPLE_RATE_STT);
+    cfg.clk_cfg.dn_sample_mode = I2S_PDM_DSR_16S;
+    cfg.slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+    cfg.slot_cfg.slot_mask = b.pdmRightSlot ? I2S_PDM_SLOT_RIGHT : I2S_PDM_SLOT_LEFT;
+    cfg.gpio_cfg.clk = (gpio_num_t)b.micClk;
+    cfg.gpio_cfg.din = (gpio_num_t)b.micData;
+    err = i2s_channel_init_pdm_rx_mode(micRx, &cfg);
+  } else {
+    i2s_std_config_t cfg = {};
+    cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_STT);
+    cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO);
+    cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+    cfg.gpio_cfg.bclk = (gpio_num_t)b.micClk;
+    cfg.gpio_cfg.ws = (gpio_num_t)b.micWs;
+    cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
+    cfg.gpio_cfg.din = (gpio_num_t)b.micData;
+    err = i2s_channel_init_std_mode(micRx, &cfg);
+  }
   i2s_event_callbacks_t callbacks = {};
   callbacks.on_recv = onMicDma;
   if (err == ESP_OK) err = i2s_channel_register_event_callback(micRx, &callbacks, nullptr);
@@ -1386,10 +1450,19 @@ void setupI2SRecord() {
     Serial.printf("[VOICE] mic initialization failed=%d\n", err);
     return;
   }
+  if (b.mic == board::Mic::Pdm) {
+    // 再生の後に作り直した直後は、最初の 1 枚（32ms）が振り切れる（min=-32768、平均 -4277。2 枚目からは ±80 以内。
+    // 2026-11-16 に v0.3 で実測）。これを通すと DC の見積もりが狂って、録音の頭に大きな段差が乗るので 2 枚捨てる
+    static int16_t discard[MIC_DMA_FRAMES];
+    for (int i = 0; i < PDM_START_DISCARD_BLOCKS; ++i) {
+      size_t got = 0;
+      i2s_channel_read(micRx, discard, sizeof(discard), &got, 100);
+    }
+  }
   micInstalled = true;
   ++micInstallGeneration;
-  Serial.printf("[VOICE_TEST] mic_ready driver=std dma_count=%d dma_frames=%d dma_data_bytes=%lu internal_free=%lu max_blk=%lu generation=%lu\n",
-                MIC_DMA_COUNT, MIC_DMA_FRAMES, (unsigned long)MIC_DMA_DATA_BYTES,
+  Serial.printf("[VOICE_TEST] mic_ready driver=%s dma_count=%d dma_frames=%d dma_data_bytes=%lu internal_free=%lu max_blk=%lu generation=%lu\n",
+                b.mic == board::Mic::Pdm ? "pdm" : "std", MIC_DMA_COUNT, MIC_DMA_FRAMES, (unsigned long)MIC_DMA_DATA_BYTES,
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned long)micInstallGeneration);
@@ -2895,7 +2968,7 @@ void startNormalOperation() {
   // Sonioxキー取得（WiFi切替直後などの一時的な失敗に備えて3回リトライ）
   // fw/hw/ota/part はLambdaが記録し、更新の要否判定にも使う（docs/esp32-ota-settings-plan.md）
   String initUrl = String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress
-                 + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + TOYTALKER_HW_VERSION
+                 + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + board::current().hw
                  + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel()
                  + "&ttl=" + SONIOX_KEY_TTL_SEC
                  + ota::queryParams();  // 前回の更新の結果（ロールバック・続いた失敗）
@@ -2984,7 +3057,9 @@ void setup() {
   delay(100);
   Serial.println(AEC_BARGE_DETECT_ONLY ? "\n🚀 ToyTalker Mini v0.7 (AEC evaluation / detect only)"
                                      : "\n🚀 ToyTalker Mini v0.7 (AEC barge-in + OTA)");
-  Serial.printf("[BUILD] fw=%s hw=%s arduino=%s idf=%s\n", TOYTALKER_FW_VERSION, TOYTALKER_HW_VERSION,
+  board::load();  // 基板の版（NVS）。マイクの初期化とログより前に
+  aecMonitor.setRxFormat(board::current().mic == board::Mic::Pdm, board::pdmScale());
+  Serial.printf("[BUILD] fw=%s hw=%s arduino=%s idf=%s\n", TOYTALKER_FW_VERSION, board::current().hw,
                 ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
   ota::printBootInfo();
   ota::checkPreviousUpdate();  // 前回入れた版で起動できたか、ロールバックで戻ったか
@@ -3407,6 +3482,7 @@ void handleButtonLongPress() {
 
 // ==== LOOP ====
 void loop() {
+  pollSerial();
   if (currentMode == MODE_KEYHOLDER) {
     serviceKeyholder();
     return;
@@ -3488,7 +3564,6 @@ void loop() {
       return;
     }
   }
-  pollPlaybackGainSerial();
 
   // ボタンデバウンス
   int reading = digitalRead(PIN_BUTTON);
