@@ -159,11 +159,8 @@ const common = {
   zakicorpTtsUrl: "https://tts.zakicorp.com",
   sonioxModel: "stt-rt-v6", // 2026-11-08 に v5 から切替。アプリの「話し終わりの待ち」は v6 で調整した（ロードマップ18）
   sttOptions: {
-    // stt-rt-v5 は 2026-12-15 に廃止（以後 Soniox が v6 へ振り替える）。その後この行を消す
-    models: [
-      { id: "stt-rt-v6", label: "v6" },
-      { id: "stt-rt-v5", label: "v5", description: "2026-12-15 に廃止され v6 へ振り替わります。" },
-    ],
+    // アプリの設定画面で選べるモデル。一覧から消したモデルを選んでいた端末は「おすすめ」（sonioxModel）に戻る
+    models: [{ id: "stt-rt-v6", label: "v6" }],
     // 2026-11-08 に大人と4歳半の子で試して決めた（v6）。Soniox は文として終わって聞こえると設定に関係なく即座に区切るので、
     // 子どもが言葉を切ってから続ける分は grace_ms で拾う。endpoint_sensitivity は -1.0〜1.0、max_endpoint_delay_ms は 500〜3000
     waits: {
