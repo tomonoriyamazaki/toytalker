@@ -22,7 +22,15 @@
         "NSBluetoothPeripheralUsageDescription": "おもちゃとの接続にBluetoothを使用します。",
         "UIBackgroundModes": [
           "audio"
-        ]
+        ],
+        "NSLocalNetworkUsageDescription": "おもちゃのWi-Fi設定のために、おもちゃと直接通信します。",
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      },
+      "entitlements": {
+        "com.apple.developer.networking.HotspotConfiguration": true,
+        "com.apple.developer.networking.wifi-info": true
       }
     },
     "android": {
@@ -57,7 +65,13 @@
     "owner": "zackey",
     "plugins": [
       "expo-audio",
-      "expo-secure-store"
+      "expo-secure-store",
+      [
+        "react-native-wifi-reborn",
+        {
+          "fineLocationPermission": true
+        }
+      ]
     ]
   }
 }

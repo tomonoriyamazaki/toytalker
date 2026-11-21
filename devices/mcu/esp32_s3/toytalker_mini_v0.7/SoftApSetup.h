@@ -30,6 +30,7 @@
 #include <esp_random.h>
 #include <esp_mac.h>
 #include <esp_heap_caps.h>
+#include "FirmwareVersion.h"
 
 namespace softap {
 
@@ -55,8 +56,17 @@ static bool g_active = false;
 static bool g_eventsHooked = false;
 static std::atomic<bool> g_suspended{false};
 static std::atomic<bool> g_restartRequested{false};
+// true: OS の接続確認を設定ページへ飛ばし、ログイン画面として自動で開かせる（アプリなしの道）。
+// false: 接続確認に「ネットに出られる」と答え、ログイン画面を出さない（アプリから入る道。ページは http://192.168.4.1/ を手で開く）。
+static const bool CAPTIVE_POPUP = false;
 static char g_ssid[20] = {0};
-static char g_pass[PASS_LEN + 1] = {0};
+static char g_deviceId[18] = {0};  // 機器 ID（BLE のアドレス。小文字のコロン区切り）
+// false: 親機のパスワードを全部の本体で同じにする（アプリが何も聞かずにつなげる。試作 0.7.40）。
+//        この場合、親機のパスワードは守りにならない。家の Wi-Fi のパスワードを守るには、中身の暗号化が別に要る（未実装）。
+// true: 本体ごとの乱数（NVS softap/pass）。QR か手入力で入る。
+static const bool PER_DEVICE_PASS = false;
+static const char COMMON_PASS[] = "toytalker-setup";
+static char g_pass[24] = {0};
 static uint32_t g_beginMs = 0;
 
 static Scan g_scan = Scan::None;
@@ -126,6 +136,10 @@ inline void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
 /** 親機のパスワード。NVS にあれば読み、無ければ作って残す。無線が動いてから呼ぶ（esp_random が真の乱数になる） */
 inline void loadOrCreatePassword() {
   if (g_pass[0]) return;
+  if (!PER_DEVICE_PASS) {
+    strlcpy(g_pass, COMMON_PASS, sizeof(g_pass));
+    return;
+  }
   // 見間違えやすい字（0 o 1 l i）を除いた 31 字
   static const char ALPHABET[] = "abcdefghjkmnpqrstuvwxyz23456789";
   Preferences prefs;
@@ -310,6 +324,20 @@ inline bool redirectIfForeign() {
   const String ip = WiFi.softAPIP().toString();
   Serial.printf("[SOFTAP] http t=%lums host=%s uri=%s\n", millis() - g_beginMs, host.c_str(), g_server->uri().c_str());
   if (host.length() == 0 || host.startsWith(ip)) return false;
+  if (!CAPTIVE_POPUP) {
+    // OS の接続確認には「ネットに出られる」と答える。ログイン画面が出ず、スマホはこの Wi-Fi に留まる。
+    // アプリから入った時に、iPhone のログイン画面がアプリの上にかぶさるのを防ぐ（2026-11-21 実機で確認）。
+    const String uri = g_server->uri();
+    g_server->sendHeader("Cache-Control", "no-store");
+    if (uri.indexOf("generate_204") >= 0 || uri.indexOf("gen_204") >= 0) {
+      g_server->send(204, "text/plain", "");  // Android
+    } else if (uri.indexOf("connecttest.txt") >= 0) {
+      g_server->send(200, "text/plain", "Microsoft Connect Test");  // Windows
+    } else {
+      g_server->send(200, "text/html", "<HTML><HEAD><TITLE>Success</TITLE></HEAD><BODY>Success</BODY></HTML>");  // iOS / macOS
+    }
+    return true;
+  }
   g_server->sendHeader("Location", String("http://") + ip + "/", true);
   g_server->sendHeader("Cache-Control", "no-store");
   g_server->send(302, "text/plain", "");
@@ -334,6 +362,12 @@ inline void handleScan() {
   String body = String("{\"state\":\"") + state + "\",\"nets\":" + (g_scan == Scan::Done ? g_scanJson : String("[]"))
                 + ",\"diag\":" + diagJson() + "}";
   sendJson(200, body);
+}
+
+/** アプリ用: この本体がどれかを返す（機器の登録に使う ID と版）。ページは使わない */
+inline void handleInfo() {
+  if (redirectIfForeign()) return;
+  sendJson(200, String("{\"id\":\"") + g_deviceId + "\",\"name\":\"" + g_ssid + "\",\"fw\":\"" TOYTALKER_FW_VERSION "\"}");
 }
 
 inline void handleStatus() {
@@ -450,6 +484,7 @@ inline bool begin(ConnectedFn onConnected) {
   uint8_t mac[6];
   esp_read_mac(mac, ESP_MAC_BT);  // BLE の名前と同じ下4桁（アプリと本体のラベルで同じ番号になる）
   snprintf(g_ssid, sizeof(g_ssid), "ToyTalker-%02X%02X", mac[4], mac[5]);
+  snprintf(g_deviceId, sizeof(g_deviceId), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   loadOrCreatePassword();
 
   if (!WiFi.softAP(g_ssid, g_pass, AP_CHANNEL, 0, AP_MAX_CLIENTS)) {
@@ -468,6 +503,7 @@ inline bool begin(ConnectedFn onConnected) {
     g_server->on("/", HTTP_GET, handleRoot);
     g_server->on("/scan", HTTP_GET, handleScan);
     g_server->on("/status", HTTP_GET, handleStatus);
+    g_server->on("/info", HTTP_GET, handleInfo);
     g_server->on("/save", HTTP_POST, handleSave);
     g_server->onNotFound(handleNotFound);
   }
