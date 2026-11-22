@@ -3038,7 +3038,7 @@
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R12"
-			(at -2.006475 0.001662 0)
+			(at -2.105371 -0.762556 0)
 			(layer "F.SilkS")
 			(uuid "609f7de2-c4ef-4991-9640-5983455c39cc")
 			(effects
@@ -4347,7 +4347,7 @@
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf), generated with kicad-footprint-generator")
 		(tags "resistor")
 		(property "Reference" "R6"
-			(at 1.62342 0.057359 0)
+			(at -1.591171 0.010281 0)
 			(layer "F.SilkS")
 			(uuid "cbd6deb3-1fc1-49ac-b418-fdc8d864ac92")
 			(effects
@@ -4534,7 +4534,7 @@
 		(descr "Capacitor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C10"
-			(at 0.881012 0.746051 0)
+			(at 0.890466 1.007777 0)
 			(layer "F.SilkS")
 			(uuid "cff85c3f-729b-4ba9-a07f-ce7b5bb208b1")
 			(effects
@@ -5743,7 +5743,7 @@
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R14"
-			(at 1.433073 -1.007624 0)
+			(at 0.122231 -1.199936 0)
 			(layer "F.SilkS")
 			(uuid "713d90c7-151f-405a-b26b-369c1e4fe30e")
 			(effects
@@ -6699,7 +6699,7 @@
 		(descr "Capacitor SMD 0603 (1608 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf), generated with kicad-footprint-generator")
 		(tags "capacitor")
 		(property "Reference" "C5"
-			(at -2.056642 -0.011048 180)
+			(at -1.220247 1.523207 180)
 			(layer "F.SilkS")
 			(uuid "9baf8c2a-f86f-43b3-baa2-8803d79a9038")
 			(effects

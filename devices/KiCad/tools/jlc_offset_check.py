@@ -11,6 +11,8 @@ Fabrication Toolkit 用の補正値（FT Position Offset / FT Rotation Offset）
   フットプリントの両方に値を入れる（回路図が正本。KiCad なら部品のフィールドに追加）。
 - 座標の約束: FT Position Offset は部品ローカル座標で x,y（y は上が正、mm）。
   FT Rotation Offset は度（反時計回りが正）。Fabrication Toolkit の仕様に合わせている。
+- 位置は全パッドの重心どうしを合わせて求める。パッドの数や分け方が JLC 側と違う部品（モジュールの
+  放熱パッドなど）は、同名のパッドだけで重ねてぴったり合う（0.1mm 未満）ならそちらを使う。
 - 同名パッドの位置で向きを決める。パッド名が JLC 側と違う部品（LED の A/C など）は
   向きを決められないので「名前不一致」と出す。その場合は EasyEDA の記号のピン名で確かめる。
 """
@@ -85,7 +87,16 @@ def fit(K, E):
         geo = sum(min(math.hypot(a[0] - b[0], a[1] - b[1]) for b in K) for a in Et) / len(Et)
         same = [math.hypot(x - kn[n][0], y - kn[n][1]) for x, y, n in Et if n in kn]
         name = sum(same) / len(same) if same else None
-        cand = (round(geo, 2), name if name is not None else 9, abs(((th + 180) % 360) - 180), th, T, geo, name)
+        # パッドの数や分け方が違う部品（放熱パッドが 9 個と 21 個など）は、重心どうしを合わせるとずれる。
+        # 同じ名前のパッドが 3 個以上あり、それだけで重ねてぴったり合うなら、そちらの平行移動を使う。
+        pairs = [(kn[n][0] - x, kn[n][1] - y) for x, y, n in Er if n in kn]
+        if len(pairs) >= 3:
+            T2 = (sum(p[0] for p in pairs) / len(pairs), sum(p[1] for p in pairs) / len(pairs))
+            res = max(math.hypot(p[0] - T2[0], p[1] - T2[1]) for p in pairs)
+            # 差が 0.2mm 未満なら重心の値のまま（v0.3 で JLCPCB の画面と合うことを確かめた値を動かさない）
+            if res < 0.1 and math.hypot(T2[0] - T[0], T2[1] - T[1]) > 0.2:
+                T, geo, name = T2, res, res
+        cand =(round(geo, 2), name if name is not None else 9, abs(((th + 180) % 360) - 180), th, T, geo, name)
         if best is None or cand < best:
             best = cand
     return best

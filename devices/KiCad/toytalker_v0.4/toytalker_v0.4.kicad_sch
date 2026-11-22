@@ -6891,6 +6891,17 @@
 				)
 			)
 		)
+		(property "FT Position Offset" "0,0.038"
+			(at 203.2 147.32 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
 		(pin "1"
 			(uuid "7ea4cc13-6b74-42ac-9034-b7826ccc08d6")
 		)
@@ -11139,6 +11150,17 @@
 			)
 		)
 		(property "PURCHASE-URL" ""
+			(at 138.43 121.92 0)
+			(hide yes)
+			(show_name no)
+			(do_not_autoplace no)
+			(effects
+				(font
+					(size 1.27 1.27)
+				)
+			)
+		)
+		(property "FT Position Offset" "0,-3.627"
 			(at 138.43 121.92 0)
 			(hide yes)
 			(show_name no)
