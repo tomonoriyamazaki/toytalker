@@ -122,9 +122,14 @@ export async function saveToToy(ssid: string, password: string): Promise<SaveRes
   return { state: "unknown", reason: 0 };
 }
 
-/** 失敗の理由（Wi-Fi の切断理由コード）を文にする。WPA3 のパスワード違いは 2 で返る（2026-11-20 実機） */
+/**
+ * 失敗の理由（Wi-Fi の切断理由コード）を文にする。
+ * 2（認証の時間切れ）は、WPA3 のパスワード違いでも（2026-11-20 実機）、正しいパスワードのたまたまの失敗でも出る
+ * （2026-11-22 実機。同じパスワードで次は通った）ので、言い切らない。
+ */
 export function saveFailureText(reason: number): string {
   if (reason === 201) return "その Wi-Fi が見つかりませんでした。名前を確かめてください（5GHz だけの Wi-Fi にはつながりません）。";
-  if (reason === 15 || reason === 202 || reason === 204 || reason === 2) return "パスワードが違うようです。";
+  if (reason === 2) return "つながりませんでした。パスワードを確かめて、合っていればもう一度試してください。";
+  if (reason === 15 || reason === 202 || reason === 204) return "パスワードが違うようです。";
   return `つながりませんでした（理由 ${reason}）。`;
 }

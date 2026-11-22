@@ -125,6 +125,10 @@ inline void onWifiEvent(WiFiEvent_t event, WiFiEventInfo_t info) {
                     (int)info.wifi_ap_stadisconnected.reason, g_scanning.load());
       break;
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      // 8（ASSOC_LEAVE）と 3（AUTH_LEAVE）は自分から離れた時の理由。つなぎ直しの WiFi.begin や、あきらめた時の
+      // WiFi.disconnect で必ず出るので、失敗には数えない（数えると、やり直しが即失敗になり、本当の理由も上書きされる。
+      // 2026-11-22 実機: パスワード違いの 2 が 3 に置き換わってアプリへ返った）
+      if (info.wifi_sta_disconnected.reason == 8 || info.wifi_sta_disconnected.reason == 3) break;
       g_lastReason.store((uint8_t)info.wifi_sta_disconnected.reason);
       g_staDisconnects++;
       break;
