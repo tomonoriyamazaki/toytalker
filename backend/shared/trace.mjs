@@ -98,6 +98,8 @@ export function describePrevTurn(prev) {
 const DEVICE_PREV_MS = [
   "pre_ms", "tls_ms", "send_ms", "headers_ms", "first_audio_ms", "play_start_ms", "recv_end_ms", "play_end_ms",
   "barge_ms", "audio_ms", "unplayed_ms", "ws_max_block_ms", "aec_confirm_ms",
+  // バッファ切れがいつ・どれだけ（ファーム 0.7.44）: 最初の時刻（0 は無し）/ 止まっていた合計 / 最長の1回
+  "under_first_ms", "under_stall_ms", "under_max_ms",
 ];
 const DEVICE_PREV_COUNTS = [
   "turn", "underruns", "segments",

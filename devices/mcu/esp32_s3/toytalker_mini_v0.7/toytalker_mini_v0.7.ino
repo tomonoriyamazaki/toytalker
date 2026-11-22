@@ -1671,6 +1671,11 @@ static TaskHandle_t playerTaskHandle = NULL;
 // ベースライン取得と、v0.2（GND強化後）の効果測定に使う
 static volatile uint32_t statUnderruns = 0;
 static volatile bool statUnderrunPending = false;  // 空検知→再生再開で確定カウント(終端の空は数えない)
+// いつ・どれだけ止まったか（0.7.44。回数だけでは無害な一瞬の空と聞こえる途切れを分けられない）。再生タスクが書き、止まった後に loop が読む
+static volatile uint32_t statUnderrunEmptyAtMs = 0;  // いま溜め直している空の始まり（millis）
+static volatile uint32_t statUnderrunFirstAtMs = 0;  // 最初の空の始まり（millis。無ければ 0）
+static volatile uint32_t statUnderrunStallMs = 0;    // 空で止まっていた時間の合計
+static volatile uint32_t statUnderrunMaxMs = 0;      // そのうち最長の1回
 static int32_t statRssiSum = 0;
 static int32_t statRssiCount = 0;
 static int statRssiMin = 0;  // RSSIは負値。0は未計測の意味
@@ -1689,6 +1694,10 @@ void updatePowerReading() {
 void statsReset() {
   statUnderruns = 0;
   statUnderrunPending = false;
+  statUnderrunEmptyAtMs = 0;
+  statUnderrunFirstAtMs = 0;
+  statUnderrunStallMs = 0;
+  statUnderrunMaxMs = 0;
   statRssiSum = 0;
   statRssiCount = 0;
   statRssiMin = 0;
@@ -1788,6 +1797,12 @@ void playbackTask(void* param) {
         if (statUnderrunPending) {  // 溜め直し後の再開=本物のアンダーランとして確定
           statUnderruns++;
           statUnderrunPending = false;
+          const uint32_t emptyAt = statUnderrunEmptyAtMs;
+          const uint32_t stalled = millis() - emptyAt;
+          if (!statUnderrunFirstAtMs) statUnderrunFirstAtMs = emptyAt ? emptyAt : 1;
+          statUnderrunStallMs = statUnderrunStallMs + stalled;
+          if (stalled > statUnderrunMaxMs) statUnderrunMaxMs = stalled;
+          Serial.printf("[PLAYER] underrun resumed stalled_ms=%lu\n", (unsigned long)stalled);
         }
         Serial.printf("[PLAYER] playback start (buffered=%u bytes)\n", (unsigned)avail);
       } else if (playerStreamEnd && avail == 0) {
@@ -1812,6 +1827,7 @@ void playbackTask(void* param) {
       // アンダーラン: 溜め直す（この間DMAは無音を出力）
       // カウントは再生再開時に確定させる（ストリーム終端の空を誤カウントしないため）
       statUnderrunPending = true;
+      statUnderrunEmptyAtMs = millis();
       Serial.println("[PLAYER] underrun → rebuffering");
       playerPrebuffering = true;
       continue;
@@ -2301,6 +2317,10 @@ void finishTurnReport(const char* stop, uint32_t t0) {
   if (firstWrite) turnReport.playStartMs = firstWrite - t0;
   turnReport.audioMs = ttsPcmBytes / (SAMPLE_RATE_TTS * 2 / 1000);
   turnReport.underruns = statUnderruns;
+  const uint32_t underFirst = statUnderrunFirstAtMs;
+  turnReport.underFirstMs = underFirst ? underFirst - t0 : 0;
+  turnReport.underStallMs = statUnderrunStallMs;
+  turnReport.underMaxMs = statUnderrunMaxMs;
   turnReport.segments = ttsSegments;
   turnReport.bc = backchannelFired;
   turnReport.rssiAvg = statRssiCount ? (int)(statRssiSum / statRssiCount) : 0;

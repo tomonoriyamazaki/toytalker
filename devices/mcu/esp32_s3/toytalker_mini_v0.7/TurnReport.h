@@ -32,6 +32,9 @@ struct TurnReport {
   uint32_t audioMs = 0;      // 受けた返答の音声の長さ（24kHz mono の バイト数から）
   uint32_t unplayedMs = 0;   // 止めた時点でバッファに残っていた鳴らしていない音声（最後まで鳴らせば 0）
   uint32_t underruns = 0;    // 再生中のバッファ切れ（溜め直してから再開した回数）
+  uint32_t underFirstMs = 0; // t0 → 最初のバッファ切れ（play_start_ms と比べれば鳴り始めから何 ms 後か分かる。無ければ 0）
+  uint32_t underStallMs = 0; // バッファ切れで止まっていた時間の合計（空になってから溜め直して再開するまで）
+  uint32_t underMaxMs = 0;   // そのうち最長の1回
   uint32_t segments = 0;     // 受けた音声の区切り（tts_start）
   bool bc = false;           // このターンで相槌を鳴らした
   int rssiAvg = 0, rssiMin = 0;  // 再生中の Wi-Fi RSSI（0 は未計測）
@@ -59,17 +62,18 @@ inline String turnReportJsonNumber(double v, int digits) {
 
 // "prev":{…}（先頭のカンマは呼び出し側）
 inline String turnReportJson(const TurnReport& r) {
-  char buf[640];
+  char buf[768];
   int n = snprintf(buf, sizeof(buf),
     "\"prev\":{\"turn\":%lu,\"stop\":\"%s\",\"pre_ms\":%lu,\"tls_ms\":%lu,\"tls_ok\":%d,\"send_ms\":%lu,"
     "\"headers_ms\":%lu,\"first_audio_ms\":%lu,\"play_start_ms\":%lu,\"recv_end_ms\":%lu,\"play_end_ms\":%lu,"
-    "\"barge_ms\":%lu,\"audio_ms\":%lu,\"unplayed_ms\":%lu,\"underruns\":%lu,\"segments\":%lu,\"bc\":%d,"
+    "\"barge_ms\":%lu,\"audio_ms\":%lu,\"unplayed_ms\":%lu,\"underruns\":%lu,\"under_first_ms\":%lu,\"under_stall_ms\":%lu,\"under_max_ms\":%lu,\"segments\":%lu,\"bc\":%d,"
     "\"rssi_avg\":%d,\"rssi_min\":%d,\"ws_max_block_ms\":%lu",
     (unsigned long)r.turn, r.stop, (unsigned long)r.preMs, (unsigned long)r.tlsMs, r.tlsOk ? 1 : 0,
     (unsigned long)r.sendMs, (unsigned long)r.headersMs, (unsigned long)r.firstAudioMs,
     (unsigned long)r.playStartMs, (unsigned long)r.recvEndMs, (unsigned long)r.playEndMs,
     (unsigned long)r.bargeMs, (unsigned long)r.audioMs, (unsigned long)r.unplayedMs,
-    (unsigned long)r.underruns, (unsigned long)r.segments, r.bc ? 1 : 0, r.rssiAvg, r.rssiMin,
+    (unsigned long)r.underruns, (unsigned long)r.underFirstMs, (unsigned long)r.underStallMs, (unsigned long)r.underMaxMs,
+    (unsigned long)r.segments, r.bc ? 1 : 0, r.rssiAvg, r.rssiMin,
     (unsigned long)r.wsMaxBlockMs);
   String out(buf);
   if (n < 0 || n >= (int)sizeof(buf)) out = "\"prev\":{\"turn\":" + String(r.turn);  // 起きない想定。壊れた JSON は送らない
