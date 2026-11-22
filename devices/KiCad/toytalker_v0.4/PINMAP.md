@@ -3,7 +3,7 @@
 > **このファイルの役割: 「GPIOの正」。** ピン割当の唯一の基準+ファーム用のdefine。ピンを変えたら必ずここを更新する。
 > 変更の一覧と理由 → [マイコン](../../../docs/mcu.md) の「v0.4 で変えること」。
 
-**状態（2026-11-22）: 案。回路図はまだ描いていない。** 配置と配線を引いて通らない所が出たら、ここを直してから回路図を直す。マイクの 2 本は、マイクを基板のどの端に置くかで動く可能性がある。
+**状態（2026-11-22）: 案。回路図はまだ v0.3 のまま（MINI-1）。** 基板ファイルは配置の検討用で、モジュール・コネクタ・マイクを置き直し、作り直す範囲の配線を消してある（[マイコン](../../../docs/mcu.md) の「v0.4 の状態」）。配置を決めてからここを確定し、回路図を直す。マイクは上辺（電源スイッチの右隣）に置く前提で、左の列の上から順に近い部品を割り当てた。
 
 ## 割当表
 
@@ -11,12 +11,12 @@
 
 | 信号 | GPIO | モジュールのピン | 辺 | v0.3 | 備考 |
 |---|---|---|---|---|---|
-| VBAT_ADC | **4** | 4 | 左 | 1 | ADC1_CH3。分圧は 100kΩ ×2（v0.3 は 470kΩ ×2。Basic 部品へ） |
-| BOARD_TEMP | **5** | 5 | 左 | 2 | ADC1_CH4 |
-| CHG_STAT1 | **6** | 6 | 左 | 13 | BQ25185 STAT1 + 100k プルアップ |
-| CHG_STAT2 | **7** | 7 | 左 | 14 | BQ25185 STAT2 + 100k プルアップ |
-| MIC_CLK | **15** | 8 | 左 | 48 | PDM クロック出力（2.048MHz） |
-| MIC_DATA | **16** | 9 | 左 | 34 | PDM データ入力。34 は WROOM-1 に出ていない |
+| MIC_CLK | **4** | 4 | 左 | 48 | PDM クロック出力（2.048MHz）。マイクが上辺なので、左の列のいちばん上 |
+| MIC_DATA | **5** | 5 | 左 | 34 | PDM データ入力。34 は WROOM-1 に出ていない |
+| BOARD_TEMP | **6** | 6 | 左 | 2 | ADC1_CH5 |
+| VBAT_ADC | **7** | 7 | 左 | 1 | ADC1_CH6。分圧は 100kΩ ×2（v0.3 は 470kΩ ×2。Basic 部品へ） |
+| CHG_STAT1 | **15** | 8 | 左 | 13 | BQ25185 STAT1 + 100k プルアップ |
+| CHG_STAT2 | **16** | 9 | 左 | 14 | BQ25185 STAT2 + 100k プルアップ |
 | BUTTON(S2) | **17** | 10 | 左 | 35 | R7 経由。35 は R8 の PSRAM が使う。17 は深いスリープから起こせる |
 | USB D- / D+ | 19 / 20 | 13 / 14 | 左 | 19/20 | USB-Serial/JTAG（固定） |
 | AMP_BCLK | **9** | 17 | 下 | 37 | I2S1（再生）。37 は R8 の PSRAM が使う |
@@ -50,18 +50,18 @@ GPIO33・34 は WROOM-1 の外に出ていない。
 
 ```cpp
 // v0.4 基板（WROOM-1-N16R8）。ビルドは PSRAM=opi、FlashSize=16M
-#define PIN_MIC_CLK    15   // PDM clock
-#define PIN_MIC_DATA   16   // PDM data
+#define PIN_MIC_CLK    4    // PDM clock
+#define PIN_MIC_DATA   5    // PDM data
 #define PIN_AMP_BCLK   9
 #define PIN_AMP_WS     10
 #define PIN_AMP_DIN    11
 #define PIN_AMP_SD     12
 #define PIN_LED        13
 #define PIN_BUTTON     17
-#define PIN_VBAT_ADC   4
-#define PIN_BOARD_TEMP 5
-#define PIN_CHG_STAT1  6
-#define PIN_CHG_STAT2  7
+#define PIN_VBAT_ADC   7
+#define PIN_BOARD_TEMP 6
+#define PIN_CHG_STAT1  15
+#define PIN_CHG_STAT2  16
 #define PIN_HW_ID0     14   // 版の判別。内蔵プルアップで読む（抵抗あり = 0）。v0.4 は 3 本とも 1
 #define PIN_HW_ID1     21
 #define PIN_HW_ID2     47
