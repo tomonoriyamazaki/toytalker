@@ -7,6 +7,8 @@
 #   bash devices/mcu/esp32_s3/tools/flash-published.sh 0.7.20                      # ポートは自動（Mac の /dev/cu.usbmodem*）
 #   bash devices/mcu/esp32_s3/tools/flash-published.sh 0.7.20 /dev/cu.usbmodem101  # ポートを指定（Windows は COM12 など）
 #   bash devices/mcu/esp32_s3/tools/flash-published.sh 0.7.20 --dry-run            # 取得と照合まで。本体には触らない
+#   bash devices/mcu/esp32_s3/tools/flash-published.sh 0.7.35 COM4 --hw v0.3       # 書いた後に基板の版を NVS へ（v0.3 以降の
+#                                                                                  # 基板に最初に書くとき。set-board-hw.sh）
 #
 # 版は必ず番号で指定する（beta は試験版を指していることがあるので、チャネル名では書かない）。
 #
@@ -28,17 +30,24 @@ if command -v cygpath >/dev/null 2>&1; then BUILD_DIR="$(cygpath -m "$BUILD_DIR"
 
 cd "$(dirname "$0")/../../../.."   # リポジトリルート
 
-VERSION=""; PORT=""; DRY_RUN=0
+VERSION=""; PORT=""; DRY_RUN=0; HW=""; WANT_HW=0
 for arg in "$@"; do
+  if [[ $WANT_HW -eq 1 ]]; then HW="$arg"; WANT_HW=0; continue; fi
   case "$arg" in
     --dry-run) DRY_RUN=1 ;;
+    --hw) WANT_HW=1 ;;
+    --hw=*) HW="${arg#--hw=}" ;;
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) if [[ -z "$VERSION" ]]; then VERSION="$arg"; elif [[ -z "$PORT" ]]; then PORT="$arg"; else echo "too many arguments" >&2; exit 2; fi ;;
   esac
 done
-if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "usage: $0 <版 例 0.7.20> [ポート] [--dry-run]" >&2
+if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || $WANT_HW -eq 1 ]]; then
+  echo "usage: $0 <版 例 0.7.20> [ポート] [--dry-run] [--hw <基板の版 例 v0.3>]" >&2
   exit 2
+fi
+if [[ -n "$HW" && -z "$PORT" && $DRY_RUN -eq 0 ]]; then
+  PORTS_FOR_HW=(/dev/cu.usbmodem*)
+  [[ ${#PORTS_FOR_HW[@]} -eq 1 && -e "${PORTS_FOR_HW[0]}" ]] || { echo "❌ --hw はポートの指定が要る" >&2; exit 2; }
 fi
 for tool in arduino-cli node aws; do
   command -v "$tool" >/dev/null 2>&1 || { echo "❌ $tool が PATH に無い" >&2; exit 1; }
@@ -102,6 +111,10 @@ if [[ -z "$PORT" ]]; then
 fi
 echo "🔌 writing to $PORT ..."
 arduino-cli upload -p "$PORT" --fqbn "$FQBN" --input-dir "$BUILD_DIR" "$SKETCH_DIR"
+if [[ -n "$HW" ]]; then
+  sleep 4   # 再起動してシリアルが戻るのを待つ
+  bash "$(dirname "$0")/set-board-hw.sh" "$HW" "$PORT"
+fi
 echo "✅ 書き込み完了。本体は自動で再起動する。確かめること:"
 echo "   - シリアルの [BUILD] fw=$VERSION"
 echo "   - Wi-Fi につながるか（つながらなければ BLE 設定へ入る＝LED が速い点滅）"
