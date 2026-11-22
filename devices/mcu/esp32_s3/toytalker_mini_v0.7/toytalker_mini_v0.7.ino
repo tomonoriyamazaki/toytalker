@@ -1650,9 +1650,10 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
 // リングバッファでネットワークジッタを吸収する。
 #define PLAY_RING_SIZE   (512 * 1024)  // 512KB ≈ 5.4秒分 (24kHz/16bit/stereo)
 #define PLAY_PREBUFFER   (32 * 1024)   // 音が途切れた後、再開前に溜める量 ≈ 0.34秒
-// 鳴り始めに溜める量 ≈ 0.1秒（0.7.45。それまでは 0.34 秒で、最初の音が中央値で約 0.13 秒遅れていた）。
+// 鳴り始めに溜める量 ≈ 0.2秒（0.7.46。0.7.44 までは 0.34 秒で、最初の音が中央値で約 0.13 秒遅れていた。
+// 0.7.45 の 0.1 秒は 6 ターン中 1 回、出だしで 82ms 途切れた）。
 // リングの先に I2S の DMA（8本 × 1023 フレーム ≈ 0.34 秒）があり、鳴り始めた後はそちらが受信のむらを吸収する
-#define PLAY_PREBUFFER_START 9600
+#define PLAY_PREBUFFER_START 19200
 #define PLAY_WRITE_CHUNK 4096          // I2Sへの1回の書き込み量
 
 static uint8_t* playRing = NULL;
