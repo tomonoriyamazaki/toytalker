@@ -371,18 +371,15 @@ bool fetchSonioxKeyOnly(String& keyOut) {
   return !keyOut.isEmpty();
 }
 
-String sonioxStartMessageFor(const String& key);
 void finishUtterance(const char* why);
 
-// 先行接続ワーカー（Core 0）で接続前に走る。古ければ取り直し、新しいキーで開始メッセージを作る。
+// 先行接続ワーカー（Core 0）で接続前に走る。古ければ取り直す（ワーカーが新しいキーで接続する）。
 // sonioxKey と sonioxKeyFetchedMs は loop() のものなので書かない（finishSonioxPreconnect が写す）。
-bool prepareSonioxKeyOnWorker(String& startMessageOut, String& keyOut) {
+bool prepareSonioxKeyOnWorker(String& keyOut) {
   if (!sonioxKeyIsOld()) return false;
   Serial.printf("[SONIOX_KEY] old (age_s=%lu); refreshing on worker\n",
                 (unsigned long)((millis() - sonioxKeyFetchedMs) / 1000));
-  if (!fetchSonioxKeyOnly(keyOut)) return false;
-  startMessageOut = sonioxStartMessageFor(keyOut);
-  return true;
+  return fetchSonioxKeyOnly(keyOut);
 }
 
 // loop() で WS を直接開く直前に呼ぶ。古ければ取り直す（1〜2秒。先行接続が無い回だけ）。
@@ -397,20 +394,19 @@ void refreshSonioxKeyIfOld(const char* why) {
   }
 }
 
-String sonioxStartMessageFor(const String& key) {
-  return "{\"api_key\":\"" + key + "\","
-         "\"model\":\"" + sonioxModel + "\","
+// 鍵は入れない（接続時に Authorization ヘッダーで渡す。beginSonioxWs）
+String sonioxStartMessage() {
+  return "{\"model\":\"" + sonioxModel + "\","
          "\"audio_format\":\"pcm_s16le\",\"sample_rate\":16000,\"num_channels\":1,"
          "\"enable_partial_results\":true,\"enable_endpoint_detection\":true,"
          "\"language_hints\":[\"ja\",\"en\"]}";
 }
 
-String sonioxStartMessage() { return sonioxStartMessageFor(sonioxKey); }
-
 // Soniox の WebSocket を証明書の検証つきで設定する（接続は ws.loop() か先行接続ワーカーが行う）。
 // beginSSL は CA を渡さないと setInsecure になる（WebSocketsClient.cpp）ので、beginSslWithCA を使う
 void beginSonioxWs() {
   ws.beginSslWithCA(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket", SONIOX_ROOT_CAS);
+  setSonioxKey(ws, sonioxKey);
 }
 
 bool sonioxIsConnected() {

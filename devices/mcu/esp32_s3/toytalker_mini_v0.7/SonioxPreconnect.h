@@ -4,6 +4,12 @@
 #include <atomic>
 #include <functional>
 
+// Soniox は鍵を接続時（WebSocket のハンドシェイクの Authorization ヘッダー）に受け取る。
+// 開始メッセージの api_key は 2027-01-15 に廃止（ロードマップ22）。begin 系は Authorization を消すので、その後に呼ぶ。
+inline void setSonioxKey(WebSocketsClient& client, const String& key) {
+  client.setAuthorization(("Bearer " + key).c_str());
+}
+
 // The worker exclusively owns the client from start() through takeResult().
 // Its callback sends the start message only; application state stays on loop().
 // A timeout/cancel NEVER deletes a task or a socket while connect() is running.
@@ -17,9 +23,9 @@ class SonioxPreconnect {
     uint32_t keyFetchedMs = 0, prepareMs = 0;
     String key;
   };
-  // 接続の前にワーカーで走る準備処理。新しいキーを取ったら startMessage と key を書いて true を返す。
+  // 接続の前にワーカーで走る準備処理。新しいキーを取ったら key を書いて true を返す（ワーカーがその鍵で接続する）。
   // loop() の状態（sonioxKey 等）には触らず、結果は Result 経由で loop() に渡す。
-  using Prepare = std::function<bool(String& startMessageOut, String& keyOut)>;
+  using Prepare = std::function<bool(String& keyOut)>;
   bool init(WebSocketsClient& client) {
     client_ = &client;
     if (xTaskCreatePinnedToCore(taskEntry, "soniox_connect", 8192, this, 1, &task_, 0) == pdPASS) return true;
@@ -29,7 +35,7 @@ class SonioxPreconnect {
   bool available() const { return task_ != nullptr; }
   bool ownsClient() const { return state_.load(std::memory_order_acquire) != State::Idle; }
 
-  // Caller has already configured beginSSL() and heartbeat, and owns client.
+  // Caller has already configured beginSSL(), the key (setSonioxKey) and heartbeat, and owns client.
   bool start(const String& startMessage, Prepare prepare = nullptr) {
     if (!available() || ownsClient()) return false;
     startMessage_ = startMessage;
@@ -76,9 +82,9 @@ class SonioxPreconnect {
       if (prepare_ && !cancel_.load()) {
         // 鍵の取り直し（HTTPS 1〜2秒）。再生中の loop() を止めないためにここで行う。
         const uint32_t p0 = millis();
-        String msg, key;
-        if (prepare_(msg, key) && !msg.isEmpty() && !key.isEmpty()) {
-          startMessage_ = msg;
+        String key;
+        if (prepare_(key) && !key.isEmpty()) {
+          setSonioxKey(*client_, key);  // まだ接続していない。この鍵でハンドシェイクする
           result_.key = key;
           result_.keyRefreshed = true;
           result_.keyFetchedMs = millis();
