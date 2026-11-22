@@ -12940,6 +12940,14 @@
 		(uuid "3d8fe087-b0aa-4640-901b-754c89a3a95c")
 	)
 	(segment
+		(start 24.25 35.75)
+		(end 24.5 36)
+		(width 0.2)
+		(layer "F.Cu")
+		(net "/GPIO20")
+		(uuid "72057f03-f18b-4121-be07-77be148cac60")
+	)
+	(segment
 		(start 18.08 30.575)
 		(end 19.425 30.575)
 		(width 0.2)
@@ -12953,7 +12961,7 @@
 		(width 0.2)
 		(layer "F.Cu")
 		(net "/GPIO20")
-		(uuid "b8965f9b-123c-48c2-a7d7-ffe373fbfff0")
+		(uuid "a1ae79b2-f426-4c02-9d2e-71f43b18a221")
 	)
 	(segment
 		(start 18.076431 31.578568)
@@ -12964,7 +12972,7 @@
 		(uuid "bf5ce7dd-027b-4fed-b2f3-5f5b2847a4c6")
 	)
 	(via
-		(at 24.5 36)
+		(at 24.25 35.75)
 		(size 0.5)
 		(drill 0.3)
 		(layers "F.Cu" "B.Cu")
@@ -12988,14 +12996,6 @@
 		(uuid "de7dc984-50a2-4cc9-92b8-5d852004da5b")
 	)
 	(segment
-		(start 22.078568 31.578568)
-		(end 24.5 34)
-		(width 0.2)
-		(layer "B.Cu")
-		(net "/GPIO20")
-		(uuid "0e0dd95f-153a-448f-b31b-5c6475c69d6e")
-	)
-	(segment
 		(start 19.425 30.575)
 		(end 19.425 31.574999)
 		(width 0.2)
@@ -13004,20 +13004,20 @@
 		(uuid "4027e93e-6280-42d6-b8b9-8bfcea2e7e3b")
 	)
 	(segment
-		(start 24.5 34)
-		(end 24.5 36)
+		(start 22.078568 31.578568)
+		(end 19.421431 31.578568)
 		(width 0.2)
 		(layer "B.Cu")
 		(net "/GPIO20")
-		(uuid "bdf35f0a-b73a-4b12-ba8d-ebbc5d045f8f")
+		(uuid "90265f5b-887e-4c98-9d0b-d2d4312adc88")
 	)
 	(segment
-		(start 19.421431 31.578568)
+		(start 24.25 33.75)
 		(end 22.078568 31.578568)
 		(width 0.2)
 		(layer "B.Cu")
 		(net "/GPIO20")
-		(uuid "e80e95a7-b85b-4137-8a4d-49eadd157788")
+		(uuid "e040bc6c-30f5-4709-86f4-39496ba5a99d")
 	)
 	(segment
 		(start 19.425 31.574999)
@@ -13026,6 +13026,14 @@
 		(layer "B.Cu")
 		(net "/GPIO20")
 		(uuid "f5e5aaf8-d8f9-453c-9d7d-f043846757fe")
+	)
+	(segment
+		(start 24.25 35.75)
+		(end 24.25 33.75)
+		(width 0.2)
+		(layer "B.Cu")
+		(net "/GPIO20")
+		(uuid "fed1f6cc-d7d7-466c-bed5-25436833b9e3")
 	)
 	(zone
 		(net "GND")
