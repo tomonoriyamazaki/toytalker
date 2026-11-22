@@ -25,7 +25,7 @@ struct TurnReport {
   uint32_t sendMs = 0;       // 要求の書き込み
   uint32_t headersMs = 0;    // t0 → 応答ヘッダーを読み終えた
   uint32_t firstAudioMs = 0; // t0 → 返答の最初の音声バイト（相槌は含まない）
-  uint32_t playStartMs = 0;  // t0 → 返答の音声を最初に I2S へ渡した（溜め 0.2 秒の後。0.7.44 までは 0.34 秒、0.7.45 は 0.1 秒。スピーカーの発声はこの数十ms後）
+  uint32_t playStartMs = 0;  // t0 → 返答の音声を最初に I2S へ渡した（溜め 0.34 秒の後。0.7.45 は 0.1 秒、0.7.46 は 0.2 秒。スピーカーの発声はこの数十ms後）
   uint32_t recvEndMs = 0;    // t0 → 受信の終わり（最後まで、または割り込み・失敗で止めた）
   uint32_t playEndMs = 0;    // t0 → アンプを切った
   uint32_t bargeMs = 0;      // t0 → 割り込みの判定（声: AEC の発火、ボタン: 押した時刻）。割り込みが無ければ 0
