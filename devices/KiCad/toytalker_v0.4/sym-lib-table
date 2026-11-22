@@ -17,4 +17,5 @@
   (lib (name "CYA0630-1.0UH")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/CYA0630-1.0UH.kicad_sym")(options "")(descr ""))
   (lib (name "toytalker_v02_parts")(type "KiCad")(uri "${KIPRJMOD}/easyeda_lib/toytalker_v02_parts.kicad_sym")(options "")(descr "v0.2 new parts: ZH(C265329) MX1.25(C2845379) slide-switch(C22435661), converted from EasyEDA"))
   (lib (name "SPH0655LM4H-1")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/SPH0655LM4H-1.kicad_sym")(options "")(descr "v0.3 PDM mic (Knowles SPH0655LM4H-1-8, C22376158)"))
+  (lib (name "SM02B-SRSS-TB_LF__SN_")(type "KiCad")(uri "${KIPRJMOD}/libs/symbols/SM02B-SRSS-TB_LF__SN_.kicad_sym")(options "")(descr "v0.4 speaker connector (JST SH 2P side entry, C160402)"))
 )

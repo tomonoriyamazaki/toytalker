@@ -7,7 +7,7 @@
     (property "Value" "SM02B-SRSS-TB_LF__SN_" (id 1) (at 11.4908 2.55824 0)
       (effects (font (size 1.27 1.27)) (justify left))
     )
-    (property "Footprint" "SM02B-SRSS-TB_LF__SN_:SM02B-SRSS-TB_LF__SN_" (id 2) (at 0 0 0)
+    (property "Footprint" "footprints:SM02B-SRSS-TB_LF__SN_" (id 2) (at 0 0 0)
       (effects (font (size 1.27 1.27)) (justify bottom) hide)
     )
     (property "MF" "JST Sales" (id 4) (at 0 0 0)
