@@ -14,7 +14,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - 外装（Fusion、ペンダント型）: [外装 README](devices/enclosure/toytalker_mini/README.md)（状態・Fusion 側の所在・Claude Code から Fusion を操作する手順）。正本は Fusion のクラウドで、書き出した .f3d / .step をここに置く
 - ZakiCorp TTS（クローンボイス）: [ZakiCorp TTS](docs/zakicorp-tts.md)（状態・所在）、[起動・復旧](docs/tts-boot-recovery.md)（手順）、[バッチエンジン](docs/qwen3-tts-batch-engine-2026-09-12.md)（設計・計測）
 - 利用者認証（Cognito + Google / Apple。ロードマップ4）: [利用者認証](docs/auth.md)（状態・仕組み・各社側の設定・確認の仕方）
-- 原価・課金・前払いポイント制（Stripe・購入ページ `web/site/buy/`）: [原価と課金の考え方](docs/pricing-and-cost-model.md)（段階3の設計は 11.10）
+- 原価・課金・前払いポイント制（Stripe・購入ページ `web/site/buy/`）: [原価と課金の考え方](docs/pricing-and-cost-model.md)（段階3の設計は 11.10、本体の原価の目安は 12）
 - TTSフォールバック（主の声が失敗・3秒超えでずんだもんへ）と通知: [TTSフォールバック](docs/tts-fallback-and-notifications.md)（状態・仕組み）。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)
 - 販売の準備（API 事業者の規約・保護者の同意・物の安全・Amazon。ロードマップ42）: [販売の準備](docs/sales-readiness.md)。物の認証は [認証チェックリスト](docs/certification-checklist.md)
 - MacBookでの開発: [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md)
