@@ -1649,7 +1649,10 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
 // 受信(メインループ=producer)とI2S再生(playbackTask=consumer)を分離し、
 // リングバッファでネットワークジッタを吸収する。
 #define PLAY_RING_SIZE   (512 * 1024)  // 512KB ≈ 5.4秒分 (24kHz/16bit/stereo)
-#define PLAY_PREBUFFER   (32 * 1024)   // 再生開始/再開前に溜める量 ≈ 0.34秒
+#define PLAY_PREBUFFER   (32 * 1024)   // 音が途切れた後、再開前に溜める量 ≈ 0.34秒
+// 鳴り始めに溜める量 ≈ 0.1秒（0.7.45。それまでは 0.34 秒で、最初の音が中央値で約 0.13 秒遅れていた）。
+// リングの先に I2S の DMA（8本 × 1023 フレーム ≈ 0.34 秒）があり、鳴り始めた後はそちらが受信のむらを吸収する
+#define PLAY_PREBUFFER_START 9600
 #define PLAY_WRITE_CHUNK 4096          // I2Sへの1回の書き込み量
 
 static uint8_t* playRing = NULL;
@@ -1658,6 +1661,14 @@ static volatile size_t playRingTail = 0;      // consumer読み出し位置
 static volatile bool playerActive = false;    // 再生セッション中
 static volatile bool playerStreamEnd = false; // 受信完了（残りを出し切って停止）
 static volatile bool playerPrebuffering = true;
+static size_t playerPrebufferBytes = PLAY_PREBUFFER_START;  // いま待っている溜めの量（鳴り始めは小さく、途切れた後は PLAY_PREBUFFER）
+// DMA に渡した音が鳴り終わる見込みの時刻（esp_timer の µs。再生タスクだけが書く）。リングが空でも、これより前なら音は続いている
+static int64_t playDmaEndUs = 0;
+static inline void notePlayDmaWrite(size_t bytes) {
+  const int64_t now = esp_timer_get_time();
+  if (playDmaEndUs < now) playDmaEndUs = now;
+  playDmaEndUs += (int64_t)bytes * 1000000LL / (SAMPLE_RATE_TTS * 4);
+}
 static volatile bool playerParked = true;     // タスクがI2Sに触っていない状態
 // 一時停止のとき巻き戻す量: アンプを切った時点で DMA に入っていた分（8 本 × 4092 バイト ≈ 0.34 秒、満杯と仮定）
 static constexpr size_t PLAY_REWIND_BYTES = PLAY_DMA_COUNT * PLAY_DMA_FRAMES * 4;
@@ -1667,7 +1678,8 @@ static TaskHandle_t playerTaskHandle = NULL;
 
 // ==== WiFi/再生品質の計測（基板グラウンド設計の検証用） ====
 // 1ターン（録音開始）ごとにリセットし、再生終了時に [STATS] サマリを出す。
-// underruns = 再生中のバッファ枯渇回数（音途切れの直接指標）。v0.1基板の
+// underruns = 再生中に音が途切れた回数。0.7.45 から「リングが空のまま DMA の音も鳴り終わった」時だけ数える
+// （0.7.44 まではリングが空になるたびに数え、鳴り始めに DMA が溜めを飲み込む分でほぼ毎ターン 1 になっていた）。v0.1基板の
 // ベースライン取得と、v0.2（GND強化後）の効果測定に使う
 static volatile uint32_t statUnderruns = 0;
 static volatile bool statUnderrunPending = false;  // 空検知→再生再開で確定カウント(終端の空は数えない)
@@ -1784,6 +1796,7 @@ void playbackTask(void* param) {
       }
       size_t written = 0;
       writePlaybackI2s(pauseSilence, sizeof(pauseSilence), &written, pdMS_TO_TICKS(100));
+      notePlayDmaWrite(written);
       continue;
     }
     pauseRewound = false;
@@ -1792,7 +1805,7 @@ void playbackTask(void* param) {
 
     if (playerPrebuffering) {
       // プリバッファ: 一定量溜まるまで再生開始を待つ（ストリーム終了時は即出し切る）
-      if (avail >= PLAY_PREBUFFER || (playerStreamEnd && avail > 0)) {
+      if (avail >= playerPrebufferBytes || (playerStreamEnd && avail > 0)) {
         playerPrebuffering = false;
         if (statUnderrunPending) {  // 溜め直し後の再開=本物のアンダーランとして確定
           statUnderruns++;
@@ -1824,11 +1837,17 @@ void playbackTask(void* param) {
         playerActive = false;  // 全データ再生完了
         continue;
       }
-      // アンダーラン: 溜め直す（この間DMAは無音を出力）
+      // リングは空でも、DMA に渡した分が鳴っている間は途切れていない。届きしだい続きを渡す
+      if (esp_timer_get_time() < playDmaEndUs) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+        continue;
+      }
+      // アンダーラン: DMA も鳴り終わった（無音が出ている）。多めに溜め直してから再開する
       // カウントは再生再開時に確定させる（ストリーム終端の空を誤カウントしないため）
       statUnderrunPending = true;
       statUnderrunEmptyAtMs = millis();
       Serial.println("[PLAYER] underrun → rebuffering");
+      playerPrebufferBytes = PLAY_PREBUFFER;
       playerPrebuffering = true;
       continue;
     }
@@ -1838,6 +1857,7 @@ void playbackTask(void* param) {
     n = min(n, PLAY_RING_SIZE - t);  // 折返し前まで
     size_t written = 0;
     writePlaybackI2s(playRing + t, n, &written, portMAX_DELAY);
+    notePlayDmaWrite(written);
     if (written > 0) {
       lastI2sWriteMs.store(millis(), std::memory_order_relaxed);
       logFirstTtsWrite();
@@ -1856,6 +1876,8 @@ void playerStart() {
   playerPaused = false;
   playConsumedBytes = 0;
   playPauses = 0;
+  playerPrebufferBytes = PLAY_PREBUFFER_START;
+  playDmaEndUs = 0;
   playerPrebuffering = true;
   statUnderrunPending = false;  // 前セッション(相槌等)の終端レースを持ち越さない
   playerActive = true;
