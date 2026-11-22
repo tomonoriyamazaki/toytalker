@@ -2245,7 +2245,7 @@
 		(uuid "32e38ead-68dc-413d-bcdb-6d0bff2c7393")
 		(at 29.925 31.575 -90)
 		(property "Reference" "S2"
-			(at -0.575 -2.575 180)
+			(at 3.472304 0.039126 180)
 			(layer "F.SilkS")
 			(uuid "eb35fd28-7682-4689-833f-4f150f518ce5")
 			(effects
@@ -4534,7 +4534,7 @@
 		(descr "Capacitor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "capacitor")
 		(property "Reference" "C10"
-			(at -2.120411 0.146809 0)
+			(at 0.881012 0.746051 0)
 			(layer "F.SilkS")
 			(uuid "cff85c3f-729b-4ba9-a07f-ce7b5bb208b1")
 			(effects
@@ -5743,7 +5743,7 @@
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R14"
-			(at 2.04955 -0.002616 0)
+			(at 1.433073 -1.007624 0)
 			(layer "F.SilkS")
 			(uuid "713d90c7-151f-405a-b26b-369c1e4fe30e")
 			(effects
@@ -5940,7 +5940,7 @@
 		(descr "Capacitor SMD 0603 (1608 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf), generated with kicad-footprint-generator")
 		(tags "capacitor")
 		(property "Reference" "C4"
-			(at 2.275 0 0)
+			(at 2.03919 -0.011141 0)
 			(layer "F.SilkS")
 			(uuid "a8ec7c53-c61b-4ef8-960e-f4dd0f3c8bae")
 			(effects
@@ -6512,7 +6512,7 @@
 		(descr "Capacitor SMD 0603 (1608 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 76, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf), generated with kicad-footprint-generator")
 		(tags "capacitor")
 		(property "Reference" "C3"
-			(at 2.275 0 0)
+			(at 2.03919 -0.004961 0)
 			(layer "F.SilkS")
 			(uuid "905a7d83-09d8-4f78-904e-d345e74f9ccf")
 			(effects
@@ -6885,7 +6885,7 @@
 		(at 15.8 38.5 90)
 		(descr "<b>SM02B-SRSS-TB</b><br>")
 		(property "Reference" "SP1"
-			(at -0.346857 0.390964 90)
+			(at -2.711245 4.350681 180)
 			(layer "F.SilkS")
 			(uuid "bd30c6bf-00d1-4400-a18c-39a5210f835a")
 			(effects
@@ -8933,7 +8933,7 @@
 		(uuid "e0e57a4b-7ff5-47c4-ad56-d7b544d2645d")
 		(at 15.75 44.18)
 		(property "Reference" "J2"
-			(at 2.25 -1.68 0)
+			(at 2.473819 -1.405071 0)
 			(layer "F.SilkS")
 			(uuid "65021498-4470-4eb5-b5fb-59b09901e99a")
 			(effects
@@ -11276,7 +11276,7 @@
 		(descr "Resistor SMD 0402 (1005 Metric), square (rectangular) end terminal, IPC-7351 nominal, (Body size source: IPC-SM-782 page 72, https://www.pcb-3d.com/wordpress/wp-content/uploads/ipc-sm-782a_amendment_1_and_2.pdf)")
 		(tags "resistor")
 		(property "Reference" "R13"
-			(at -2.01 0.001662 0)
+			(at 0.136285 -1.022705 0)
 			(layer "F.SilkS")
 			(uuid "59f19117-e0b0-4108-b634-b9524cdbd021")
 			(effects
