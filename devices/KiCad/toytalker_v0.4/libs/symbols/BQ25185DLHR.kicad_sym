@@ -142,6 +142,22 @@
           (effects (font (size 1.016 1.016)))
         )
       )
+      (pin passive line (at 17.78 -7.62 180.0) (length 5.08) hide
+        (name "THERMAL_PAD"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "12"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
+      (pin passive line (at 17.78 -7.62 180.0) (length 5.08) hide
+        (name "THERMAL_PAD"
+          (effects (font (size 1.016 1.016)))
+        )
+        (number "13"
+          (effects (font (size 1.016 1.016)))
+        )
+      )
       (pin power_in line (at 17.78 -10.16 180.0) (length 5.08)
         (name "GND"
           (effects (font (size 1.016 1.016)))

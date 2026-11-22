@@ -1385,6 +1385,44 @@
 						)
 					)
 				)
+				(pin passive line
+					(at 17.78 -7.62 180)
+					(length 5.08)
+					(hide yes)
+					(name "THERMAL_PAD"
+						(effects
+							(font
+								(size 1.016 1.016)
+							)
+						)
+					)
+					(number "12"
+						(effects
+							(font
+								(size 1.016 1.016)
+							)
+						)
+					)
+				)
+				(pin passive line
+					(at 17.78 -7.62 180)
+					(length 5.08)
+					(hide yes)
+					(name "THERMAL_PAD"
+						(effects
+							(font
+								(size 1.016 1.016)
+							)
+						)
+					)
+					(number "13"
+						(effects
+							(font
+								(size 1.016 1.016)
+							)
+						)
+					)
+				)
 			)
 			(embedded_fonts no)
 		)
@@ -13042,6 +13080,12 @@
 		)
 		(pin "9"
 			(uuid "b2190db1-0995-4aa1-8dcc-4670e56c3a33")
+		)
+		(pin "12"
+			(uuid "1b4ad20e-036a-4f20-9102-db2a4232cc7e")
+		)
+		(pin "13"
+			(uuid "8935c322-7a1e-4063-a4e8-b5a92925bafd")
 		)
 		(instances
 			(project "toytalker_v0.4"
