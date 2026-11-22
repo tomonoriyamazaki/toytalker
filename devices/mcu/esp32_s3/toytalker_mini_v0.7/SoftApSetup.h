@@ -16,6 +16,8 @@
 // - 試作の間は BLE 設定も同時に動く（.ino の startBLE から呼ぶ）。BLE 側がつなぎに行く時は suspend() で止め、失敗したら
 //   requestRestart() で戻す。
 // - シリアルには Wi-Fi のパスワードを出さない（長さだけ）。親機のパスワードは出す（本体に刷る値で、秘密ではない扱い）。
+// - アプリは家の Wi-Fi のパスワードを暗号にして送る（0.7.42。POST /kx で鍵を交換し、/save に box で送る。決まりは SetupCrypto.h）。
+//   設定ページ（ブラウザー）は暗号なしのまま送る（ALLOW_PLAIN_SAVE。売る形では閉じる）。
 //
 // スレッド: begin() / service() とページの処理は loop() から。suspend() / requestRestart() は BLE のタスクから呼んでよい（印を立てるだけ）。
 // Wi-Fi のイベント（onWifiEvent）は別タスクで、数を数えるだけ。
@@ -31,6 +33,7 @@
 #include <esp_mac.h>
 #include <esp_heap_caps.h>
 #include "FirmwareVersion.h"
+#include "SetupCrypto.h"
 
 namespace softap {
 
@@ -67,6 +70,11 @@ static char g_deviceId[18] = {0};  // 機器 ID（BLE のアドレス。小文�
 static const bool PER_DEVICE_PASS = false;
 static const char COMMON_PASS[] = "toytalker-setup";
 static char g_pass[24] = {0};
+// true: 暗号なしの /save（ssid, pass をそのまま）も受ける。設定ページ（ブラウザー）がこれを使う。
+// 売る形では false にする（ページは使えなくなる。ページを残すなら、ページの中で同じ暗号をする JavaScript が要る）。
+// アプリは /info の enc を見て、いつも暗号で送る（暗号なしへは戻らない）。
+static const bool ALLOW_PLAIN_SAVE = true;
+static bool g_cryptoTested = false;
 static uint32_t g_beginMs = 0;
 
 static Scan g_scan = Scan::None;
@@ -371,7 +379,7 @@ inline void handleScan() {
 /** アプリ用: この本体がどれかを返す（機器の登録に使う ID と版）。ページは使わない */
 inline void handleInfo() {
   if (redirectIfForeign()) return;
-  sendJson(200, String("{\"id\":\"") + g_deviceId + "\",\"name\":\"" + g_ssid + "\",\"fw\":\"" TOYTALKER_FW_VERSION "\"}");
+  sendJson(200, String("{\"id\":\"") + g_deviceId + "\",\"name\":\"" + g_ssid + "\",\"fw\":\"" TOYTALKER_FW_VERSION "\",\"enc\":1}");
 }
 
 inline void handleStatus() {
@@ -381,10 +389,50 @@ inline void handleStatus() {
   sendJson(200, String("{\"state\":\"") + state + "\",\"reason\":" + String((int)g_lastReason.load()) + ",\"diag\":" + diagJson() + "}");
 }
 
+/** アプリ用: その場かぎりの鍵を交換する（SetupCrypto.h）。呼ぶたびに鍵を作り直す */
+inline void handleKx() {
+  if (redirectIfForeign()) return;
+  const uint32_t t0 = millis();
+  String sid, pub, confirm;
+  if (!setupcrypto::startSession(g_server->arg("pub"), sid, pub, confirm)) {
+    Serial.println("[SOFTAP] kx rejected");
+    sendJson(400, "{\"ok\":false,\"error\":\"鍵を交換できませんでした。\"}");
+    return;
+  }
+  Serial.printf("[SOFTAP] kx ok ms=%lu\n", (unsigned long)(millis() - t0));
+  sendJson(200, String("{\"v\":1,\"sid\":\"") + sid + "\",\"pub\":\"" + pub + "\",\"confirm\":\"" + confirm + "\"}");
+}
+
 inline void handleSave() {
   if (redirectIfForeign()) return;
-  const String ssid = g_server->arg("ssid");
-  const String pass = g_server->arg("pass");
+  String ssid, pass;
+  const bool encrypted = g_server->hasArg("box");
+  if (encrypted) {
+    // 中身は長さの決まった 98 バイト: [名前の長さ][名前 32][パスワードの長さ][パスワード 64]（アプリの packWifi）
+    uint8_t plain[98];
+    const uint64_t seq = strtoull(g_server->arg("seq").c_str(), nullptr, 10);
+    const setupcrypto::OpenResult r =
+      setupcrypto::openFromApp("save", g_server->arg("sid"), seq, g_server->arg("box"), plain, sizeof(plain));
+    if (r != setupcrypto::OpenResult::Ok) {
+      Serial.printf("[SOFTAP] save rejected crypto=%s\n", setupcrypto::openResultName(r));
+      // 鍵が無い・期限切れは、アプリが鍵を交換し直して送り直す（409 と code で見分ける）
+      sendJson(r == setupcrypto::OpenResult::NoSession ? 409 : 400,
+               String("{\"ok\":false,\"code\":\"") + setupcrypto::openResultName(r) + "\",\"error\":\"暗号を開けませんでした。\"}");
+      return;
+    }
+    const size_t ssidLen = plain[0], passLen = plain[33];
+    if (ssidLen <= 32 && passLen <= 64) {
+      ssid.concat((const char*)plain + 1, ssidLen);
+      pass.concat((const char*)plain + 34, passLen);
+    }
+    mbedtls_platform_zeroize(plain, sizeof(plain));
+  } else if (ALLOW_PLAIN_SAVE) {
+    ssid = g_server->arg("ssid");
+    pass = g_server->arg("pass");
+  } else {
+    sendJson(400, "{\"ok\":false,\"error\":\"暗号なしでは受け取れません。\"}");
+    return;
+  }
   if (ssid.length() == 0 || ssid.length() > 32) {
     sendJson(400, "{\"ok\":false,\"error\":\"Wi-Fi の名前は 1〜32 バイトです。\"}");
     return;
@@ -401,7 +449,7 @@ inline void handleSave() {
   g_tryPass = pass;
   g_conn = Conn::Pending;
   g_connMs = millis();
-  Serial.printf("[SOFTAP] save ssid=%s pass_len=%u\n", ssid.c_str(), (unsigned)pass.length());
+  Serial.printf("[SOFTAP] save ssid=%s pass_len=%u encrypted=%d\n", ssid.c_str(), (unsigned)pass.length(), (int)encrypted);
   sendJson(200, "{\"ok\":true}");
 }
 
@@ -437,6 +485,7 @@ inline void serviceConnect() {
       Serial.printf("[SOFTAP] connected ms=%lu tries=%u ip=%s channel=%d stations=%u\n", (unsigned long)(now - g_connMs),
                     (unsigned)g_tries, WiFi.localIP().toString().c_str(), (int)WiFi.channel(), (unsigned)WiFi.softAPgetStationNum());
       if (g_onConnected) g_onConnected(g_trySsid, g_tryPass);
+      setupcrypto::clearSession();  // 用が済んだ鍵は消す
       return;
     }
     const bool dropped = g_staDisconnects.load() != g_seenDisconnects;
@@ -508,10 +557,17 @@ inline bool begin(ConnectedFn onConnected) {
     g_server->on("/scan", HTTP_GET, handleScan);
     g_server->on("/status", HTTP_GET, handleStatus);
     g_server->on("/info", HTTP_GET, handleInfo);
+    g_server->on("/kx", HTTP_POST, handleKx);
     g_server->on("/save", HTTP_POST, handleSave);
     g_server->onNotFound(handleNotFound);
   }
   g_server->begin();
+
+  setupcrypto::clearSession();
+  if (!g_cryptoTested) {  // 起動して最初の 1 回だけ。本体の暗号の計算がアプリと合っているかをシリアルに出す
+    g_cryptoTested = true;
+    setupcrypto::selfTest();
+  }
 
   g_beginMs = millis();
   g_conn = Conn::Idle;
