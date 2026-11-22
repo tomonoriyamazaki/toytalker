@@ -19,8 +19,8 @@
 | CHG_STAT2 | **16** | 9 | 左 | 14 | BQ25185 STAT2 + 100k プルアップ |
 | BUTTON(S2) | **17** | 10 | 左 | 35 | R7 経由。35 は R8 の PSRAM が使う。17 は深いスリープから起こせる |
 | USB D- / D+ | 19 / 20 | 13 / 14 | 左 | 19/20 | USB-Serial/JTAG（固定） |
-| AMP_BCLK | **9** | 17 | 下 | 37 | I2S1（再生）。37 は R8 の PSRAM が使う |
-| AMP_WS | **10** | 18 | 下 | 36 | 36 は R8 の PSRAM が使う |
+| AMP_WS | **9** | 17 | 下 | 36 | I2S1（再生）。36 は R8 の PSRAM が使う。配線が交差しないよう BCLK と入れ替えた（2026-11-22。アンプの玉の並びに合わせる） |
+| AMP_BCLK | **10** | 18 | 下 | 37 | 37 は R8 の PSRAM が使う |
 | AMP_DIN | **11** | 19 | 下 | 38 | |
 | AMP_SD | **12** | 20 | 下 | 39 | アンプのシャットダウン |
 | LED | **13** | 21 | 下 | 40 | R8（10kΩ）→ D1 |
@@ -52,8 +52,8 @@ GPIO33・34 は WROOM-1 の外に出ていない。
 // v0.4 基板（WROOM-1-N16R8）。ビルドは PSRAM=opi、FlashSize=16M
 #define PIN_MIC_CLK    4    // PDM clock
 #define PIN_MIC_DATA   5    // PDM data
-#define PIN_AMP_BCLK   9
-#define PIN_AMP_WS     10
+#define PIN_AMP_WS     9
+#define PIN_AMP_BCLK   10
 #define PIN_AMP_DIN    11
 #define PIN_AMP_SD     12
 #define PIN_LED        13

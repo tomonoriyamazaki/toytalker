@@ -5817,7 +5817,7 @@
 		)
 		(uuid "0f029232-41b7-488e-8062-1667cd9c0d59")
 	)
-	(label "GPIO9"
+	(label "GPIO10"
 		(at 189.23 102.87 180)
 		(effects
 			(font
@@ -6127,7 +6127,7 @@
 		)
 		(uuid "b80bbe41-3e0f-49ba-96cf-f2fe17bc8b0c")
 	)
-	(label "GPIO10"
+	(label "GPIO9"
 		(at 189.23 110.49 180)
 		(effects
 			(font
