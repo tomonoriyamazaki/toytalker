@@ -24,6 +24,7 @@
 #include <HTTPClient.h>
 #include <Update.h>
 #include <Preferences.h>
+#include "BoardConfig.h"
 #include <ArduinoJson.h>
 #include <esp_ota_ops.h>
 #include <esp_heap_caps.h>
@@ -72,7 +73,7 @@ inline void printBootInfo() {
   esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
   if (running) esp_ota_get_state_partition(running, &state);
   Serial.printf("[OTA] fw=%s hw=%s running=%s next=%s capable=%d img_state=%d\n",
-                TOYTALKER_FW_VERSION, TOYTALKER_HW_VERSION, running ? running->label : "?",
+                TOYTALKER_FW_VERSION, board::current().hw, running ? running->label : "?",
                 next ? next->label : "none", next != nullptr, (int)state);
 }
 

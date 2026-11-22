@@ -22,6 +22,7 @@ import {
 } from "react-native";
 import { BleManager, Device } from "react-native-ble-plx";
 import VoiceKeyholder from "../../components/VoiceKeyholder";
+import SoftApSetup from "../../components/SoftApSetup";
 
 // BLE UUIDs (ESP32側と一致させる)
 const SERVICE_UUID       = "12345678-1234-1234-1234-123456789abc";
@@ -79,6 +80,7 @@ export { ErrorBoundary } from "../../components/ScreenError";
 export default function Toy() {
   const ownerId = useOwnerId();
   const [keyholderOpen, setKeyholderOpen] = useState(false);  // ボイスキーホルダーの声を選ぶ画面（components/VoiceKeyholder.tsx）
+  const [softApOpen, setSoftApOpen] = useState(false);        // SoftAP で Wi-Fi を設定する画面（試作。components/SoftApSetup.tsx）
   const [status, setStatus]                         = useState<ConnectionStatus>("disconnected");
   const [bleDevices, setBleDevices]                 = useState<Device[]>([]);
   const [connectedDevice, setConnectedDevice]       = useState<Device | null>(null);
@@ -315,7 +317,7 @@ export default function Toy() {
     }
   };
 
-  const registerDevice = async (mac: string) => {
+  const registerDevice = async (mac: string): Promise<boolean> => {
     try {
       const res = await apiFetch(`/devices`, {
         method: "POST",
@@ -329,8 +331,10 @@ export default function Toy() {
       const deviceData = await deviceRes.json();
       await addOrUpdateDevice({ ...deviceData, device_name: deviceData.device_name ?? "" });
       setStatusMessage("デバイス登録完了！");
+      return true;
     } catch (e: any) {
       setStatusMessage("デバイス登録エラー: " + e.message);
+      return false;
     }
   };
 
@@ -877,6 +881,9 @@ export default function Toy() {
             <TouchableOpacity style={s.button} onPress={startScan}>
               <Text style={s.buttonText}>デバイスをスキャン</Text>
             </TouchableOpacity>
+            <TouchableOpacity style={s.buttonSecondary} onPress={() => setSoftApOpen(true)}>
+              <Text style={s.buttonTextSecondary}>Wi-Fi でつなぐ（試作）</Text>
+            </TouchableOpacity>
 
             {bleDevices.length > 0 && (
               <View style={s.section}>
@@ -942,6 +949,7 @@ export default function Toy() {
           </View>
         )}
       </ScrollView>
+      <SoftApSetup visible={softApOpen} onClose={() => setSoftApOpen(false)} onRegister={registerDevice} />
     </SafeAreaView>
   );
 }

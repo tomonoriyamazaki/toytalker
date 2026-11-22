@@ -10,11 +10,14 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <memory>
+#include "LambdaLink.h"
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include "StreamCompletion.h"
 #include <driver/i2s_std.h>
+#include <driver/i2s_pdm.h>
 #include <esp_wifi.h>
 #include <esp_mac.h>  // esp_read_mac (BLEアドバタイズ名用)
 #include <BLEDevice.h>
@@ -33,6 +36,7 @@
 #include "AecMonitor.h"
 #include "TlsMemory.h"
 #include "SttMicFilter.h"
+#include "BoardConfig.h"
 #include "SonioxPreconnect.h"
 #include "FirmwareVersion.h"
 #include "OtaUpdater.h"
@@ -45,6 +49,7 @@
 #include "DeviceAuth.h"
 #include "VoiceKeyholder.h"
 #include "VoiceSync.h"
+#include "SoftApSetup.h"
 #include <esp_ota_ops.h>
 #include <esp_arduino_version.h>
 #include <mbedtls/sha256.h>  // sha256Hex（CloudFront 経由の POST に本文ハッシュを添える）
@@ -115,10 +120,7 @@ const uint32_t SONIOX_KEY_MAX_AGE_MINUTES = 2;   // 2026-10-28から試用。問
 uint32_t sonioxKeyFetchedMs = 0;  // loop() だけが書く。ワーカーは読むだけ
 String sonioxModel = "stt-rt-v4";  // 起動時に1回だけ設定。以後は読み取り専用（ワーカーからも読む）
 
-// ==== I2S PIN ==== (v0.2基板: マイク/アンプでBCLK・WSも分離)
-#define PIN_MIC_BCLK 48
-#define PIN_MIC_WS   33
-#define PIN_MIC_DATA 34
+// ==== I2S PIN ==== マイクのピンと方式は基板の版で変わるので BoardConfig.h の表。ここは全基板で同じもの
 #define PIN_AMP_BCLK 37
 #define PIN_AMP_WS   36
 #define PIN_AMP_DIN  38
@@ -371,18 +373,15 @@ bool fetchSonioxKeyOnly(String& keyOut) {
   return !keyOut.isEmpty();
 }
 
-String sonioxStartMessageFor(const String& key);
 void finishUtterance(const char* why);
 
-// 先行接続ワーカー（Core 0）で接続前に走る。古ければ取り直し、新しいキーで開始メッセージを作る。
+// 先行接続ワーカー（Core 0）で接続前に走る。古ければ取り直す（ワーカーが新しいキーで接続する）。
 // sonioxKey と sonioxKeyFetchedMs は loop() のものなので書かない（finishSonioxPreconnect が写す）。
-bool prepareSonioxKeyOnWorker(String& startMessageOut, String& keyOut) {
+bool prepareSonioxKeyOnWorker(String& keyOut) {
   if (!sonioxKeyIsOld()) return false;
   Serial.printf("[SONIOX_KEY] old (age_s=%lu); refreshing on worker\n",
                 (unsigned long)((millis() - sonioxKeyFetchedMs) / 1000));
-  if (!fetchSonioxKeyOnly(keyOut)) return false;
-  startMessageOut = sonioxStartMessageFor(keyOut);
-  return true;
+  return fetchSonioxKeyOnly(keyOut);
 }
 
 // loop() で WS を直接開く直前に呼ぶ。古ければ取り直す（1〜2秒。先行接続が無い回だけ）。
@@ -397,20 +396,19 @@ void refreshSonioxKeyIfOld(const char* why) {
   }
 }
 
-String sonioxStartMessageFor(const String& key) {
-  return "{\"api_key\":\"" + key + "\","
-         "\"model\":\"" + sonioxModel + "\","
+// 鍵は入れない（接続時に Authorization ヘッダーで渡す。beginSonioxWs）
+String sonioxStartMessage() {
+  return "{\"model\":\"" + sonioxModel + "\","
          "\"audio_format\":\"pcm_s16le\",\"sample_rate\":16000,\"num_channels\":1,"
          "\"enable_partial_results\":true,\"enable_endpoint_detection\":true,"
          "\"language_hints\":[\"ja\",\"en\"]}";
 }
 
-String sonioxStartMessage() { return sonioxStartMessageFor(sonioxKey); }
-
 // Soniox の WebSocket を証明書の検証つきで設定する（接続は ws.loop() か先行接続ワーカーが行う）。
 // beginSSL は CA を渡さないと setInsecure になる（WebSocketsClient.cpp）ので、beginSslWithCA を使う
 void beginSonioxWs() {
   ws.beginSslWithCA(SONIOX_WS_URL, SONIOX_WS_PORT, "/transcribe-websocket", SONIOX_ROOT_CAS);
+  setSonioxKey(ws, sonioxKey);
 }
 
 bool sonioxIsConnected() {
@@ -524,7 +522,15 @@ uint32_t i2sTimeoutMs(TickType_t ticks) {
 }
 esp_err_t readMicI2s(void* data, size_t len, size_t* bytes, TickType_t timeout) {
   *bytes = 0;
-  return micRx ? i2s_channel_read(micRx, data, len, bytes, i2sTimeoutMs(timeout)) : ESP_ERR_INVALID_STATE;
+  if (!micRx) return ESP_ERR_INVALID_STATE;
+  const board::Config& b = board::current();
+  if (b.mic != board::Mic::Pdm) return i2s_channel_read(micRx, data, len, bytes, i2sTimeoutMs(timeout));
+  // PDM は 16bit で来る。半分の量を読んで、その場で I2S の生の値と同じ 32bit に広げる（以降の処理は共通）
+  size_t got = 0;
+  esp_err_t err = i2s_channel_read(micRx, data, len / 2, &got, i2sTimeoutMs(timeout));
+  board::expandPdm(data, got / 2, board::pdmScale());
+  *bytes = (got / 2) * 4;
+  return err;
 }
 esp_err_t releaseI2sChannel(i2s_chan_handle_t& channel) {
   if (!channel) return ESP_OK;
@@ -714,12 +720,54 @@ void applyVolumeLevel(const char* level) {
   setPlaybackGain(gain, false);
 }
 
-// 聞き取り中の loop() から。シリアルの数字1文字で倍率を変える（試験用）
-void pollPlaybackGainSerial() {
+// "HW v0.3" の行: 基板の版を NVS に書いて再起動する（USB で最初に書いたときに 1 回。BoardConfig.h）。
+// いまと同じ版なら何もしない（書き込みの道具が、届くまで何度か送る）
+void handleSerialLine(const char* line) {
+  if (strncmp(line, "MIC ", 4) == 0) {  // 試験用: PDM の倍率（1〜60 倍）。保存しない
+    const int gain = atoi(line + 4);
+    if (board::current().mic != board::Mic::Pdm || gain < 1 || gain > 60) {
+      Serial.printf("[BOARD] mic gain ignored (%s)\n", line + 4);
+      return;
+    }
+    board::pdmScaleOverride_ = gain * 16384;
+    aecMonitor.setRxFormat(true, board::pdmScale());
+    Serial.printf("[BOARD] mic gain=%d (not saved)\n", gain);
+    return;
+  }
+  if (strncmp(line, "HW ", 3) != 0) return;
+  if (!board::save(line + 3)) return;
+  Serial.println("[BOARD] restarting");
+  Serial.flush();
+  delay(200);
+  ESP.restart();
+}
+
+// loop() から（どのモードでも）。数字・小文字の1文字は試験用の音の調整、大文字で始まる行は命令
+void pollSerial() {
   static const float table[] = {PLAYBACK_GAIN_DEFAULT, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f, 5.0f, 6.0f, 8.0f};
+  static char line[16];
+  static uint8_t lineLen = 0;   // 0 でなければ行の途中（1文字の命令としては読まない）
+  static uint32_t lineStartMs = 0;
+  if (lineLen && millis() - lineStartMs > 1000) lineLen = 0;  // 途中で途切れた行は捨てる
   while (Serial.available() > 0) {
     const int c = Serial.read();
-    if (c >= '0' && c <= '8') setPlaybackGain(table[c - '0'], true);
+    if (lineLen) {
+      if (c == '\n' || c == '\r') {
+        line[lineLen] = 0;
+        lineLen = 0;
+        handleSerialLine(line);
+      } else if (lineLen < sizeof(line) - 1) {
+        line[lineLen++] = char(c);
+      } else {
+        lineLen = 0;  // 長すぎる行は捨てる
+      }
+      continue;
+    }
+    if (c >= 'A' && c <= 'Z') {
+      line[0] = char(c);
+      lineLen = 1;
+      lineStartMs = millis();
+    } else if (c >= '0' && c <= '8') setPlaybackGain(table[c - '0'], true);
     else if (c == 'e' || c == 'f') {  // e = EQ あり、f = EQ なし（聞き比べ用。保存しない）
       playbackLimiter.setEq(c == 'e');
       Serial.printf("[VOLUME] eq=%d\n", playbackLimiter.eq());
@@ -867,6 +915,14 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
+// ==== SoftAP の設定ページでつながった時（SoftApSetup.h。この後 softap が再起動する）====
+void onSoftApWifiConnected(const String& ssid, const String& password) {
+  saveWiFiCredentials(ssid, password);
+  wifiSSID = ssid;
+  wifiPassword = password;
+  saveDeviceMac(deviceMacAddress);  // startBLE が入れた BLE のアドレス（機器 ID）
+}
+
 // ==== BLE開始 ====
 void startBLE() {
   Serial.println("🔵 Starting BLE...");
@@ -919,6 +975,8 @@ void startBLE() {
   // 録音中はLEDタイマーが停止しているため再開（長押しでBLEに入った場合の点滅不具合対策）
   if (ledTimer) timerAlarm(ledTimer, 30000, true, 0);
   setLEDMode(LED_BLINK_FAST);
+  // 試作（ロードマップ45）: BLE 設定と同じ入り口で、SoftAP の設定ページも立てる。どちらからでも設定できる
+  softap::begin(onSoftApWifiConnected);
 }
 
 // ==== BLE停止 ====
@@ -1097,6 +1155,7 @@ constexpr bool VOICE_RX_RESET_AFTER_PLAYBACK = VOICE_RX_TEST_MODE == VoiceRxTest
 constexpr int MIC_DMA_COUNT =
     (VOICE_RX_TEST_MODE == VoiceRxTestMode::MonitorSmallDma || VOICE_RX_RESET_AFTER_PLAYBACK) ? 4 : 8;
 constexpr int MIC_DMA_FRAMES = 512;  // 1枚32ms。割り込み周期・サンプル形式は変えない
+constexpr int PDM_START_DISCARD_BLOCKS = 2;  // PDM のマイクを作り直した直後に捨てる枚数（setupI2SRecord）
 // モノラル32bitのデータ領域。管理領域は別途必要。通常STTも同じ設定を使う。
 constexpr uint32_t MIC_DMA_DATA_BYTES = MIC_DMA_COUNT * MIC_DMA_FRAMES * sizeof(int32_t);
 static_assert(!AEC_ENABLED || (VOICE_RX_RESET_AFTER_PLAYBACK && MIC_DMA_FRAMES == AEC_MIC_SAMPLES &&
@@ -1356,16 +1415,30 @@ void setupI2SRecord() {
     Serial.printf("[VOICE] mic channel allocation failed=%d\n", err);
     return;
   }
-  i2s_std_config_t cfg = {};
-  cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_STT);
-  cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO);
-  cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-  cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
-  cfg.gpio_cfg.bclk = (gpio_num_t)PIN_MIC_BCLK;
-  cfg.gpio_cfg.ws = (gpio_num_t)PIN_MIC_WS;
-  cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
-  cfg.gpio_cfg.din = (gpio_num_t)PIN_MIC_DATA;
-  err = i2s_channel_init_std_mode(micRx, &cfg);
+  const board::Config& b = board::current();
+  if (b.mic == board::Mic::Pdm) {
+    // PDM のクロックは 16kHz × 128 = 2.048MHz（DSR_16S。既定の DSR_8S は × 64 = 1.024MHz で、
+    // SPH0655 の下限 1.2MHz を下回る）。1枚 512 サンプル・32ms は I2S のときと同じ
+    i2s_pdm_rx_config_t cfg = {};
+    cfg.clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(SAMPLE_RATE_STT);
+    cfg.clk_cfg.dn_sample_mode = I2S_PDM_DSR_16S;
+    cfg.slot_cfg = I2S_PDM_RX_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+    cfg.slot_cfg.slot_mask = b.pdmRightSlot ? I2S_PDM_SLOT_RIGHT : I2S_PDM_SLOT_LEFT;
+    cfg.gpio_cfg.clk = (gpio_num_t)b.micClk;
+    cfg.gpio_cfg.din = (gpio_num_t)b.micData;
+    err = i2s_channel_init_pdm_rx_mode(micRx, &cfg);
+  } else {
+    i2s_std_config_t cfg = {};
+    cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(SAMPLE_RATE_STT);
+    cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO);
+    cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+    cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+    cfg.gpio_cfg.bclk = (gpio_num_t)b.micClk;
+    cfg.gpio_cfg.ws = (gpio_num_t)b.micWs;
+    cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
+    cfg.gpio_cfg.din = (gpio_num_t)b.micData;
+    err = i2s_channel_init_std_mode(micRx, &cfg);
+  }
   i2s_event_callbacks_t callbacks = {};
   callbacks.on_recv = onMicDma;
   if (err == ESP_OK) err = i2s_channel_register_event_callback(micRx, &callbacks, nullptr);
@@ -1375,10 +1448,19 @@ void setupI2SRecord() {
     Serial.printf("[VOICE] mic initialization failed=%d\n", err);
     return;
   }
+  if (b.mic == board::Mic::Pdm) {
+    // 再生の後に作り直した直後は、最初の 1 枚（32ms）が振り切れる（min=-32768、平均 -4277。2 枚目からは ±80 以内。
+    // 2026-11-16 に v0.3 で実測）。これを通すと DC の見積もりが狂って、録音の頭に大きな段差が乗るので 2 枚捨てる
+    static int16_t discard[MIC_DMA_FRAMES];
+    for (int i = 0; i < PDM_START_DISCARD_BLOCKS; ++i) {
+      size_t got = 0;
+      i2s_channel_read(micRx, discard, sizeof(discard), &got, 100);
+    }
+  }
   micInstalled = true;
   ++micInstallGeneration;
-  Serial.printf("[VOICE_TEST] mic_ready driver=std dma_count=%d dma_frames=%d dma_data_bytes=%lu internal_free=%lu max_blk=%lu generation=%lu\n",
-                MIC_DMA_COUNT, MIC_DMA_FRAMES, (unsigned long)MIC_DMA_DATA_BYTES,
+  Serial.printf("[VOICE_TEST] mic_ready driver=%s dma_count=%d dma_frames=%d dma_data_bytes=%lu internal_free=%lu max_blk=%lu generation=%lu\n",
+                b.mic == board::Mic::Pdm ? "pdm" : "std", MIC_DMA_COUNT, MIC_DMA_FRAMES, (unsigned long)MIC_DMA_DATA_BYTES,
                 (unsigned long)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned long)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned long)micInstallGeneration);
@@ -1567,7 +1649,12 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
 // 受信(メインループ=producer)とI2S再生(playbackTask=consumer)を分離し、
 // リングバッファでネットワークジッタを吸収する。
 #define PLAY_RING_SIZE   (512 * 1024)  // 512KB ≈ 5.4秒分 (24kHz/16bit/stereo)
-#define PLAY_PREBUFFER   (32 * 1024)   // 再生開始/再開前に溜める量 ≈ 0.34秒
+#define PLAY_PREBUFFER   (32 * 1024)   // 音が途切れた後、再開前に溜める量 ≈ 0.34秒
+// 鳴り始めに溜める量 ≈ 0.34秒。減らしても早くならなかったので元の量に戻した（0.7.47、2026-11-22 の実測）:
+// 0.1 秒（0.7.45）は 6 ターン中 1 回、出だしで 82ms 途切れた。0.2 秒（0.7.46）は待ちが 94〜132ms で、0.34 秒の時（中央値 約130ms）と差が出なかった
+// （相槌を鳴らしている間に 1 文目が届いていることが多く、溜めはすぐ満たされる）。
+// リングの先に I2S の DMA（8本 × 1023 フレーム ≈ 0.34 秒）があり、鳴り始めた後はそちらが受信のむらを吸収する
+#define PLAY_PREBUFFER_START PLAY_PREBUFFER
 #define PLAY_WRITE_CHUNK 4096          // I2Sへの1回の書き込み量
 
 static uint8_t* playRing = NULL;
@@ -1576,6 +1663,14 @@ static volatile size_t playRingTail = 0;      // consumer読み出し位置
 static volatile bool playerActive = false;    // 再生セッション中
 static volatile bool playerStreamEnd = false; // 受信完了（残りを出し切って停止）
 static volatile bool playerPrebuffering = true;
+static size_t playerPrebufferBytes = PLAY_PREBUFFER_START;  // いま待っている溜めの量（鳴り始めは小さく、途切れた後は PLAY_PREBUFFER）
+// DMA に渡した音が鳴り終わる見込みの時刻（esp_timer の µs。再生タスクだけが書く）。リングが空でも、これより前なら音は続いている
+static int64_t playDmaEndUs = 0;
+static inline void notePlayDmaWrite(size_t bytes) {
+  const int64_t now = esp_timer_get_time();
+  if (playDmaEndUs < now) playDmaEndUs = now;
+  playDmaEndUs += (int64_t)bytes * 1000000LL / (SAMPLE_RATE_TTS * 4);
+}
 static volatile bool playerParked = true;     // タスクがI2Sに触っていない状態
 // 一時停止のとき巻き戻す量: アンプを切った時点で DMA に入っていた分（8 本 × 4092 バイト ≈ 0.34 秒、満杯と仮定）
 static constexpr size_t PLAY_REWIND_BYTES = PLAY_DMA_COUNT * PLAY_DMA_FRAMES * 4;
@@ -1585,10 +1680,16 @@ static TaskHandle_t playerTaskHandle = NULL;
 
 // ==== WiFi/再生品質の計測（基板グラウンド設計の検証用） ====
 // 1ターン（録音開始）ごとにリセットし、再生終了時に [STATS] サマリを出す。
-// underruns = 再生中のバッファ枯渇回数（音途切れの直接指標）。v0.1基板の
+// underruns = 再生中に音が途切れた回数。0.7.45 から「リングが空のまま DMA の音も鳴り終わった」時だけ数える
+// （0.7.44 まではリングが空になるたびに数え、鳴り始めに DMA が溜めを飲み込む分でほぼ毎ターン 1 になっていた）。v0.1基板の
 // ベースライン取得と、v0.2（GND強化後）の効果測定に使う
 static volatile uint32_t statUnderruns = 0;
 static volatile bool statUnderrunPending = false;  // 空検知→再生再開で確定カウント(終端の空は数えない)
+// いつ・どれだけ止まったか（0.7.44。回数だけでは無害な一瞬の空と聞こえる途切れを分けられない）。再生タスクが書き、止まった後に loop が読む
+static volatile uint32_t statUnderrunEmptyAtMs = 0;  // いま溜め直している空の始まり（millis）
+static volatile uint32_t statUnderrunFirstAtMs = 0;  // 最初の空の始まり（millis。無ければ 0）
+static volatile uint32_t statUnderrunStallMs = 0;    // 空で止まっていた時間の合計
+static volatile uint32_t statUnderrunMaxMs = 0;      // そのうち最長の1回
 static int32_t statRssiSum = 0;
 static int32_t statRssiCount = 0;
 static int statRssiMin = 0;  // RSSIは負値。0は未計測の意味
@@ -1607,6 +1708,10 @@ void updatePowerReading() {
 void statsReset() {
   statUnderruns = 0;
   statUnderrunPending = false;
+  statUnderrunEmptyAtMs = 0;
+  statUnderrunFirstAtMs = 0;
+  statUnderrunStallMs = 0;
+  statUnderrunMaxMs = 0;
   statRssiSum = 0;
   statRssiCount = 0;
   statRssiMin = 0;
@@ -1693,6 +1798,7 @@ void playbackTask(void* param) {
       }
       size_t written = 0;
       writePlaybackI2s(pauseSilence, sizeof(pauseSilence), &written, pdMS_TO_TICKS(100));
+      notePlayDmaWrite(written);
       continue;
     }
     pauseRewound = false;
@@ -1701,11 +1807,17 @@ void playbackTask(void* param) {
 
     if (playerPrebuffering) {
       // プリバッファ: 一定量溜まるまで再生開始を待つ（ストリーム終了時は即出し切る）
-      if (avail >= PLAY_PREBUFFER || (playerStreamEnd && avail > 0)) {
+      if (avail >= playerPrebufferBytes || (playerStreamEnd && avail > 0)) {
         playerPrebuffering = false;
         if (statUnderrunPending) {  // 溜め直し後の再開=本物のアンダーランとして確定
           statUnderruns++;
           statUnderrunPending = false;
+          const uint32_t emptyAt = statUnderrunEmptyAtMs;
+          const uint32_t stalled = millis() - emptyAt;
+          if (!statUnderrunFirstAtMs) statUnderrunFirstAtMs = emptyAt ? emptyAt : 1;
+          statUnderrunStallMs = statUnderrunStallMs + stalled;
+          if (stalled > statUnderrunMaxMs) statUnderrunMaxMs = stalled;
+          Serial.printf("[PLAYER] underrun resumed stalled_ms=%lu\n", (unsigned long)stalled);
         }
         Serial.printf("[PLAYER] playback start (buffered=%u bytes)\n", (unsigned)avail);
       } else if (playerStreamEnd && avail == 0) {
@@ -1727,10 +1839,17 @@ void playbackTask(void* param) {
         playerActive = false;  // 全データ再生完了
         continue;
       }
-      // アンダーラン: 溜め直す（この間DMAは無音を出力）
+      // リングは空でも、DMA に渡した分が鳴っている間は途切れていない。届きしだい続きを渡す
+      if (esp_timer_get_time() < playDmaEndUs) {
+        vTaskDelay(pdMS_TO_TICKS(2));
+        continue;
+      }
+      // アンダーラン: DMA も鳴り終わった（無音が出ている）。多めに溜め直してから再開する
       // カウントは再生再開時に確定させる（ストリーム終端の空を誤カウントしないため）
       statUnderrunPending = true;
+      statUnderrunEmptyAtMs = millis();
       Serial.println("[PLAYER] underrun → rebuffering");
+      playerPrebufferBytes = PLAY_PREBUFFER;
       playerPrebuffering = true;
       continue;
     }
@@ -1740,6 +1859,7 @@ void playbackTask(void* param) {
     n = min(n, PLAY_RING_SIZE - t);  // 折返し前まで
     size_t written = 0;
     writePlaybackI2s(playRing + t, n, &written, portMAX_DELAY);
+    notePlayDmaWrite(written);
     if (written > 0) {
       lastI2sWriteMs.store(millis(), std::memory_order_relaxed);
       logFirstTtsWrite();
@@ -1758,6 +1878,8 @@ void playerStart() {
   playerPaused = false;
   playConsumedBytes = 0;
   playPauses = 0;
+  playerPrebufferBytes = PLAY_PREBUFFER_START;
+  playDmaEndUs = 0;
   playerPrebuffering = true;
   statUnderrunPending = false;  // 前セッション(相槌等)の終端レースを持ち越さない
   playerActive = true;
@@ -2099,66 +2221,115 @@ bool playBackchannelIfReady() {
   return true;
 }
 
-// ---- Lambda SSL接続+リクエスト送信バックグラウンドタスク ----
-struct LambdaConnectParams {
-  WiFiClientSecure* client;
-  String* request;
-  std::atomic<bool> connected;
-  std::atomic<bool> sent;
-  std::atomic<bool> failed;
-  // 計測（TurnReport）。sent / failed を立てる前に書くので、loop はそれを見てから読む
-  uint32_t connectStartMs;
-  uint32_t connectMs;
-  uint32_t sendMs;
-};
+// ---- Lambda への TLS 接続と要求の送信（Core 0 のタスク）----
+// 1回の接続ごとに LambdaLink を1つ作る。話し終わりの猶予（STT_GRACE_MS）が始まった時に先に張り始め（ロードマップ39。
+// TLS の約0.6秒を猶予の間に済ませる）、送ると決まったら同じタスクが要求を送る。送らないと決まったら「やめる」を渡す。
+// 持ち主: 「やめる」を渡した後は loop() は触らず、タスクが自分で片付ける。「送る」を渡した後は finished を待って loop() が片付ける。
+static LambdaLink* lambdaPreconnect = nullptr;  // 猶予の間に張っている接続。loop() だけが触る
 
-void lambdaConnectAndSendTask(void* param) {
-  LambdaConnectParams* p = (LambdaConnectParams*)param;
+static bool lambdaLinkConnect(LambdaLink* p) {
   // 原因特定用: TLS接続直前の内部RAM状態(free / 最大連続ブロック)。
   // TLSの合計使用量と1回の確保サイズは別。freeが足りてもmax_blkが小さいと確保に失敗し得る。
   Serial.printf("[DIAG] pre-connect free=%u max_blk=%u\n",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   tls_memory::printStats("lambda_pre_connect");
-  p->client->setCACert(AMAZON_ROOT_CAS);  // 証明書を検証する（0.7.5 までは setInsecure で検証なし）
-  uint32_t connectStart = millis();
+  p->client.setCACert(AMAZON_ROOT_CAS);  // 証明書を検証する（0.7.5 までは setInsecure で検証なし）
+  const uint32_t connectStart = millis();
   p->connectStartMs = connectStart;
-  bool connected = p->client->connect(LAMBDA_HOST, 443);
+  const bool connected = p->client.connect(LAMBDA_HOST, 443);
   p->connectMs = millis() - connectStart;
-  Serial.printf("[LATENCY] lambda_connect_ms=%lu ok=%d\n",
-                (unsigned long)(millis() - connectStart), connected);
+  p->connectedAtMs = millis();
+  Serial.printf("[LATENCY] lambda_connect_ms=%lu ok=%d\n", (unsigned long)p->connectMs, connected);
   tls_memory::printStats(connected ? "lambda_connected" : "lambda_failed");
   if (!connected) {
     Serial.printf("[DIAG] connect() FAILED, post free=%u max_blk=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  }
+  return connected;
+}
+
+void lambdaLinkTask(void* param) {
+  LambdaLink* p = (LambdaLink*)param;
+  bool connected = lambdaLinkConnect(p);
+  // 送るか・やめるかが決まるまで待つ（先に張った時だけ待ちが生じる。通知を取りこぼしても 20ms で見直す）
+  const bool waited = p->command.load() == 0;
+  uint8_t command;
+  while ((command = p->command.load()) == 0) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+  if (command == LAMBDA_LINK_ABORT) {
+    delete p;  // 接続も閉じる。loop() はもう触らない
+    vTaskDelete(NULL);
+    return;
+  }
+  if (waited) {
+    // 先に張った接続。待っている間に切れた・古くなった・張れなかったものは使わず、ここで張り直す（従来と同じ速さに戻るだけ）
+    const uint32_t idleMs = millis() - p->connectedAtMs;
+    if (connected && p->client.connected() && idleMs <= LAMBDA_LINK_MAX_IDLE_MS) {
+      Serial.printf("[LATENCY] lambda_preconnect reused idle_ms=%lu\n", (unsigned long)idleMs);
+    } else {
+      Serial.printf("[LATENCY] lambda_preconnect not usable (ok=%d idle_ms=%lu); reconnecting\n", connected, (unsigned long)idleMs);
+      p->client.stop();
+      connected = lambdaLinkConnect(p);
+    }
+  }
+  if (!connected) {
     p->failed = true;
+    p->finished = true;
     vTaskDelete(NULL);
     return;
   }
   p->connected = true;
   if (bargeInRequested) {
     // connect()の途中で他タスクからclientを破棄しない。接続後は不要なPOSTを送らない。
-    p->client->stop();
+    p->client.stop();
     Serial.println("[LATENCY] Lambda request cancelled before POST");
     p->failed = true;
+    p->finished = true;
     vTaskDelete(NULL);
     return;
   }
   uint32_t sendStart = millis();
   size_t expected = p->request->length();
-  size_t written = p->client->print(*(p->request));
+  size_t written = p->client.print(*(p->request));
   p->sendMs = millis() - sendStart;
   Serial.printf("[LATENCY] lambda_send_ms=%lu written=%u expected=%u\n",
                 (unsigned long)(millis() - sendStart), (unsigned)written, (unsigned)expected);
   if (written != expected) {
-    p->client->stop();
+    p->client.stop();
     p->failed = true;
-    vTaskDelete(NULL);
-    return;
+  } else {
+    p->sent = true;
   }
-  p->sent = true;
+  p->finished = true;
   vTaskDelete(NULL);
+}
+
+// 接続のタスクを始める。作れなければ nullptr
+LambdaLink* startLambdaLink() {
+  LambdaLink* link = new LambdaLink();
+  if (xTaskCreatePinnedToCore(lambdaLinkTask, "lambda_conn", 16384, link, 1, &link->task, 0) != pdPASS) {
+    delete link;
+    return nullptr;
+  }
+  return link;
+}
+
+// 話し終わりの猶予が始まった時に呼ぶ。もう張っていれば何もしない
+void startLambdaPreconnect() {
+  if (lambdaPreconnect || WiFi.status() != WL_CONNECTED) return;
+  lambdaPreconnect = startLambdaLink();
+  Serial.printf("[LATENCY] lambda_preconnect started=%d\n", lambdaPreconnect != nullptr);
+}
+
+// 先に張った接続を使わないと決まった時に呼ぶ（聞き取りのやり直し・休み・同じ文で送らない時）
+void abortLambdaPreconnect(const char* why) {
+  if (!lambdaPreconnect) return;
+  LambdaLink* link = lambdaPreconnect;
+  lambdaPreconnect = nullptr;
+  Serial.printf("[LATENCY] lambda_preconnect aborted (%s)\n", why);
+  link->command = LAMBDA_LINK_ABORT;  // 以後は触らない（タスクが片付ける）
+  xTaskNotifyGive(link->task);
 }
 
 // このターンの記録を締めて、次の要求に添える記録にする（TurnReport.h）
@@ -2170,6 +2341,10 @@ void finishTurnReport(const char* stop, uint32_t t0) {
   if (firstWrite) turnReport.playStartMs = firstWrite - t0;
   turnReport.audioMs = ttsPcmBytes / (SAMPLE_RATE_TTS * 2 / 1000);
   turnReport.underruns = statUnderruns;
+  const uint32_t underFirst = statUnderrunFirstAtMs;
+  turnReport.underFirstMs = underFirst ? underFirst - t0 : 0;
+  turnReport.underStallMs = statUnderrunStallMs;
+  turnReport.underMaxMs = statUnderrunMaxMs;
   turnReport.segments = ttsSegments;
   turnReport.bc = backchannelFired;
   turnReport.rssiAvg = statRssiCount ? (int)(statRssiSum / statRssiCount) : 0;
@@ -2326,15 +2501,25 @@ void sendToLambdaAndPlay(const String& text) {
     "Content-Length: " + payload.length() + "\r\n\r\n"
     + payload;
 
-  // Lambda SSL接続+送信をCore 0でバックグラウンド
-  WiFiClientSecure client;
-  LambdaConnectParams connParams = { &client, &req, false, false, false, 0, 0, 0 };
-  TaskHandle_t connTaskHandle = NULL;
-  if (xTaskCreatePinnedToCore(lambdaConnectAndSendTask, "lambda_conn", 16384, &connParams, 1, &connTaskHandle, 0) != pdPASS) {
-    connParams.failed = true;
+  // Lambda SSL接続+送信をCore 0でバックグラウンド。猶予の間に先に張った接続があれば、それで送る
+  LambdaLink* link = lambdaPreconnect;
+  lambdaPreconnect = nullptr;
+  const bool preconnected = link != nullptr;
+  if (!link) link = startLambdaLink();
+  if (link) {
+    link->request = &req;
+    link->command = LAMBDA_LINK_GO;
+    xTaskNotifyGive(link->task);
+  } else {
+    link = new LambdaLink();  // タスクなし。失敗として下の後片付けへ流す
+    link->failed = true;
+    link->finished = true;
     Serial.println("[VOICE] Lambda task allocation failed; returning to recording");
   }
-  Serial.printf("⏱️ [%lums] Lambda task started on Core 0\n", millis() - t0);
+  std::unique_ptr<LambdaLink> linkOwner(link);  // この関数を抜ける時に接続ごと片付ける（タスクは finished の後は触らない）
+  LambdaLink& connParams = *link;
+  WiFiClientSecure& client = link->client;
+  Serial.printf("⏱️ [%lums] Lambda task %s on Core 0\n", millis() - t0, preconnected ? "told to send (preconnected)" : "started");
 
   // アンプON（PWMなし）
   if (!ampOn) {
@@ -2355,12 +2540,15 @@ void sendToLambdaAndPlay(const String& text) {
 
   // Lambda接続完了待ち
   // タスクがclient/reqを使い終わるまで寿命を保持する。音声検出時のミュートは監視側で行う。
-  while (!connParams.sent && !connParams.failed) delay(1);
+  while (!connParams.finished) delay(1);
   Serial.printf("⏱️ [%lums] Lambda request sent (ok=%d)\n", millis() - t0, !connParams.failed);
 
   if (connParams.connectStartMs) {
-    turnReport.preMs = connParams.connectStartMs - t0;
-    turnReport.tlsMs = connParams.connectMs;
+    // 先に張った接続では、接続の開始も完了も t0 より前のことがある。記録するのは送ると決めてから待った分
+    const int32_t startAfterT0 = (int32_t)(connParams.connectStartMs - t0);
+    const int32_t endAfterT0 = startAfterT0 + (int32_t)connParams.connectMs;
+    turnReport.preMs = startAfterT0 > 0 ? startAfterT0 : 0;
+    turnReport.tlsMs = endAfterT0 <= 0 ? 0 : (startAfterT0 > 0 ? connParams.connectMs : (uint32_t)endAfterT0);
     turnReport.tlsOk = connParams.connected;
     turnReport.sendMs = connParams.sendMs;
   }
@@ -2808,6 +2996,7 @@ void startSTTRecording() {
   armed = false;
   endpointDetected = false;
   sttGrace = SttGraceState{};
+  abortLambdaPreconnect("stt restart");
   clearBackchannelCache();
   Serial.printf("⏱️ STT [%lums] startSTTRecording done\n", millis() - t0);
 }
@@ -2840,6 +3029,7 @@ bool tryConnectWiFiOnce(const String& ssid, const String& password) {
 
 // ==== BLEからのWiFi接続試行 ====
 void tryConnectWiFiFromBLE(const String& ssid, const String& password) {
+  softap::suspend();  // この先で Wi-Fi のモードを子機だけに変えるので、設定ページは止める
   sendBLEStatus("CONNECTING");
 
   Serial.printf("📶 Connecting to WiFi from BLE: %s\n", ssid.c_str());
@@ -2869,6 +3059,7 @@ void tryConnectWiFiFromBLE(const String& ssid, const String& password) {
 
   Serial.println("\n❌ WiFi connection failed after all retries");
   sendBLEStatus("FAILED");
+  softap::requestRestart();  // 設定ページを立て直す（loop() 側で）
 }
 
 // ==== 通常動作開始 ====
@@ -2882,7 +3073,7 @@ void startNormalOperation() {
   // Sonioxキー取得（WiFi切替直後などの一時的な失敗に備えて3回リトライ）
   // fw/hw/ota/part はLambdaが記録し、更新の要否判定にも使う（docs/esp32-ota-settings-plan.md）
   String initUrl = String(SONIOX_LAMBDA_URL) + "?device_id=" + deviceMacAddress
-                 + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + TOYTALKER_HW_VERSION
+                 + "&fw=" + TOYTALKER_FW_VERSION + "&hw=" + board::current().hw
                  + "&ota=" + (ota::capable() ? "1" : "0") + "&part=" + ota::runningLabel()
                  + "&ttl=" + SONIOX_KEY_TTL_SEC
                  + ota::queryParams();  // 前回の更新の結果（ロールバック・続いた失敗）
@@ -2971,7 +3162,9 @@ void setup() {
   delay(100);
   Serial.println(AEC_BARGE_DETECT_ONLY ? "\n🚀 ToyTalker Mini v0.7 (AEC evaluation / detect only)"
                                      : "\n🚀 ToyTalker Mini v0.7 (AEC barge-in + OTA)");
-  Serial.printf("[BUILD] fw=%s hw=%s arduino=%s idf=%s\n", TOYTALKER_FW_VERSION, TOYTALKER_HW_VERSION,
+  board::load();  // 基板の版（NVS）。マイクの初期化とログより前に
+  aecMonitor.setRxFormat(board::current().mic == board::Mic::Pdm, board::pdmScale());
+  Serial.printf("[BUILD] fw=%s hw=%s arduino=%s idf=%s\n", TOYTALKER_FW_VERSION, board::current().hw,
                 ESP_ARDUINO_VERSION_STR, esp_get_idf_version());
   ota::printBootInfo();
   ota::checkPreviousUpdate();  // 前回入れた版で起動できたか、ロールバックで戻ったか
@@ -3283,6 +3476,7 @@ void enterIdleSleep(uint32_t idleMs, const char* why = "no text") {
   armed = false;
   endpointDetected = false;
   sttGrace = SttGraceState{};
+  abortLambdaPreconnect("stt stopped");
   clearBackchannelCache();
   playChime(CHIME_SLEEP, sizeof(CHIME_SLEEP) / sizeof(CHIME_SLEEP[0]));
   // LED は休み中だけ PWM でゆっくり明滅させる（ほかの状態は digitalWrite のまま。休み中は音を出さない）
@@ -3394,6 +3588,7 @@ void handleButtonLongPress() {
 
 // ==== LOOP ====
 void loop() {
+  pollSerial();
   if (currentMode == MODE_KEYHOLDER) {
     serviceKeyholder();
     return;
@@ -3426,6 +3621,18 @@ void loop() {
       }
     }
     handleButtonLongPress();
+    softap::service();
+    {
+      // スマホが SoftAP につないでいる間は BLE の発信を止める（無線は1つで、BLE と分け合うと設定ページの計測が濁る）
+      static bool bleAdvPaused = false;
+      const bool apBusy = softap::stations() > 0;
+      if (apBusy != bleAdvPaused && !bleDeviceConnected && pServer) {
+        bleAdvPaused = apBusy;
+        if (apBusy) BLEDevice::stopAdvertising();
+        else BLEDevice::startAdvertising();
+        Serial.printf("[SOFTAP] ble advertising %s\n", apBusy ? "paused" : "resumed");
+      }
+    }
     if (!bleDeviceConnected && oldBleDeviceConnected) {
       delay(500);
       if (pServer) pServer->startAdvertising();
@@ -3463,7 +3670,6 @@ void loop() {
       return;
     }
   }
-  pollPlaybackGainSerial();
 
   // ボタンデバウンス
   int reading = digitalRead(PIN_BUTTON);
@@ -3574,7 +3780,10 @@ void loop() {
       }
       sttGrace.resumeStartMs = 0;
       if (STT_GRACE_MS == 0) finishUtterance("no grace");
-      else if (!sttGrace.graceStartMs) sttGrace.graceStartMs = now;
+      else if (!sttGrace.graceStartMs) {
+        sttGrace.graceStartMs = now;
+        startLambdaPreconnect();  // 猶予の間に Lambda への TLS を先に張る（言い直しが来ても張ったまま待つ）
+      }
     }
   }
   if (armed && partialText.length() > 0) {
@@ -3614,5 +3823,7 @@ void finishUtterance(const char* why) {
     lastFinalText = text;
     ledBlip();  // 発話を確定して送る
     sendToLambdaAndPlay(text);
+  } else {
+    abortLambdaPreconnect("same text");
   }
 }

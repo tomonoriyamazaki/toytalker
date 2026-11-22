@@ -20,18 +20,21 @@ struct TurnReport {
   // done（最後まで鳴らした）/ aec（声の割り込み）/ button / stream_error / connect_failed / i2s_failed
   const char* stop = "";
   uint32_t preMs = 0;        // t0 → TLS 接続を始めた（相槌の待ち・I2S の切り替え・Soniox 先行接続の開始を含む）
-  uint32_t tlsMs = 0;        // TLS 接続（毎ターン張り直し。0.7.6 から証明書の検証が入った）
+  uint32_t tlsMs = 0;        // TLS 接続を待った時間。猶予の間に先に張るので（ロードマップ39）、t0 より前に済んだ分は入らない（済んでいれば 0）
   bool tlsOk = false;
   uint32_t sendMs = 0;       // 要求の書き込み
   uint32_t headersMs = 0;    // t0 → 応答ヘッダーを読み終えた
   uint32_t firstAudioMs = 0; // t0 → 返答の最初の音声バイト（相槌は含まない）
-  uint32_t playStartMs = 0;  // t0 → 返答の音声を最初に I2S へ渡した（溜め 0.34 秒の後。スピーカーの発声はこの数十ms後）
+  uint32_t playStartMs = 0;  // t0 → 返答の音声を最初に I2S へ渡した（溜め 0.34 秒の後。0.7.45 は 0.1 秒、0.7.46 は 0.2 秒。スピーカーの発声はこの数十ms後）
   uint32_t recvEndMs = 0;    // t0 → 受信の終わり（最後まで、または割り込み・失敗で止めた）
   uint32_t playEndMs = 0;    // t0 → アンプを切った
   uint32_t bargeMs = 0;      // t0 → 割り込みの判定（声: AEC の発火、ボタン: 押した時刻）。割り込みが無ければ 0
   uint32_t audioMs = 0;      // 受けた返答の音声の長さ（24kHz mono の バイト数から）
   uint32_t unplayedMs = 0;   // 止めた時点でバッファに残っていた鳴らしていない音声（最後まで鳴らせば 0）
-  uint32_t underruns = 0;    // 再生中のバッファ切れ（溜め直してから再開した回数）
+  uint32_t underruns = 0;    // 再生中に音が途切れた回数（0.7.45 から: リングも DMA も空になり、溜め直してから再開した回数。0.7.44 まではリングが空になった回数）
+  uint32_t underFirstMs = 0; // t0 → 最初の途切れ（play_start_ms と比べれば鳴り始めから何 ms 後か分かる。無ければ 0）
+  uint32_t underStallMs = 0; // 途切れで音が止まっていた時間の合計（DMA が鳴り終わってから、溜め直して再開するまで）
+  uint32_t underMaxMs = 0;   // そのうち最長の1回
   uint32_t segments = 0;     // 受けた音声の区切り（tts_start）
   bool bc = false;           // このターンで相槌を鳴らした
   int rssiAvg = 0, rssiMin = 0;  // 再生中の Wi-Fi RSSI（0 は未計測）
@@ -59,17 +62,18 @@ inline String turnReportJsonNumber(double v, int digits) {
 
 // "prev":{…}（先頭のカンマは呼び出し側）
 inline String turnReportJson(const TurnReport& r) {
-  char buf[640];
+  char buf[768];
   int n = snprintf(buf, sizeof(buf),
     "\"prev\":{\"turn\":%lu,\"stop\":\"%s\",\"pre_ms\":%lu,\"tls_ms\":%lu,\"tls_ok\":%d,\"send_ms\":%lu,"
     "\"headers_ms\":%lu,\"first_audio_ms\":%lu,\"play_start_ms\":%lu,\"recv_end_ms\":%lu,\"play_end_ms\":%lu,"
-    "\"barge_ms\":%lu,\"audio_ms\":%lu,\"unplayed_ms\":%lu,\"underruns\":%lu,\"segments\":%lu,\"bc\":%d,"
+    "\"barge_ms\":%lu,\"audio_ms\":%lu,\"unplayed_ms\":%lu,\"underruns\":%lu,\"under_first_ms\":%lu,\"under_stall_ms\":%lu,\"under_max_ms\":%lu,\"segments\":%lu,\"bc\":%d,"
     "\"rssi_avg\":%d,\"rssi_min\":%d,\"ws_max_block_ms\":%lu",
     (unsigned long)r.turn, r.stop, (unsigned long)r.preMs, (unsigned long)r.tlsMs, r.tlsOk ? 1 : 0,
     (unsigned long)r.sendMs, (unsigned long)r.headersMs, (unsigned long)r.firstAudioMs,
     (unsigned long)r.playStartMs, (unsigned long)r.recvEndMs, (unsigned long)r.playEndMs,
     (unsigned long)r.bargeMs, (unsigned long)r.audioMs, (unsigned long)r.unplayedMs,
-    (unsigned long)r.underruns, (unsigned long)r.segments, r.bc ? 1 : 0, r.rssiAvg, r.rssiMin,
+    (unsigned long)r.underruns, (unsigned long)r.underFirstMs, (unsigned long)r.underStallMs, (unsigned long)r.underMaxMs,
+    (unsigned long)r.segments, r.bc ? 1 : 0, r.rssiAvg, r.rssiMin,
     (unsigned long)r.wsMaxBlockMs);
   String out(buf);
   if (n < 0 || n >= (int)sizeof(buf)) out = "\"prev\":{\"turn\":" + String(r.turn);  // 起きない想定。壊れた JSON は送らない

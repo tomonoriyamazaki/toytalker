@@ -84,6 +84,20 @@ const getSonioxKey = async (): Promise<string> => {
   return sonioxKeyInflight;
 };
 
+// 型定義（ブラウザの WebSocket）には第3引数が無いので、React Native の実装（Libraries/WebSocket）の形を教える
+const HeaderWebSocket = WebSocket as unknown as new (
+  url: string,
+  protocols: string | string[] | null,
+  options: { headers: Record<string, string> },
+) => WebSocket;
+
+/**
+ * Soniox の WebSocket を開く。鍵は接続時に Authorization ヘッダーで渡す
+ * （開始メッセージの api_key は 2027-01-15 に廃止。ロードマップ22）。ヘッダーを付けられるのは React Native の WebSocket の拡張
+ */
+const openSonioxWs = (apiKey: string) =>
+  new HeaderWebSocket(SONIOX_WS_URL, null, { headers: { Authorization: `Bearer ${apiKey}` } });
+
 
 /* === デバッグ === */
 const SHOW_STT_DEBUG_UI = DEBUG;
@@ -605,6 +619,7 @@ export default function Chat() {
   const sttStartingRef = useRef(false); // 開始処理の最中（録音器の start が終わる前）。二重起動を防ぐ印は同期的に立てる
   const micDataSubRef = useRef<{ remove: () => void } | null>(null); // AudioRecord.on("data") の購読。止めるときに外す
   const preconnectedWsRef = useRef<WebSocket | null>(null);
+  const preconnectingRef = useRef(false); // 先行接続の鍵を待っている最中（二重に開かない）
   const preconnectedChoiceRef = useRef(""); // 先行接続を開いた時の選択（sttChoiceKey）
   const sonioxFinalBufRef = useRef<string>(""); // final確定の蓄積
   const sonioxNonFinalBufRef = useRef<string>(""); // 非確定の表示用
@@ -648,27 +663,29 @@ export default function Chat() {
   // Soniox WS先行接続（再生中に呼ぶ）
   const preconnectSonioxWs = async () => {
     if (preconnectedWsRef.current) return;
+    if (preconnectingRef.current) return;
+    preconnectingRef.current = true;
+    let apiKey: string;
+    try {
+      apiKey = await getSonioxKey(); // 古ければ取り直す。接続に要るので先に待つ（返答の再生中なので待ちは見えない）
+    } catch (e: any) {
+      console.log(`⏱️ preconnect: key fetch failed: ${e?.message ?? e}`);
+      return;
+    } finally {
+      preconnectingRef.current = false;
+    }
+    // 鍵を待つ間に聞き取りが始まっていたら開かない（使われない接続が残る）
+    if (preconnectedWsRef.current || sonioxListeningRef.current || sttStartingRef.current) return;
     console.log("⏱️ preconnect: creating WebSocket");
-    const keyPromise = getSonioxKey(); // 古ければ取り直す。WS接続と並行
-    keyPromise.catch(() => {}); // WSが開かず await に到達しない場合の未処理rejectを防ぐ
-    const ws = new WebSocket(SONIOX_WS_URL);
+    const ws = openSonioxWs(apiKey);
     ws.binaryType = "arraybuffer";
     preconnectedWsRef.current = ws;
     const choice = sttChoice;
     preconnectedChoiceRef.current = sttChoiceKey(choice); // 選択が変わったら startSonioxSTT はこの接続を使わない
 
-    ws.onopen = async () => {
+    ws.onopen = () => {
       console.log("⏱️ preconnect: WebSocket OPEN, sending config");
-      let apiKey: string;
-      try {
-        apiKey = await keyPromise;
-      } catch (e: any) {
-        console.log(`⏱️ preconnect: key fetch failed: ${e?.message ?? e}`);
-        try { ws.close(); } catch {}
-        return;
-      }
       const cfg = {
-        api_key: apiKey,
         ...sonioxModelConfig(choice, SONIOX_MODEL),
         audio_format: "pcm_s16le",
         sample_rate: SONIOX_SAMPLE_RATE,
@@ -702,6 +719,9 @@ export default function Chat() {
       return;
     }
     sttStartingRef.current = true;
+    // 鍵が古ければ、権限の確認などと並行して取り直しを始めておく（下で接続の前に待つ）
+    const keyPromise = getSonioxKey();
+    keyPromise.catch(() => {}); // 途中で抜けて await に到達しない場合の未処理rejectを防ぐ
     try {
 
     // 権限チェック
@@ -784,9 +804,22 @@ export default function Chat() {
     }
     preconnectedWsRef.current = null;
 
-    const keyPromise = usePreconnected ? null : getSonioxKey(); // 古ければ取り直す。WS接続と並行
-    keyPromise?.catch(() => {}); // WSが開かず await に到達しない場合の未処理rejectを防ぐ
-    const ws = usePreconnected ? preWs! : new WebSocket(SONIOX_WS_URL);
+    let ws: WebSocket;
+    if (usePreconnected) {
+      ws = preWs!;
+    } else {
+      // 鍵は接続に要るので先に待つ。新しければすぐ返る。古いとき（2分以上あけた後の最初の発話）だけ取り直しのぶん待つ
+      let apiKey: string;
+      try {
+        apiKey = await keyPromise;
+      } catch (e: any) {
+        setLog(L => [...L, `Soniox key fetch failed: ${e?.message ?? e}`]);
+        return;
+      }
+      if (!guard()) return; // 鍵を待つ間に止められた・別の聞き取りが始まった
+      ws = openSonioxWs(apiKey);
+      console.log(`⏱️ STT [${Date.now() - sttT0}ms] key ready, WebSocket created`);
+    }
     ws.binaryType = "arraybuffer";
     sonioxWsRef.current = ws;
 
@@ -896,16 +929,7 @@ export default function Chat() {
         if (!guard()) return;
         console.log(`⏱️ STT [${Date.now() - sttT0}ms] WebSocket OPEN`);
 
-        let apiKey: string;
-        try {
-          apiKey = await keyPromise!;
-        } catch (e: any) {
-          setLog(L => [...L, `Soniox key fetch failed: ${e?.message ?? e}`]);
-          try { ws.close(); } catch {}
-          return;
-        }
         const cfg = {
-          api_key: apiKey,
           ...sonioxModelConfig(sttChoice, SONIOX_MODEL),
           audio_format: "pcm_s16le",
           sample_rate: SONIOX_SAMPLE_RATE,

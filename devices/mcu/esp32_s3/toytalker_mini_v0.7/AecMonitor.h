@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <driver/i2s_std.h>
+#include "BoardConfig.h"
 #include <esp_aec.h>
 #include <esp_vad.h>
 #include <esp_heap_caps.h>
@@ -224,16 +225,24 @@ class AecMonitor {
   void IRAM_ATTR captureRx(const i2s_event_data_t* event) {
     if (!capture_.enabledFromISR()) return;
     uint32_t seq = ++rxSequence_;
-    if (event->size != sizeof(RxBlock::data) || !event->dma_buf) {
+    const size_t expected = rxPdm_ ? AEC_MIC_SAMPLES * sizeof(int16_t) : sizeof(RxBlock::data);
+    if (event->size != expected || !event->dma_buf) {
       capture_.errorFromISR(); return;
     }
     auto* b = rx_.beginPush();
     if (!b) return;
     b->endUs = esp_timer_get_time(); b->sequence = seq;
-    const int32_t* source = static_cast<const int32_t*>(event->dma_buf);
-    for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) b->data[i] = source[i];
+    if (rxPdm_) {  // 16bit を I2S の生の値と同じ単位へ（BoardConfig.h の pdmRawScale）
+      const int16_t* source = static_cast<const int16_t*>(event->dma_buf);
+      for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) b->data[i] = board::toRaw(source[i], rxScale_);
+    } else {
+      const int32_t* source = static_cast<const int32_t*>(event->dma_buf);
+      for (size_t i = 0; i < AEC_MIC_SAMPLES; ++i) b->data[i] = source[i];
+    }
     rx_.commitPush();
   }
+  // マイクの DMA に来る形（基板の版で決まる）。setup() でマイクを初期化する前に 1 回
+  void setRxFormat(bool pdm16, int32_t scale) { rxPdm_ = pdm16; rxScale_ = scale; }
   void IRAM_ATTR captureTx(const i2s_event_data_t* event) {
     if (!capture_.enabledFromISR()) return;
     uint32_t seq = ++txSequence_;
@@ -525,5 +534,7 @@ class AecMonitor {
   uint64_t windowMicEnergy_ = 0, windowOutEnergy_ = 0;
   int64_t firstAudioUs_ = 0;
   int32_t dc_ = 0;
+  bool rxPdm_ = false;
+  int32_t rxScale_ = 0;
   bool dcReady_ = false, summaryPending_ = false, turnStarted_ = false;
 };
