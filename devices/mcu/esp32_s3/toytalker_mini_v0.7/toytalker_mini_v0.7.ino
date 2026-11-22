@@ -10,6 +10,8 @@
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <memory>
+#include "LambdaLink.h"
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
@@ -2095,66 +2097,115 @@ bool playBackchannelIfReady() {
   return true;
 }
 
-// ---- Lambda SSL接続+リクエスト送信バックグラウンドタスク ----
-struct LambdaConnectParams {
-  WiFiClientSecure* client;
-  String* request;
-  std::atomic<bool> connected;
-  std::atomic<bool> sent;
-  std::atomic<bool> failed;
-  // 計測（TurnReport）。sent / failed を立てる前に書くので、loop はそれを見てから読む
-  uint32_t connectStartMs;
-  uint32_t connectMs;
-  uint32_t sendMs;
-};
+// ---- Lambda への TLS 接続と要求の送信（Core 0 のタスク）----
+// 1回の接続ごとに LambdaLink を1つ作る。話し終わりの猶予（STT_GRACE_MS）が始まった時に先に張り始め（ロードマップ39。
+// TLS の約0.6秒を猶予の間に済ませる）、送ると決まったら同じタスクが要求を送る。送らないと決まったら「やめる」を渡す。
+// 持ち主: 「やめる」を渡した後は loop() は触らず、タスクが自分で片付ける。「送る」を渡した後は finished を待って loop() が片付ける。
+static LambdaLink* lambdaPreconnect = nullptr;  // 猶予の間に張っている接続。loop() だけが触る
 
-void lambdaConnectAndSendTask(void* param) {
-  LambdaConnectParams* p = (LambdaConnectParams*)param;
+static bool lambdaLinkConnect(LambdaLink* p) {
   // 原因特定用: TLS接続直前の内部RAM状態(free / 最大連続ブロック)。
   // TLSの合計使用量と1回の確保サイズは別。freeが足りてもmax_blkが小さいと確保に失敗し得る。
   Serial.printf("[DIAG] pre-connect free=%u max_blk=%u\n",
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
   tls_memory::printStats("lambda_pre_connect");
-  p->client->setCACert(AMAZON_ROOT_CAS);  // 証明書を検証する（0.7.5 までは setInsecure で検証なし）
-  uint32_t connectStart = millis();
+  p->client.setCACert(AMAZON_ROOT_CAS);  // 証明書を検証する（0.7.5 までは setInsecure で検証なし）
+  const uint32_t connectStart = millis();
   p->connectStartMs = connectStart;
-  bool connected = p->client->connect(LAMBDA_HOST, 443);
+  const bool connected = p->client.connect(LAMBDA_HOST, 443);
   p->connectMs = millis() - connectStart;
-  Serial.printf("[LATENCY] lambda_connect_ms=%lu ok=%d\n",
-                (unsigned long)(millis() - connectStart), connected);
+  p->connectedAtMs = millis();
+  Serial.printf("[LATENCY] lambda_connect_ms=%lu ok=%d\n", (unsigned long)p->connectMs, connected);
   tls_memory::printStats(connected ? "lambda_connected" : "lambda_failed");
   if (!connected) {
     Serial.printf("[DIAG] connect() FAILED, post free=%u max_blk=%u\n",
                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+  }
+  return connected;
+}
+
+void lambdaLinkTask(void* param) {
+  LambdaLink* p = (LambdaLink*)param;
+  bool connected = lambdaLinkConnect(p);
+  // 送るか・やめるかが決まるまで待つ（先に張った時だけ待ちが生じる。通知を取りこぼしても 20ms で見直す）
+  const bool waited = p->command.load() == 0;
+  uint8_t command;
+  while ((command = p->command.load()) == 0) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+  if (command == LAMBDA_LINK_ABORT) {
+    delete p;  // 接続も閉じる。loop() はもう触らない
+    vTaskDelete(NULL);
+    return;
+  }
+  if (waited) {
+    // 先に張った接続。待っている間に切れた・古くなった・張れなかったものは使わず、ここで張り直す（従来と同じ速さに戻るだけ）
+    const uint32_t idleMs = millis() - p->connectedAtMs;
+    if (connected && p->client.connected() && idleMs <= LAMBDA_LINK_MAX_IDLE_MS) {
+      Serial.printf("[LATENCY] lambda_preconnect reused idle_ms=%lu\n", (unsigned long)idleMs);
+    } else {
+      Serial.printf("[LATENCY] lambda_preconnect not usable (ok=%d idle_ms=%lu); reconnecting\n", connected, (unsigned long)idleMs);
+      p->client.stop();
+      connected = lambdaLinkConnect(p);
+    }
+  }
+  if (!connected) {
     p->failed = true;
+    p->finished = true;
     vTaskDelete(NULL);
     return;
   }
   p->connected = true;
   if (bargeInRequested) {
     // connect()の途中で他タスクからclientを破棄しない。接続後は不要なPOSTを送らない。
-    p->client->stop();
+    p->client.stop();
     Serial.println("[LATENCY] Lambda request cancelled before POST");
     p->failed = true;
+    p->finished = true;
     vTaskDelete(NULL);
     return;
   }
   uint32_t sendStart = millis();
   size_t expected = p->request->length();
-  size_t written = p->client->print(*(p->request));
+  size_t written = p->client.print(*(p->request));
   p->sendMs = millis() - sendStart;
   Serial.printf("[LATENCY] lambda_send_ms=%lu written=%u expected=%u\n",
                 (unsigned long)(millis() - sendStart), (unsigned)written, (unsigned)expected);
   if (written != expected) {
-    p->client->stop();
+    p->client.stop();
     p->failed = true;
-    vTaskDelete(NULL);
-    return;
+  } else {
+    p->sent = true;
   }
-  p->sent = true;
+  p->finished = true;
   vTaskDelete(NULL);
+}
+
+// 接続のタスクを始める。作れなければ nullptr
+LambdaLink* startLambdaLink() {
+  LambdaLink* link = new LambdaLink();
+  if (xTaskCreatePinnedToCore(lambdaLinkTask, "lambda_conn", 16384, link, 1, &link->task, 0) != pdPASS) {
+    delete link;
+    return nullptr;
+  }
+  return link;
+}
+
+// 話し終わりの猶予が始まった時に呼ぶ。もう張っていれば何もしない
+void startLambdaPreconnect() {
+  if (lambdaPreconnect || WiFi.status() != WL_CONNECTED) return;
+  lambdaPreconnect = startLambdaLink();
+  Serial.printf("[LATENCY] lambda_preconnect started=%d\n", lambdaPreconnect != nullptr);
+}
+
+// 先に張った接続を使わないと決まった時に呼ぶ（聞き取りのやり直し・休み・同じ文で送らない時）
+void abortLambdaPreconnect(const char* why) {
+  if (!lambdaPreconnect) return;
+  LambdaLink* link = lambdaPreconnect;
+  lambdaPreconnect = nullptr;
+  Serial.printf("[LATENCY] lambda_preconnect aborted (%s)\n", why);
+  link->command = LAMBDA_LINK_ABORT;  // 以後は触らない（タスクが片付ける）
+  xTaskNotifyGive(link->task);
 }
 
 // このターンの記録を締めて、次の要求に添える記録にする（TurnReport.h）
@@ -2322,15 +2373,25 @@ void sendToLambdaAndPlay(const String& text) {
     "Content-Length: " + payload.length() + "\r\n\r\n"
     + payload;
 
-  // Lambda SSL接続+送信をCore 0でバックグラウンド
-  WiFiClientSecure client;
-  LambdaConnectParams connParams = { &client, &req, false, false, false, 0, 0, 0 };
-  TaskHandle_t connTaskHandle = NULL;
-  if (xTaskCreatePinnedToCore(lambdaConnectAndSendTask, "lambda_conn", 16384, &connParams, 1, &connTaskHandle, 0) != pdPASS) {
-    connParams.failed = true;
+  // Lambda SSL接続+送信をCore 0でバックグラウンド。猶予の間に先に張った接続があれば、それで送る
+  LambdaLink* link = lambdaPreconnect;
+  lambdaPreconnect = nullptr;
+  const bool preconnected = link != nullptr;
+  if (!link) link = startLambdaLink();
+  if (link) {
+    link->request = &req;
+    link->command = LAMBDA_LINK_GO;
+    xTaskNotifyGive(link->task);
+  } else {
+    link = new LambdaLink();  // タスクなし。失敗として下の後片付けへ流す
+    link->failed = true;
+    link->finished = true;
     Serial.println("[VOICE] Lambda task allocation failed; returning to recording");
   }
-  Serial.printf("⏱️ [%lums] Lambda task started on Core 0\n", millis() - t0);
+  std::unique_ptr<LambdaLink> linkOwner(link);  // この関数を抜ける時に接続ごと片付ける（タスクは finished の後は触らない）
+  LambdaLink& connParams = *link;
+  WiFiClientSecure& client = link->client;
+  Serial.printf("⏱️ [%lums] Lambda task %s on Core 0\n", millis() - t0, preconnected ? "told to send (preconnected)" : "started");
 
   // アンプON（PWMなし）
   if (!ampOn) {
@@ -2351,12 +2412,15 @@ void sendToLambdaAndPlay(const String& text) {
 
   // Lambda接続完了待ち
   // タスクがclient/reqを使い終わるまで寿命を保持する。音声検出時のミュートは監視側で行う。
-  while (!connParams.sent && !connParams.failed) delay(1);
+  while (!connParams.finished) delay(1);
   Serial.printf("⏱️ [%lums] Lambda request sent (ok=%d)\n", millis() - t0, !connParams.failed);
 
   if (connParams.connectStartMs) {
-    turnReport.preMs = connParams.connectStartMs - t0;
-    turnReport.tlsMs = connParams.connectMs;
+    // 先に張った接続では、接続の開始も完了も t0 より前のことがある。記録するのは送ると決めてから待った分
+    const int32_t startAfterT0 = (int32_t)(connParams.connectStartMs - t0);
+    const int32_t endAfterT0 = startAfterT0 + (int32_t)connParams.connectMs;
+    turnReport.preMs = startAfterT0 > 0 ? startAfterT0 : 0;
+    turnReport.tlsMs = endAfterT0 <= 0 ? 0 : (startAfterT0 > 0 ? connParams.connectMs : (uint32_t)endAfterT0);
     turnReport.tlsOk = connParams.connected;
     turnReport.sendMs = connParams.sendMs;
   }
@@ -2804,6 +2868,7 @@ void startSTTRecording() {
   armed = false;
   endpointDetected = false;
   sttGrace = SttGraceState{};
+  abortLambdaPreconnect("stt restart");
   clearBackchannelCache();
   Serial.printf("⏱️ STT [%lums] startSTTRecording done\n", millis() - t0);
 }
@@ -3279,6 +3344,7 @@ void enterIdleSleep(uint32_t idleMs, const char* why = "no text") {
   armed = false;
   endpointDetected = false;
   sttGrace = SttGraceState{};
+  abortLambdaPreconnect("stt stopped");
   clearBackchannelCache();
   playChime(CHIME_SLEEP, sizeof(CHIME_SLEEP) / sizeof(CHIME_SLEEP[0]));
   // LED は休み中だけ PWM でゆっくり明滅させる（ほかの状態は digitalWrite のまま。休み中は音を出さない）
@@ -3570,7 +3636,10 @@ void loop() {
       }
       sttGrace.resumeStartMs = 0;
       if (STT_GRACE_MS == 0) finishUtterance("no grace");
-      else if (!sttGrace.graceStartMs) sttGrace.graceStartMs = now;
+      else if (!sttGrace.graceStartMs) {
+        sttGrace.graceStartMs = now;
+        startLambdaPreconnect();  // 猶予の間に Lambda への TLS を先に張る（言い直しが来ても張ったまま待つ）
+      }
     }
   }
   if (armed && partialText.length() > 0) {
@@ -3610,5 +3679,7 @@ void finishUtterance(const char* why) {
     lastFinalText = text;
     ledBlip();  // 発話を確定して送る
     sendToLambdaAndPlay(text);
+  } else {
+    abortLambdaPreconnect("same text");
   }
 }

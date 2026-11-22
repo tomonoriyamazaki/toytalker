@@ -20,7 +20,7 @@ struct TurnReport {
   // done（最後まで鳴らした）/ aec（声の割り込み）/ button / stream_error / connect_failed / i2s_failed
   const char* stop = "";
   uint32_t preMs = 0;        // t0 → TLS 接続を始めた（相槌の待ち・I2S の切り替え・Soniox 先行接続の開始を含む）
-  uint32_t tlsMs = 0;        // TLS 接続（毎ターン張り直し。0.7.6 から証明書の検証が入った）
+  uint32_t tlsMs = 0;        // TLS 接続を待った時間。猶予の間に先に張るので（ロードマップ39）、t0 より前に済んだ分は入らない（済んでいれば 0）
   bool tlsOk = false;
   uint32_t sendMs = 0;       // 要求の書き込み
   uint32_t headersMs = 0;    // t0 → 応答ヘッダーを読み終えた
