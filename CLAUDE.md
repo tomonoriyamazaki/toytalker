@@ -17,6 +17,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 - 原価・課金・前払いポイント制（Stripe・購入ページ `web/site/buy/`）: [原価と課金の考え方](docs/pricing-and-cost-model.md)（段階3の設計は 11.10、本体の原価の目安は 12）
 - TTSフォールバック（主の声が失敗・3秒超えでずんだもんへ）と通知: [TTSフォールバック](docs/tts-fallback-and-notifications.md)（状態・仕組み）。Cartesiaの設定は [Cartesia TTS導入](docs/cartesia-tts.md)
 - 販売の準備（API 事業者の規約・保護者の同意・物の安全・Amazon。ロードマップ42）: [販売の準備](docs/sales-readiness.md)。物の認証は [認証チェックリスト](docs/certification-checklist.md)
+- レコーダー（ToyTalker とは別の製品の案。ペンダント型の録音・文字起こし機、構想だけ）: [レコーダー](docs/recorder.md)（決めたこと・ハードの候補・確かめていないこと・進める順番）
 - MacBookでの開発: [MacBook引き継ぎ](docs/handoff-macbook-2026-09.md)
 - PCの再起動と、再起動後に外から戻る手順（Tailscale + Moonlight → Claude Code の `/rc`）: [Windows更新による再起動の制御](docs/windows-update-restart-control.md)
 
