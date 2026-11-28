@@ -174,15 +174,15 @@ const common = {
       slow: { soniox: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 }, grace_ms: 1200 },
     },
   },
-  // ESP32 の待ち。normal はファームの組み込みと同じ（Soniox は既定のまま、猶予 0.6 秒。選んでいない機器もこの動き）。
-  // アプリの normal（終端を遅らせる Soniox の値つき）は本体のマイクで試していないので、まだ合わせていない。
-  // fast は猶予なし（相槌も返事も 0.6 秒早い。言葉に詰まる子の話を切りやすい）、slow はアプリの slow と同じ値。
-  // fast の max_endpoint_delay_ms（2026-11-29）: 言いかけに聞こえる短い一言だと、Soniox は終端を上限まで待つ
-  // （既定のままだと約 2.0 秒。試験機の 9 ターン中 5 ターン）。1 秒にして、その回の相槌・合いの手・返事を約 1 秒早くする
+  // ESP32 の待ち（2026-11-29 に Soniox の終端の上限 max_endpoint_delay_ms を 3 つとも短くした。利用者の決定）。
+  // 言いかけに聞こえる短い一言だと、Soniox は終端を上限まで待つ（既定は約 2.0 秒。試験機の実測）。その回は相槌・合いの手・
+  // 返事がまるごと遅れるので、上限を fast 0.5 秒・normal 1 秒・slow 1.5 秒にした。言葉を切ってから続ける分は grace_ms で拾う。
+  // 引き換え: 言葉に詰まった時に切って返事を始めやすくなる（それまでは normal が既定の約 2 秒、slow が 3 秒だった）。
+  // アプリの waits（上）は別で、変えていない。slow の endpoint_sensitivity はアプリの slow と同じ値のまま
   sttDeviceWaits: {
-    fast: { soniox: { max_endpoint_delay_ms: 1000 }, grace_ms: 0 },
-    normal: { soniox: {}, grace_ms: 600 },
-    slow: { soniox: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 }, grace_ms: 1200 },
+    fast: { soniox: { max_endpoint_delay_ms: 500 }, grace_ms: 0 },
+    normal: { soniox: { max_endpoint_delay_ms: 1000 }, grace_ms: 600 },
+    slow: { soniox: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 1500 }, grace_ms: 1200 },
   },
   cartesiaDefaultVoiceId: "c7eafe22-8b71-40cd-850b-c5a3bbd8f8d2",
   architecture: "x86_64",
