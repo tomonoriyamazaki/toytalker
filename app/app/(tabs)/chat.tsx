@@ -1019,6 +1019,9 @@ export default function Chat() {
                   body: JSON.stringify({
                     partial_text: bcPartial,
                     character_id: charId,
+                    // 相槌の原価を誰のどの機器に付けるか（本文と同じ値。ログイン中はサーバーがトークンから持ち主を決める）
+                    owner_id: ownerId,
+                    device_id: "app",
                     app_version: APP_VERSION,
                     history: historyRef.current.slice(-6).map(t => ({ role: t.role, content: t.text })),
                     past_backchannels: pastBackchannelsRef.current.slice(-10),

@@ -45,7 +45,7 @@ Claude CodeとCodexで共有するシステム概要・開発ルール。Codex�
 ### コスト記録の方針
 
 - 料金体系（原価・マージン2.0・前払いポイント・プレミアムボイス）と前払いポイント制の実装仕様（未実装。購入機能は認証の後）は [原価と課金の考え方](docs/pricing-and-cost-model.md)。
-- 相槌のLLM・TTSは記録せず `service#margin`（2.0）で吸収する。LLMのツール呼び出しは外部の有料API（Brave検索など）だけ回数課金で `tool` として記録する。
+- 相槌のLLM・TTSも記録して残高から引く（2026-11-28 から。usage は本文と別の行、台帳は `source: backchannel` の行）。記録しないのは AWS・為替・カード手数料で、`service#margin`（2.0）で吸収する。原価の計算と usage への記録は `backend/shared/cost.mjs` の1か所（本文・相槌・読み上げで共通）、本文のターンの終わりの記録（原価 → usage → 会話ログ → 台帳）は `backend/shared/turn-record.mjs`、相槌の本体は `backend/shared/backchannel.mjs`。App 用と ESP32 用で同じ処理は `backend/shared` に置き、各 Lambda に写しを作らない（残りは [ロードマップ](docs/roadmap.md) の 50）。LLMのツール呼び出しは外部の有料API（Brave検索など）だけ回数課金で `tool` として記録する。
 - 為替は毎月1日に月次Lambdaが自動保存し、点検をメールする。単価は自動更新しない。`zakicorp#tts` の単価は暫定（$0.000025/文字）。
 - 主の声が失敗（429/5xx）するか1文に3秒を超えたら、返答単位でずんだもんへ切り替えて会話を止めない。ずんだもん分は `sakura#tts` として別の行で記録する。複数アカウントでの上限回避はしない。
 

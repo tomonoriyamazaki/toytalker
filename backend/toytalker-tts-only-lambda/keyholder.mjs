@@ -21,7 +21,7 @@ import { errorStatus } from "../shared/trace.mjs";
 import {
   SAMPLE_RATE, MAX_CLIPS, ENTRY_BYTES, encodeAdpcm, decodeAdpcm, shapePcm, buildImage, imageBytes, imageCrcHex,
 } from "../shared/voice-image.mjs";
-import { synthesizePcm } from "./pcm-tts.mjs";
+import { synthesizePcm } from "../shared/tts-pcm.mjs";
 
 const s3 = new S3Client({ region: "ap-northeast-1" });
 const BUCKET = process.env.FIRMWARE_BUCKET || "toytalker-firmware";

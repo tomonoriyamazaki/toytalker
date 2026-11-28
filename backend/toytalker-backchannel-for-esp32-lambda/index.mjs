@@ -2,18 +2,16 @@
 // Handler: index.handler
 // ESP32向け相槌Lambda: raw PCMバイナリをレスポンスボディで返す
 // ヘッダ X-Backchannel-Text に相槌テキストを格納
-// Env: GOOGLE_API_KEY, OPENAI_API_KEY, SAKURA_API_KEY, ELEVENLABS_API_KEY, FISHAUDIO_API_KEY, ZAKICORP_API_KEY, ZAKICORP_TTS_URL,
-//      CARTESIA_API_KEY, CARTESIA_DEFAULT_VOICE_ID (任意: CARTESIA_LANGUAGE 既定 "ja")
-import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
-import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+// ここにあるのは入口だけ（要求の読み方・登録済み機器の門とデバイス鍵・残高の確認・出力の形）。相槌の本体は backend/shared/backchannel.mjs
+// Env: ZAKICORP_TTS_URL, CARTESIA_DEFAULT_VOICE_ID (任意: CARTESIA_LANGUAGE 既定 "ja")。鍵は SSM（backend/shared/secrets.mjs）
 import { Agent, setGlobalDispatcher } from "undici";
-import { ensureSecrets, secret } from "../shared/secrets.mjs";
-import { tableName } from "../shared/tables.mjs";
-import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
-import { checkDeviceKey, deviceGate } from "../shared/auth.mjs";
+import { ensureSecrets } from "../shared/secrets.mjs";
+import { startTrace, describeClient } from "../shared/trace.mjs";
+import { checkDeviceKey, deviceGate, loadDeviceRow } from "../shared/auth.mjs";
 import { checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
-import { BACKCHANNEL_LLM_MODEL, geminiThinkingConfig } from "../shared/llm.mjs";
+import { resolveCharacter, runBackchannel } from "../shared/backchannel.mjs";
+import { trimSilence } from "../shared/tts-pcm.mjs";
+import { prewarmSpareInstance } from "../shared/warm.mjs";
 
 // ---- fetchのkeep-alive延長（デフォルト4秒→60秒） ----
 // 会話の間が空くとLLM/TTSへのTLS接続が閉じられ、次の相槌でハンドシェイクからやり直しになる
@@ -32,337 +30,17 @@ const prewarmConnections = async (waitMs = 0) => {
   if (waitMs > 0) await Promise.race([Promise.allSettled(jobs), new Promise(r => setTimeout(r, waitMs))]);
 };
 
-// ---- 予備インスタンスの事前ウォームアップ ----
-// 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
-// 別のコールドなインスタンスに着弾して初期化されるため、2人目の同時利用時のコールドスタートを防げる
-const lambdaSelfClient = new LambdaClient({});
-function prewarmSpareInstance() {
-  lambdaSelfClient.send(new InvokeCommand({
-    FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME,
-    InvocationType: "Event",
-    Payload: Buffer.from(JSON.stringify({ body: '{"warmup":true}' })),
-  })).catch(() => {});
-}
+// TTS の頼み方のうち ESP32 用だけの値（backend/shared/tts-pcm.mjs の options）。Google は少し速く高く、Gemini は文だけを渡す。
+// Gemini は空の音声を返すことがあるのでやり直すが、相槌は遅れると意味が無いので1回だけ
+const TTS_OPTIONS = { google: { speakingRate: 1.2, pitch: 3.0 }, gemini: { attempts: 2, readAloudPrompt: false } };
 
-const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
-const ddb = DynamoDBDocumentClient.from(ddbClient);
-const DEVICES_TABLE    = tableName("devices");
-const CHARACTERS_TABLE = tableName("characters");
-const VOICES_TABLE     = tableName("voices");
-
-// ---- TTS設定 ----
-const TTS_TABLE = {
-  OpenAI:     { ttsVendor: "openai",     ttsModel: "gpt-4o-mini-tts" },
-  Google:     { ttsVendor: "google",     ttsModel: "google" },
-  Gemini:     { ttsVendor: "gemini",     ttsModel: "gemini-2.5-flash-preview-tts" },
-  ElevenLabs: { ttsVendor: "elevenlabs", ttsModel: "eleven_turbo_v2_5" },
-  Cartesia:   { ttsVendor: "cartesia",   ttsModel: "sonic-3.6" },
-  FishAudio:  { ttsVendor: "fishaudio",  ttsModel: "fishaudio" },
-  Sakura:     { ttsVendor: "sakura",     ttsModel: "sakura" },
-  ZakiCorp:   { ttsVendor: "zakicorp",   ttsModel: "zakicorp-tts" },
-};
-const TTS_DEFAULT = "Sakura";
-
-function normalizeModelKey(k) {
-  if (!k) return undefined;
-  const s = String(k).toLowerCase();
-  if (s.includes("openai"))      return "OpenAI";
-  if (s.includes("google"))      return "Google";
-  if (s.includes("gemini"))      return "Gemini";
-  if (s.includes("elevenlabs"))  return "ElevenLabs";
-  if (s.includes("cartesia"))    return "Cartesia";
-  if (s.includes("fishaudio") || s.includes("fish")) return "FishAudio";
-  if (s.includes("sakura"))      return "Sakura";
-  if (s.includes("zakicorp") || s.includes("qwen")) return "ZakiCorp";
-  return undefined;
-}
-
-// ---- device_idからキャラクター解決（ESP用） ----
-async function resolveCharacterFromDevice(deviceId) {
-  try {
-    const deviceRes = await ddb.send(new GetCommand({
-      TableName: DEVICES_TABLE,
-      Key: { device_id: deviceId },
-    }));
-    const device = deviceRes.Item;
-    if (!device) return { registered: false }; // 未登録機。本番では拒む（deviceGate）
-
-    // ownerId は残高の確認に使う。キャラクターが無い（未設定・解決できない）ときも持ち主は返す
-    const ownerId = device.owner_id ?? null;
-    const char = device.character_id ? await resolveCharacter(device.character_id) : null;
-    return char ? { ...char, ownerId, deviceRow: device } : { ownerId, noCharacter: true, deviceRow: device };
-  } catch (e) {
-    console.error("[resolveCharacterFromDevice] error:", e);
-    return null;
-  }
-}
-
-// ---- キャラクター解決 ----
-async function resolveCharacter(characterId) {
-  try {
-    const charRes = await ddb.send(new GetCommand({
-      TableName: CHARACTERS_TABLE,
-      Key: { character_id: characterId },
-    }));
-    if (!charRes.Item) return null;
-
-    const voiceId = charRes.Item.voice_id;
-    const personalityPrompt = charRes.Item.personality_prompt || null;
-    if (!voiceId) return null;
-
-    const voiceRes = await ddb.send(new GetCommand({
-      TableName: VOICES_TABLE,
-      Key: { voice_id: voiceId },
-    }));
-    if (!voiceRes.Item) return null;
-
-    return {
-      provider: voiceRes.Item.provider,
-      vendorId: voiceRes.Item.vendor_id,
-      personalityPrompt,
-    };
-  } catch (e) {
-    console.error("[resolveCharacter] error:", e);
-    return null;
-  }
-}
-
-// ---- LLM (相槌生成 - Gemini Flash) ----
-async function generateBackchannel(partialText, personalityPrompt, history = [], pastBackchannels = []) {
-  const key = secret("GOOGLE_API_KEY");
-  if (!key) throw new Error("GOOGLE_API_KEY is not set");
-
-  const now = new Date().toLocaleString("ja-JP", { timeZone: "Asia/Tokyo", hour: "numeric", minute: "numeric" });
-  const isFirstTurn = history.length === 0;
-
-  const historyContext = history.length > 0
-    ? "\n直前の会話:\n" + history.map(h => `${h.role === "user" ? "ユーザー" : "あなた"}: ${h.content}`).join("\n") + "\n"
-    : "";
-
-  const firstTurnHint = isFirstTurn
-    ? `\n- 会話の最初なので、時間帯（現在${now}）に合った挨拶で返してもよい（必須ではない）`
-    : "";
-
-  const avoidHint = pastBackchannels.length > 0
-    ? `\n- 過去に使った相槌: ${pastBackchannels.join("、")}。これらとは違う表現を使うこと`
-    : "";
-
-  const systemPrompt = `あなたは会話相手で、相槌を打つ役割です。${personalityPrompt ? "あなたの性格: " + personalityPrompt + "\n" : ""}${historyContext}ユーザーが今まさに話している途中です。聞こえている部分と会話の流れに合った、自然な相槌を一言だけ返してください。
-ルール:
-- 相槌とは「聞いているよ」「わかるよ」という短い反応のこと
-- 1〜15文字程度
-- 句読点不要
-- 話題の内容や感情に合った相槌を自分で考えて返す（楽しい・困っている・驚き・共感など）
-- 会話の流れを見て、毎回違う表現を使う${firstTurnHint}${avoidHint}
-- キャラの口調は使わず、自然な日本語の相槌にする
-- 絶対に質問・返答・感想・コメントはしない。相槌のみ`;
-
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${BACKCHANNEL_LLM_MODEL}:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: systemPrompt }] },
-        contents: [{ role: "user", parts: [{ text: `（話し中）${partialText}` }] }],
-        generationConfig: { maxOutputTokens: 20, temperature: 0.9, thinkingConfig: geminiThinkingConfig(BACKCHANNEL_LLM_MODEL) },
-      }),
-    }
-  );
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`Gemini failed: ${resp.status} ${errText}`);
-  }
-  const data = await resp.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "うん";
-  return text.trim();
-}
-
-// ---- TTS functions (raw PCM Buffer) ----
-
-async function ttsPcmOpenAI(text, { model = "gpt-4o-mini-tts", voice = "alloy" } = {}) {
-  const key = secret("OPENAI_API_KEY");
-  if (!key) throw new Error("OPENAI_API_KEY is not set");
-  const resp = await fetch("https://api.openai.com/v1/audio/speech", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input: text, voice, response_format: "pcm" }),
-  });
-  if (!resp.ok) throw new Error(`OpenAI TTS failed: ${resp.status}`);
-  return Buffer.from(await resp.arrayBuffer());
-}
-
-async function ttsPcmGoogle(text, { voiceName = "ja-JP-Neural2-B", sampleRateHertz = 24000 } = {}) {
-  const key = secret("GOOGLE_API_KEY");
-  if (!key) throw new Error("GOOGLE_API_KEY is not set");
-  const parts = String(voiceName).split("-");
-  const languageCode = parts.length >= 2 ? `${parts[0]}-${parts[1]}` : "ja-JP";
-  const resp = await fetch(
-    `https://texttospeech.googleapis.com/v1/text:synthesize?key=${key}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        input: { text },
-        voice: { languageCode, name: voiceName },
-        audioConfig: { audioEncoding: "LINEAR16", speakingRate: 1.2, pitch: 3.0, sampleRateHertz },
-      }),
-    }
-  );
-  const json = await resp.json();
-  if (!resp.ok) throw new Error(json?.error?.message || "Google TTS failed");
-  return Buffer.from(json.audioContent, "base64");
-}
-
-async function ttsPcmGemini(text, { model = "gemini-2.5-flash-preview-tts", voiceName = "Kore" } = {}) {
-  const key = secret("GOOGLE_API_KEY");
-  if (!key) throw new Error("GOOGLE_API_KEY is not set");
-  // Gemini はたまに音声の無い応答を返す（短い相槌で起きやすい。2026-11-03）。本文Lambdaと同じく空ならやり直す。
-  // 相槌は遅れると意味が無いので1回だけ
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-      {
-        method: "POST",
-        headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text }] }],
-          generationConfig: {
-            responseModalities: ["AUDIO"],
-            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } },
-          },
-          model,
-        }),
-      }
-    );
-    const json = await resp.json();
-    if (!resp.ok) throw new Error(json?.error?.message || "Gemini TTS failed");
-    const b64Pcm = json?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
-    if (b64Pcm) return Buffer.from(b64Pcm, "base64");
-  }
-  throw new Error("Gemini TTS: empty audio after retry");
-}
-
-async function ttsPcmElevenLabs(text, { model = "eleven_turbo_v2_5", voiceId = "hMK7c1GPJmptCzI4bQIu" } = {}) {
-  const key = secret("ELEVENLABS_API_KEY");
-  if (!key) throw new Error("ELEVENLABS_API_KEY is not set");
-  const resp = await fetch(
-    `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream?output_format=pcm_24000&optimize_streaming_latency=0`,
-    {
-      method: "POST",
-      headers: { "xi-api-key": key, "Content-Type": "application/json" },
-      body: JSON.stringify({ text, model_id: model, voice_settings: { stability: 0.5, similarity_boost: 0.75 } }),
-    }
-  );
-  if (!resp.ok) throw new Error(`ElevenLabs TTS failed: ${resp.status}`);
-  return Buffer.from(await resp.arrayBuffer());
-}
-
-// Cartesia TTS → raw PCM Buffer (24kHz/16bit/mono)
-const CARTESIA_API_VERSION = "2026-08-14";
-async function ttsPcmCartesia(text, { model = "sonic-3.6", voiceId } = {}) {
-  const key = secret("CARTESIA_API_KEY");
-  if (!key) throw new Error("CARTESIA_API_KEY is not set");
-  const id = voiceId || process.env.CARTESIA_DEFAULT_VOICE_ID;
-  if (!id) throw new Error("Cartesia voice ID is not set (CARTESIA_DEFAULT_VOICE_ID)");
-  const resp = await fetch("https://api.cartesia.ai/tts/bytes", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${key}`, "Cartesia-Version": CARTESIA_API_VERSION, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model_id: model, transcript: text, voice: { id },
-      language: process.env.CARTESIA_LANGUAGE || "ja",
-      output_format: { container: "raw", encoding: "pcm_s16le", sample_rate: 24000 },
-    }),
-  });
-  if (!resp.ok) throw new Error(`Cartesia TTS failed: ${resp.status} ${await resp.text()}`);
-  return Buffer.from(await resp.arrayBuffer());
-}
-
-async function ttsPcmFishAudio(text, { referenceId = "e58b0d7efca34eb38d5c4985e9e1e3e6" } = {}) {
-  const key = secret("FISHAUDIO_API_KEY");
-  if (!key) throw new Error("FISHAUDIO_API_KEY is not set");
-  const resp = await fetch("https://api.fish.audio/v1/tts", {
-    method: "POST",
-    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ text, reference_id: referenceId, format: "pcm", sample_rate: 24000, latency: "normal" }),
-  });
-  if (!resp.ok) throw new Error(`FishAudio TTS failed: ${resp.status}`);
-  return Buffer.from(await resp.arrayBuffer());
-}
-
-async function ttsPcmSakura(text, { model = "zundamon", style = "normal" } = {}) {
-  const key = secret("SAKURA_API_KEY");
-  if (!key) throw new Error("SAKURA_API_KEY is not set");
-  const resp = await fetch("https://api.ai.sakura.ad.jp/v1/audio/speech", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${key}`,
-      "Content-Type": "application/json",
-      "Accept": "audio/wav",
-    },
-    body: JSON.stringify({ model, input: text, voice: style, response_format: "wav" }),
-  });
-  if (!resp.ok) {
-    const errorText = await resp.text();
-    throw new Error(`Sakura TTS failed: ${resp.status} ${errorText}`);
-  }
-  const wavBuffer = Buffer.from(await resp.arrayBuffer());
-  return wavBuffer.slice(44); // WAVヘッダ(44bytes)をスキップ
-}
-
-// ZakiCorp TTS (clone voice via local GPU) → raw PCM Buffer
-async function ttsPcmZakiCorp(text, { speaker = "vivian", language = "Japanese" } = {}) {
-  const key = secret("ZAKICORP_API_KEY");
-  const baseUrl = process.env.ZAKICORP_TTS_URL;
-  if (!key || !baseUrl) throw new Error("ZAKICORP_API_KEY or ZAKICORP_TTS_URL is not set");
-  const resp = await fetch(`${baseUrl}/v1/tts/stream`, {
-    method: "POST",
-    // X-Zakicorp-Edge-Key: Cloudflareの拠点で検査する合言葉（WAFカスタムルール）。未設定なら送らない
-    headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json",
-               ...(secret("ZAKICORP_EDGE_KEY") ? { "X-Zakicorp-Edge-Key": secret("ZAKICORP_EDGE_KEY") } : {}) },
-    body: JSON.stringify({ text, language, speaker }),
-  });
-  if (!resp.ok) throw new Error(`ZakiCorp TTS failed: ${resp.status} ${await resp.text()}`);
-  return Buffer.from(await resp.arrayBuffer());
-}
-
-// ---- TTS音声の先頭/末尾の無音トリミング（24kHz/16bit/mono前提） ----
-// 相槌は速さが命なので、TTSが付ける前後の無音を削って体感を詰める
-function trimSilence(pcm, { threshold = 512, padMs = 80, sampleRate = 24000 } = {}) {
-  const total = Math.floor(pcm.length / 2);
-  if (total === 0) return pcm;
-  let start = 0, end = total - 1;
-  while (start < total && Math.abs(pcm.readInt16LE(start * 2)) < threshold) start++;
-  while (end > start && Math.abs(pcm.readInt16LE(end * 2)) < threshold) end--;
-  if (start >= end) return pcm;  // 全体が無音なら触らない
-  const pad = Math.round(sampleRate * padMs / 1000);
-  const headCut = Math.max(0, start - pad);
-  const tailCut = Math.min(total - 1, end + pad);
-  return pcm.slice(headCut * 2, (tailCut + 1) * 2);
-}
-
-// ---- TTS ルーティング ----
-async function generateTTSPcm(text, vendor, voice) {
-  switch (vendor) {
-    case "sakura":     return ttsPcmSakura(text, { model: voice || "zundamon" });
-    case "openai":     return ttsPcmOpenAI(text, { voice: voice || "alloy" });
-    case "google":     return ttsPcmGoogle(text, { voiceName: voice });
-    case "gemini":     return ttsPcmGemini(text, { voiceName: voice || "Kore" });
-    case "elevenlabs": return ttsPcmElevenLabs(text, { voiceId: voice });
-    case "cartesia":   return ttsPcmCartesia(text, { voiceId: voice });
-    case "fishaudio":  return ttsPcmFishAudio(text, { referenceId: voice });
-    case "zakicorp":   return ttsPcmZakiCorp(text, { speaker: voice || "vivian" });
-    default:           return ttsPcmSakura(text, { model: "zundamon" });
-  }
-}
+const json = (statusCode, body) => ({ statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
 
 // ---- Handler (BUFFEREDモード - isBase64Encodedでバイナリ返却) ----
 export const handler = async (event, context) => {
   const start = Date.now();
   // 切り分け用のログ。1リクエスト1行のJSONで、聞こえた断片も相槌の文章も書かない（backend/shared/trace.mjs）
   let trace = null;
-  let ttsVendor = "sakura";
-  let ttsVoice = "zundamon";
   try {
     await ensureSecrets();
     const body = event.body ? JSON.parse(event.body) : {};
@@ -373,96 +51,68 @@ export const handler = async (event, context) => {
     prewarmConnections();    // LLM/TTS接続を先行確立（keep-alive切れ時の保険、非同期）
     const partialText = body.partial_text ?? "";
     const deviceId = body.device_id ?? null;
-    const characterId = body.character_id ?? null;
     const history = Array.isArray(body.history) ? body.history.slice(-6) : [];
     const pastBackchannels = Array.isArray(body.past_backchannels) ? body.past_backchannels.slice(-10) : [];
-    trace.set({ source: "esp", device_id: deviceId, character_id: characterId, partial_chars: partialText.length, history_turns: history.length, ...describeClient(event, body) });
+    trace.set({ source: "esp", device_id: deviceId, character_id: body.character_id ?? null, partial_chars: partialText.length, history_turns: history.length, ...describeClient(event, body) });
 
     if (!partialText) {
       return { statusCode: 400, body: JSON.stringify({ error: "partial_text is required" }) };
     }
 
-    // キャラクター設定を解決（device_id優先、なければcharacter_id）
-    let personalityPrompt = null;
-
-    let charConfig = null;
     // ESP32 はログインしない。本番（AUTH_REQUIRED）では devices テーブルに登録済みの機器だけ通す（docs/auth.md）。
     // DynamoDB の失敗（null）は従来どおり続ける
-    let registered = false;
-    let ownerId = null;
-    let deviceRowForKey = null;
-    if (deviceId) {
-      const fromDevice = await resolveCharacterFromDevice(deviceId);
-      if (fromDevice?.registered !== false) {
-        registered = true;
-        ownerId = fromDevice?.ownerId ?? null;
-        deviceRowForKey = fromDevice?.deviceRow ?? null;
-        charConfig = fromDevice?.noCharacter ? null : fromDevice;
-      }
-    }
-    {
-      const gate = registered ? null : deviceGate(null);
+    const loaded = deviceId ? await loadDeviceRow(deviceId) : { device: null };
+    const deviceRow = loaded?.device ?? null;
+    if (loaded && !deviceRow) {
+      const gate = deviceGate(null);
       if (gate) {
         trace.set({ status: gate.statusCode, reason: gate.error });
-        return { statusCode: gate.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: gate.error }) };
+        return json(gate.statusCode, { error: gate.error });
       }
     }
     // デバイス鍵（なりすまし防止。backend/shared/auth.mjs の checkDeviceKey）。行がある機器だけ照合する
-    if (deviceRowForKey) {
-      const key = await checkDeviceKey(event, deviceRowForKey);
+    if (deviceRow) {
+      const key = await checkDeviceKey(event, deviceRow);
       trace.set(key.log);
       if (key.gate) {
         trace.set({ status: key.gate.statusCode, reason: key.gate.error });
-        return { statusCode: key.gate.statusCode, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: key.gate.error }) };
+        return json(key.gate.statusCode, { error: key.gate.error });
       }
     }
-    // 残高0なら相槌も返さない（本文が止める旨をしゃべる。docs/pricing-and-cost-model.md 11.3）。ファームは200以外を捨てる
-    if (ownerId) {
-      trace.set({ owner_id: ownerId });
-      if (!(await checkBalance(ownerId)).ok) {
-        trace.set({ status: 402, reason: NO_BALANCE });
-        return { statusCode: 402, headers: { "Content-Type": "application/json" }, body: JSON.stringify({ error: NO_BALANCE }) };
+    // 持ち主は機器の行で決まる。残高と、キャラクター（声・人格）は並べて読む（順に読むと DynamoDB 3往復、並べると2往復ぶん。
+    // 相槌の最後に原価を書く1往復が増えた分をここで取り返す。docs/pricing-and-cost-model.md 11.3）。
+    // 門（未登録機・デバイス鍵）を通ってから始めるので、拒否で返るときに読みかけの要求は残らない
+    const ownerId = deviceRow?.owner_id ?? null;
+    if (ownerId) trace.set({ owner_id: ownerId });
+    // キャラクターは機器の行のものが優先、無ければ要求の character_id。どちらも無い・読めないときはずんだもん・人格なし（resolveCharacter は投げない）
+    const characterPromise = (async () => {
+      let characterId = deviceRow?.character_id ?? null;
+      let charConfig = characterId ? await resolveCharacter(characterId) : null;
+      if (!charConfig && body.character_id) {
+        characterId = body.character_id;
+        charConfig = await resolveCharacter(characterId);
       }
+      return { characterId, charConfig };
+    })();
+    const [balance, { characterId, charConfig }] = await Promise.all([checkBalance(ownerId), characterPromise]);
+    // 残高0なら相槌も返さない（本文が止める旨をしゃべる）。ファームは200以外を捨てる
+    if (!balance.ok) {
+      trace.set({ status: 402, reason: NO_BALANCE });
+      return json(402, { error: NO_BALANCE });
     }
-    if (!charConfig && characterId) {
-      charConfig = await resolveCharacter(characterId);
-    }
-    if (charConfig) {
-      const ttsKey = normalizeModelKey(charConfig.provider) ?? TTS_DEFAULT;
-      const cfg = TTS_TABLE[ttsKey] ?? TTS_TABLE[TTS_DEFAULT];
-      ttsVendor = cfg.ttsVendor;
-      ttsVoice = charConfig.vendorId ?? ttsVoice;
-      personalityPrompt = charConfig.personalityPrompt;
-    }
-    trace.set({ tts: ttsVendor, voice: ttsVoice, has_personality: !!personalityPrompt });
-    trace.mark("config");
 
-    // LLM生成
-    const backchannelText = await generateBackchannel(partialText, personalityPrompt, history, pastBackchannels);
-    trace.mark("llm_done");
-    trace.set({ reply_chars: backchannelText.length });
-
-    // TTS生成 (raw PCM)
-    let rawPcm;
-    try {
-      rawPcm = await generateTTSPcm(backchannelText, ttsVendor, ttsVoice);
-    } catch (e) {
-      // 主プロバイダーが失敗（同時接続上限など）したら即ずんだもん。相槌は短いので再試行しない
-      if (ttsVendor === "sakura") throw e;
-      trace.ext(ttsVendor, { status: errorStatus(e), error: true });
-      trace.error("tts_primary", e); // この後ずんだもんへ切り替える
-      trace.set({ tts_fallback: "sakura" });
-      rawPcm = await ttsPcmSakura(backchannelText, { model: "zundamon" });
-    }
+    const { text, pcm: rawPcm } = await runBackchannel({
+      trace, client: "esp", partialText, history, pastBackchannels, charConfig, characterId, ttsOptions: TTS_OPTIONS,
+      ownerId, deviceId,
+    });
     const pcmBuffer = trimSilence(rawPcm);
-    trace.mark("tts_done");
     trace.set({ pcm_bytes: pcmBuffer.length, trim_ms: Math.round((rawPcm.length - pcmBuffer.length) / 48) });
 
     return {
       statusCode: 200,
       headers: {
         "Content-Type": "application/octet-stream",
-        "X-Backchannel-Text": encodeURIComponent(backchannelText),
+        "X-Backchannel-Text": encodeURIComponent(text),
         "X-Pcm-Length": String(pcmBuffer.length),
         "X-Latency-Ms": String(Date.now() - start),
       },

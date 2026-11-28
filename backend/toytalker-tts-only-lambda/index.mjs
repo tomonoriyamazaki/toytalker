@@ -9,22 +9,21 @@
 import OpenAI from "openai";
 import { Mp3Encoder } from "@breezystack/lamejs";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, GetCommand, UpdateCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { recordConsume, checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
 import { jstDate } from "../shared/jst.mjs";
 import { startTrace, describeClient, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
+import { loadPricingCache, getExchangeRate, calcTtsCost, addUsage } from "../shared/cost.mjs";
+import { normalizeModelKey } from "../shared/tts-vendors.mjs";
 import { handleKeyholder } from "./keyholder.mjs";
-import { parseWav } from "./pcm-tts.mjs";
+import { parseWav } from "../shared/tts-pcm.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
 const ddb = DynamoDBDocumentClient.from(ddbClient);
 const VOICES_TABLE         = tableName("voices");
-const USAGE_TABLE          = tableName("usage");
-const UNIT_PRICES_TABLE    = tableName("api-unit-prices");
-const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
 
 // 鍵はSSMから実行時に取るので、クライアントは最初に使うときに作る（鍵が変わったら作り直す）
 let openaiClient = null;
@@ -51,19 +50,6 @@ const TTS_TABLE = {
   ZakiCorp:   { ttsVendor: "zakicorp",   ttsModel: "zakicorp-tts" },
 };
 
-function normalizeModelKey(k) {
-  if (!k) return undefined;
-  const s = String(k).toLowerCase();
-  if (s.includes("openai"))      return "OpenAI";
-  if (s.includes("google"))      return "Google";
-  if (s.includes("gemini"))      return "Gemini";
-  if (s.includes("elevenlabs"))  return "ElevenLabs";
-  if (s.includes("cartesia"))    return "Cartesia";
-  if (s.includes("fishaudio") || s.includes("fish")) return "FishAudio";
-  if (s.includes("sakura"))      return "Sakura";
-  if (s.includes("zakicorp") || s.includes("qwen")) return "ZakiCorp";
-  return undefined;
-}
 
 // 改行を「文の区切り（長めのポーズ）」として扱う。
 // TTSは改行で間を取らないため、各行末に句点を補い全プロバイダー共通でポーズを作る。
@@ -286,100 +272,10 @@ async function resolveVoiceFromDynamo(voiceId) {
   }
 }
 
-// ===== コスト計算 + usage 書き込み（TTS分のみ。stream-handler から流用）=====
-let cachedPrices = null, cachedMargin = null, cachedRates = {}, cacheLoadedAt = 0;
-const CACHE_TTL_MS = 3600_000;
-
-async function loadPricingCache() {
-  if (cachedPrices && (Date.now() - cacheLoadedAt) < CACHE_TTL_MS) return;
-  try {
-    const result = await ddb.send(new ScanCommand({
-      TableName: UNIT_PRICES_TABLE,
-      FilterExpression: "version = :v",
-      ExpressionAttributeValues: { ":v": "current" },
-    }));
-    const prices = {};
-    for (const item of (result.Items ?? [])) {
-      const pk = item["provider#api_type"];
-      if (pk === "service#margin") cachedMargin = Number(item.margin) || 1.5;
-      else prices[pk] = item;
-    }
-    cachedPrices = prices;
-    cacheLoadedAt = Date.now();
-  } catch (e) {
-    console.error("[Pricing] cache load error:", e);
-  }
-}
-
-async function getExchangeRate(month, currency = "JPY") {
-  const cacheKey = `${month}#${currency}`;
-  if (cachedRates[cacheKey]) return cachedRates[cacheKey];
-  try {
-    const result = await ddb.send(new GetCommand({ TableName: EXCHANGE_RATES_TABLE, Key: { month, currency } }));
-    const rate = Number(result.Item?.rate) || 150;
-    cachedRates[cacheKey] = rate;
-    return rate;
-  } catch (e) {
-    console.error("[ExchangeRate] error:", e);
-    return 150;
-  }
-}
-
-function calcTtsCostJpy({ providerApiType, characters, utf8Bytes, mora, pcmBytes, audioTokens, usdJpyRate }) {
-  const price = cachedPrices?.[providerApiType];
-  if (!price) {
-    // 単価行が無いと記録されない。月次の運用Lambdaがこのログを拾って知らせる
-    console.warn(`[Pricing] missing price for ${providerApiType}`);
-    return null;
-  }
-  const margin = cachedMargin || 1.5;
-
-  if (price.currency === "JPY") {
-    const inputCost = (mora ?? 0) * Number(price.unit_price_input);
-    return { costJpy: inputCost * margin, costUsd: null, usdJpyRate: null, unitPriceUsd: null, margin };
-  }
-
-  const inputUnit = price.input_unit_type;
-  const outputUnit = price.output_unit_type;
-  let costUsd = 0;
-  if (inputUnit === "tokens") {
-    costUsd += (characters ?? 0) * Number(price.unit_price_input);
-    if (outputUnit === "audio_tokens") costUsd += (audioTokens ?? 0) * Number(price.unit_price_output);
-  } else if (inputUnit === "characters") {
-    costUsd += (characters ?? 0) * Number(price.unit_price_input);
-    if (outputUnit === "audio_tokens" && pcmBytes) {
-      const durationSec = pcmBytes / (24000 * 2);
-      const at = Math.round((durationSec / 60) * 800);
-      costUsd += at * Number(price.unit_price_output);
-    }
-  } else if (inputUnit === "utf8_bytes") {
-    costUsd += (utf8Bytes ?? 0) * Number(price.unit_price_input);
-  }
-  const costJpy = costUsd * usdJpyRate * margin;
-  return { costJpy, costUsd, usdJpyRate, unitPriceUsd: Number(price.unit_price_input), margin };
-}
-
-async function addUsage({ ownerId, deviceId, date, provider, model, costJpy, costUsd, ttsCharacters, usdJpyRate, unitPriceUsd, margin }) {
-  if (!costJpy || costJpy <= 0) return;
-  const sk = `${date}#${deviceId}#tts`;
-  try {
-    // cost_usd はマージン前のUSD実費（請求額との突き合わせ用）
-    await ddb.send(new UpdateCommand({
-      TableName: USAGE_TABLE,
-      Key: { owner_id: ownerId, "date#device_id#api_type": sk },
-      UpdateExpression: "ADD cost_jpy :cost, cost_usd :usd, requests :one, tts_characters :ttsc SET provider = :p, model = :m, usd_jpy_rate = :r, unit_price_usd = :u, margin = :mg",
-      ExpressionAttributeValues: {
-        ":cost": costJpy, ":usd": costUsd ?? 0, ":one": 1, ":ttsc": ttsCharacters,
-        ":p": provider, ":m": model, ":r": usdJpyRate ?? 0, ":u": unitPriceUsd ?? 0, ":mg": margin,
-      },
-    }));
-  } catch (e) {
-    console.error("[addUsage] error:", e);
-  }
-}
-
+// ===== コスト計算 + usage 書き込み（TTS分のみ。計算と記録は backend/shared/cost.mjs）=====
 // b64Len は mp3（読み上げ）の長さ。PCM で作ったとき（ボイスキーホルダー）は pcmBytes（24kHz・16bit）を渡す
-async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len, pcmBytes: pcmBytesIn }) {
+// audioTokens は Gemini の応答が返した音声トークン数（読み上げだけ。ボイスキーホルダーは渡さないので音声ぶんは記録されない）
+async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len, pcmBytes: pcmBytesIn, audioTokens }) {
   try {
     await loadPricingCache();
     const ts = new Date().toISOString();
@@ -387,24 +283,14 @@ async function trackTtsCost({ ownerId, ttsVendor, ttsModel, text, b64Len, pcmByt
     const month = ts.slice(0, 7);
     const usdJpyRate = await getExchangeRate(month);
     const chars = [...text].length;
-    const priceKey = `${ttsVendor}#tts`;
-    let cost;
-    if (ttsVendor === "openai") {
-      // 出力はmp3(128kbps)。mp3バイト数から再生秒数→PCM相当バイト数を概算
-      const mp3Bytes = Math.round((b64Len ?? 0) * 3 / 4);
-      const durationSec = (mp3Bytes * 8) / (MP3_KBPS * 1000);
-      const pcmBytes = pcmBytesIn ?? Math.round(durationSec * 24000 * 2);
-      cost = calcTtsCostJpy({ providerApiType: priceKey, characters: chars, pcmBytes, usdJpyRate });
-    } else if (ttsVendor === "fishaudio") {
-      cost = calcTtsCostJpy({ providerApiType: priceKey, utf8Bytes: Buffer.byteLength(text, "utf8"), usdJpyRate });
-    } else if (ttsVendor === "sakura") {
-      cost = calcTtsCostJpy({ providerApiType: priceKey, mora: chars, usdJpyRate });
-    } else {
-      cost = calcTtsCostJpy({ providerApiType: priceKey, characters: chars, usdJpyRate });
-    }
+    // 出力はmp3(128kbps)。mp3バイト数から再生秒数→PCM相当バイト数を概算（OpenAI の音声ぶんの原価に使う）
+    const mp3Bytes = Math.round((b64Len ?? 0) * 3 / 4);
+    const durationSec = (mp3Bytes * 8) / (MP3_KBPS * 1000);
+    const pcmBytes = pcmBytesIn ?? Math.round(durationSec * 24000 * 2);
+    const cost = calcTtsCost({ vendor: ttsVendor, chars, utf8Bytes: Buffer.byteLength(text, "utf8"), pcmBytes, audioTokens, usdJpyRate });
     if (cost) {
       await addUsage({
-        ownerId, deviceId: "app", date, provider: ttsVendor, model: ttsModel,
+        ownerId, deviceId: "app", date, apiType: "tts", provider: ttsVendor, model: ttsModel,
         costJpy: cost.costJpy, costUsd: cost.costUsd, ttsCharacters: chars,
         usdJpyRate: cost.usdJpyRate, unitPriceUsd: cost.unitPriceUsd, margin: cost.margin,
       });
@@ -506,6 +392,7 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
   // 主プロバイダーが失敗（同時接続上限など）したらずんだもんで生成し、ヘッダーで知らせる
   let b64;
   let usedVendor = cfg.ttsVendor;
+  let geminiAudioTokens;  // Gemini の応答が返した音声トークン数（原価の計算に使う）
   const fmt = "mp3";
   const synthesizePrimary = async () => {
     if (cfg.ttsVendor === "openai") {
@@ -515,6 +402,7 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
     } else if (cfg.ttsVendor === "gemini") {
       const result = await ttsToBase64Gemini(ttsText, { model: cfg.ttsModel, voiceName: voice });
       b64 = result.b64;
+      geminiAudioTokens = result.audioTokens;
     } else if (cfg.ttsVendor === "elevenlabs") {
       b64 = await ttsToBase64ElevenLabs(ttsText, { model: cfg.ttsModel, voiceId: voice });
     } else if (cfg.ttsVendor === "cartesia") {
@@ -550,7 +438,7 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream,
   // コスト記録（失敗しても読み上げは返す。フォールバック時は実際に使った声で記録）。
   // 音声を送るのと並べて始め、応答を閉じる前に終わるのを待つ。待たずに閉じると、Lambda が応答の後に止まって
   // 書き込みが途中で消えることがある（月の集計には入り、台帳と残高には入らない行が出た。2026-11-10）
-  const costSaved = trackTtsCost({ ownerId, ttsVendor: usedVendor, ttsModel: usedVendor === "sakura" ? "zundamon" : cfg.ttsModel, text: ttsText, b64Len: b64.length });
+  const costSaved = trackTtsCost({ ownerId, ttsVendor: usedVendor, ttsModel: usedVendor === "sakura" ? "zundamon" : cfg.ttsModel, text: ttsText, b64Len: b64.length, audioTokens: usedVendor === "gemini" ? geminiAudioTokens : undefined });
 
   // 音声バイナリを直接ストリーミング返却（S3に保存しない）
   const audioBuf = Buffer.from(b64, "base64");

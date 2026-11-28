@@ -10,11 +10,37 @@
 //   { type: "toolCall", id, name, args, signature }    … ツール呼び出し（この後ストリームは終わる）
 // トークン数は呼び出し側が渡す usage = { in, out } に足し込む（検索ありのターンは要求が2回になる）。
 import { secret } from "./secrets.mjs";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { tableName } from "./tables.mjs";
+import { dataClientConfig } from "./region.mjs";
 
 // ---- コードに書くLLMのモデル名はここだけ（モデルの終了通知が来たら、ここと toytalker-llms の行を見る。ロードマップ15） ----
 // 本文の既定は toytalker-llms の is_default 行。これはそのテーブルが読めなかったときの予備
 export const FALLBACK_DEFAULT_LLM = { provider: "google", modelId: "gemini-3.5-flash-lite" };
 // 相槌（backchannel Lambda 2本）。キャラクターの設定によらず固定。速さ最優先で選ぶ（2026-11-03 計測: 相槌1回 0.5〜0.9秒、2.5 と同じか少し速い）
+// ---- LLMデフォルト（キャラクターに llm_id が無いとき）----
+// toytalker-llms の is_default の行を使う（コンテナ生存中はキャッシュ。待たずに呼べば先読みになる）。
+// テーブルから取れないときだけ FALLBACK_DEFAULT_LLM に落ちる
+let defaultLlmPromise = null;
+/** @returns {Promise<{ provider: string, modelId: string }>} */
+export function loadDefaultLlm() {
+  if (!defaultLlmPromise) {
+    defaultLlmPromise = (async () => {
+      try {
+        const ddb = DynamoDBDocumentClient.from(new DynamoDBClient(dataClientConfig));
+        const res = await ddb.send(new ScanCommand({ TableName: tableName("llms") }));
+        const item = (res.Items ?? []).find((i) => i.is_default);
+        if (item) return { provider: item.provider, modelId: item.model_id };
+      } catch (e) {
+        console.error("[DynamoDB] loadDefaultLlm error:", e);
+      }
+      return FALLBACK_DEFAULT_LLM;
+    })();
+  }
+  return defaultLlmPromise;
+}
+
 export const BACKCHANNEL_LLM_MODEL = "gemini-3.5-flash-lite";
 
 // ---- Web検索ツール ----

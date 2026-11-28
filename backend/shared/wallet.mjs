@@ -43,11 +43,13 @@ const ddbExact = DynamoDBDocumentClient.from(new DynamoDBClient(dataClientConfig
  * @param {string} p.ownerId
  * @param {string} p.deviceId   台帳キーの id 部分。同じ時刻・同じ機器の行は1つだけ書ける
  * @param {string} p.timestamp  ISO 8601（chat-logs の返答の行と同じ値）
- * @param {"app"|"esp"|"tts"} p.source
+ * @param {"app"|"esp"|"tts"|"backchannel"} p.source  app / esp は本文、tts は読み上げ、backchannel は相槌（detail.client に app / esp）
  * @param {number} p.amountJpy  マージン後の円（正の数で渡す。台帳には負で書く）
  * @param {object} [p.detail]   内訳（cost_llm など。文章は入れない）
+ * @param {number} [p.maxRetries] 同時の書き込みに負けたときにやり直す回数の上限（既定は RETRY_DELAYS_MS の全部＝約2秒）。
+ *   相槌は応答を返す前に書くので、待ちが長引かないよう小さくする（backend/shared/backchannel.mjs）
  */
-export async function recordConsume({ ownerId, deviceId, timestamp, source, amountJpy, detail = {} }) {
+export async function recordConsume({ ownerId, deviceId, timestamp, source, amountJpy, detail = {}, maxRetries }) {
   if (!ownerId || !deviceId || !timestamp) return false;
   const sk = `${timestamp}#consume#${deviceId}`;
   const amount = -(Number(amountJpy) || 0);
@@ -58,7 +60,7 @@ export async function recordConsume({ ownerId, deviceId, timestamp, source, amou
       amount_jpy: amount,
       timestamp, device_id: deviceId, source,
       ...detail,
-    }, { touch: true });
+    }, { touch: true, maxRetries });
     return true;
   } catch (e) {
     // 引けなかった分を後から adjust で直せるように、誰の・どの行の・いくらかと、取り消しの理由を残す（文章は無い）。
@@ -273,7 +275,7 @@ function isRetryable(e) {
  * 台帳に1行足し（同じキーの行があれば失敗）、同じ額を残高に足す。1つのトランザクションで書く。
  * touch なら最終利用日（有効期限の起点）も今にする。同時の書き込みに負けたときはやり直す（RETRY_DELAYS_MS）
  */
-async function appendAndAdd(ownerId, row, { touch }) {
+async function appendAndAdd(ownerId, row, { touch, maxRetries = RETRY_DELAYS_MS.length }) {
   const now = new Date().toISOString();
   const input = {
     TransactItems: [
@@ -299,7 +301,7 @@ async function appendAndAdd(ownerId, row, { touch }) {
       await ddb.send(new TransactWriteCommand(input));
       return;
     } catch (e) {
-      if (attempt >= RETRY_DELAYS_MS.length || !isRetryable(e)) throw e;
+      if (attempt >= Math.min(maxRetries, RETRY_DELAYS_MS.length) || !isRetryable(e)) throw e;
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[attempt] * (0.5 + Math.random())));
     }
   }

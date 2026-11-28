@@ -5,171 +5,25 @@
   import OpenAI from "openai";
   import { createHash } from "node:crypto";
   import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-  import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand, QueryCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
-  import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda";
+  import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
   import { ensureSecrets, secret } from "../shared/secrets.mjs";
   import { tableName } from "../shared/tables.mjs";
-  import { recordConsume, checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
-import { jstDate } from "../shared/jst.mjs";
-  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, PAID_TOOLS, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, searchCallArgs, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, FALLBACK_DEFAULT_LLM } from "../shared/llm.mjs";
+  import { checkBalance, NO_BALANCE } from "../shared/wallet.mjs";
+  import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, searchCallArgs, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, loadDefaultLlm } from "../shared/llm.mjs";
   import { startTrace, describeClient, describePrevTurn, errorStatus } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner } from "../shared/auth.mjs";
 import { chatLogEnabled } from "../shared/chat-log.mjs";
-
-  // ---- 予備インスタンスの事前ウォームアップ ----
-  // 本リクエスト処理中（=このインスタンスがビジー中）に自分自身へwarmup pingを非同期送信すると、
-  // 別のコールドなインスタンスに着弾して初期化されるため、2人目の同時利用時のコールドスタートを防げる
-  const lambdaSelfClient = new LambdaClient({});
-  function prewarmSpareInstance() {
-    lambdaSelfClient.send(new InvokeCommand({
-      FunctionName: process.env.AWS_LAMBDA_FUNCTION_NAME,
-      InvocationType: "Event",
-      Payload: Buffer.from(JSON.stringify({ body: '{"warmup":true}' })),
-    })).catch(() => {});
-  }
+import { loadPricingCache } from "../shared/cost.mjs";
+import { recordTurn } from "../shared/turn-record.mjs";
+import { saveChatLog } from "../shared/chat-log.mjs";
+import { prewarmSpareInstance } from "../shared/warm.mjs";
+import { normalizeModelKey } from "../shared/tts-vendors.mjs";
 
   const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
   const ddb = DynamoDBDocumentClient.from(ddbClient);
   const CHARACTERS_TABLE    = tableName("characters");
   const VOICES_TABLE        = tableName("voices");
-  const CHAT_LOGS_TABLE     = tableName("chat-logs");
   const LLMS_TABLE          = tableName("llms");
-  const USAGE_TABLE         = tableName("usage");
-  const UNIT_PRICES_TABLE   = tableName("api-unit-prices");
-  const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
-
-  async function saveLog(item) {
-    try {
-      await ddb.send(new PutCommand({ TableName: CHAT_LOGS_TABLE, Item: item }));
-    } catch (e) {
-      console.error("[saveLog] error:", e);
-    }
-  }
-
-  // ---- 単価・マージン・為替レートのキャッシュ ----
-  let cachedPrices = null;   // { "openai#llm": {...}, "openai#tts": {...}, ... }
-  let cachedMargin = null;   // number
-  let cachedRates = {};      // { "2026-04#JPY": 150, ... }
-  let cacheLoadedAt = 0;
-  const CACHE_TTL_MS = 3600_000; // 1時間
-
-  async function loadPricingCache() {
-    if (cachedPrices && (Date.now() - cacheLoadedAt) < CACHE_TTL_MS) return;
-    try {
-      const result = await ddb.send(new ScanCommand({
-        TableName: UNIT_PRICES_TABLE,
-        FilterExpression: "version = :v",
-        ExpressionAttributeValues: { ":v": "current" },
-      }));
-      const prices = {};
-      for (const item of (result.Items ?? [])) {
-        const pk = item["provider#api_type"];
-        if (pk === "service#margin") {
-          cachedMargin = Number(item.margin) || 1.5;
-        } else {
-          prices[pk] = item;
-        }
-      }
-      cachedPrices = prices;
-      cacheLoadedAt = Date.now();
-    } catch (e) {
-      console.error("[Pricing] cache load error:", e);
-    }
-  }
-
-  async function getExchangeRate(month, currency = "JPY") {
-    const cacheKey = `${month}#${currency}`;
-    if (cachedRates[cacheKey]) return cachedRates[cacheKey];
-    try {
-      const result = await ddb.send(new GetCommand({
-        TableName: EXCHANGE_RATES_TABLE,
-        Key: { month, currency },
-      }));
-      const rate = Number(result.Item?.rate) || 150;
-      cachedRates[cacheKey] = rate;
-      return rate;
-    } catch (e) {
-      console.error("[ExchangeRate] error:", e);
-      return 150;
-    }
-  }
-
-  function calcCostJpy({ providerApiType, model, tokensIn, tokensOut, characters, utf8Bytes, mora, pcmBytes, userMessageChars, requests, usdJpyRate }) {
-    // モデル別の行（例 anthropic#llm#claude-haiku-5-5）があればそれ、無ければプロバイダー行（anthropic#llm）
-    const price = (model && cachedPrices?.[`${providerApiType}#${model}`]) || cachedPrices?.[providerApiType];
-    if (!price) {
-      // 単価行が無いと記録されない。月次の運用Lambdaがこのログを拾って知らせる
-      console.warn(`[Pricing] missing price for ${providerApiType}`);
-      return null;
-    }
-    const margin = cachedMargin || 1.5;
-
-    // Sakura: 円建て直接
-    if (price.currency === "JPY") {
-      const inputCost = (mora ?? 0) * Number(price.unit_price_input);
-      return { costJpy: inputCost * margin, costUsd: null, usdJpyRate: null, unitPriceUsd: null, margin };
-    }
-
-    const inputUnit = price.input_unit_type;
-    const outputUnit = price.output_unit_type;
-    let costUsd = 0;
-
-    if (inputUnit === "tokens") {
-      costUsd += (tokensIn ?? 0) * Number(price.unit_price_input);
-      if (outputUnit === "tokens") {
-        costUsd += (tokensOut ?? 0) * Number(price.unit_price_output);
-      } else if (outputUnit === "audio_tokens") {
-        costUsd += (tokensOut ?? 0) * Number(price.unit_price_output);
-      }
-    } else if (inputUnit === "characters") {
-      costUsd += (characters ?? 0) * Number(price.unit_price_input);
-      if (outputUnit === "audio_tokens" && pcmBytes) {
-        // OpenAI TTS: PCMバイト数から音声秒数→音声トークン数を概算
-        const durationSec = pcmBytes / (24000 * 2);
-        const audioTokens = Math.round((durationSec / 60) * 800);
-        costUsd += audioTokens * Number(price.unit_price_output);
-      }
-    } else if (inputUnit === "utf8_bytes") {
-      costUsd += (utf8Bytes ?? 0) * Number(price.unit_price_input);
-    } else if (inputUnit === "audio_tokens") {
-      // STT: 確定文の文字数から概算
-      const chars = userMessageChars ?? 0;
-      const textTokens = Math.round(chars * 0.3);
-      const speechSec = chars / 6;
-      const audioTokens = Math.round(speechSec * (30000 / 3600));
-      costUsd += audioTokens * Number(price.unit_price_input);
-      costUsd += textTokens * Number(price.unit_price_output);
-    } else if (inputUnit === "requests") {
-      // Web検索(Brave)など回数課金
-      costUsd += (requests ?? 0) * Number(price.unit_price_input);
-    }
-
-    const costJpy = costUsd * usdJpyRate * margin;
-    return { costJpy, costUsd, usdJpyRate, unitPriceUsd: Number(price.unit_price_input), margin };
-  }
-
-  async function addUsage({ ownerId, deviceId, date, apiType, provider, model, costJpy, costUsd, tokensIn, tokensOut, ttsCharacters, sttCharacters, requestCount, usdJpyRate, unitPriceUsd, margin }) {
-    if (!costJpy || costJpy <= 0) return;
-    const sk = `${date}#${deviceId}#${apiType}`;
-    try {
-      const addParts = ["cost_jpy :cost", "requests :one"];
-      const vals = { ":cost": costJpy, ":one": requestCount ?? 1, ":p": provider, ":m": model, ":r": usdJpyRate ?? 0, ":u": unitPriceUsd ?? 0, ":mg": margin };
-      if (costUsd)       { addParts.push("cost_usd :usd");         vals[":usd"]  = costUsd; }  // マージン前のUSD実費（請求額との突き合わせ用）
-      if (tokensIn)      { addParts.push("tokens_in :tin");       vals[":tin"]  = tokensIn; }
-      if (tokensOut)     { addParts.push("tokens_out :tout");     vals[":tout"] = tokensOut; }
-      if (ttsCharacters) { addParts.push("tts_characters :ttsc"); vals[":ttsc"] = ttsCharacters; }
-      if (sttCharacters) { addParts.push("stt_characters :sttc"); vals[":sttc"] = sttCharacters; }
-
-      await ddb.send(new UpdateCommand({
-        TableName: USAGE_TABLE,
-        Key: { owner_id: ownerId, "date#device_id#api_type": sk },
-        UpdateExpression: `ADD ${addParts.join(", ")} SET provider = :p, model = :m, usd_jpy_rate = :r, unit_price_usd = :u, margin = :mg`,
-        ExpressionAttributeValues: vals,
-      }));
-    } catch (e) {
-      console.error("[addUsage] error:", e);
-    }
-  }
 
   // 鍵はSSMから実行時に取るので、クライアントは最初に使うときに作る（鍵が変わったら作り直す）
   let openaiClient = null;
@@ -207,25 +61,7 @@ import { chatLogEnabled } from "../shared/chat-log.mjs";
     ZakiCorp:   { ttsVendor: "zakicorp",   ttsModel: "zakicorp-tts" },
   };
 
-  // ---- LLMデフォルト（llm_id未設定時のフォールバック）----
-  // toytalker-llms の is_default エントリを使う（コンテナ生存中はキャッシュ）。
-  // テーブルから取れないときだけ FALLBACK_DEFAULT_LLM（backend/shared/llm.mjs）に落ちる
-  let defaultLlmPromise = null;
-  function loadDefaultLlm() {
-    if (!defaultLlmPromise) {
-      defaultLlmPromise = (async () => {
-        try {
-          const res = await ddb.send(new ScanCommand({ TableName: LLMS_TABLE }));
-          const item = (res.Items ?? []).find((i) => i.is_default);
-          if (item) return { provider: item.provider, modelId: item.model_id };
-        } catch (e) {
-          console.error("[DynamoDB] loadDefaultLlm error:", e);
-        }
-        return FALLBACK_DEFAULT_LLM;
-      })();
-    }
-    return defaultLlmPromise;
-  }
+  // 既定の LLM（キャラクターに llm_id が無いとき）は backend/shared/llm.mjs の loadDefaultLlm
 
 
 
@@ -793,7 +629,7 @@ import { chatLogEnabled } from "../shared/chat-log.mjs";
     // ---- ユーザーメッセージ保存 ----
     const lastUserMsg = messages[messages.length - 1];
     if (lastUserMsg?.role === "user" && sessionId !== "unknown" && chatLog) {
-      saveLog({
+      saveChatLog({
         "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
         "session_id#timestamp": `session_id#${sessionId}#timestamp#${userTimestamp}`,
         owner_id: ownerId, device_id: deviceId, source: "app",
@@ -802,19 +638,6 @@ import { chatLogEnabled } from "../shared/chat-log.mjs";
       });
     }
 
-    function normalizeModelKey(k) {
-      if (!k) return undefined;
-      const s = String(k).toLowerCase();
-      if (s.includes("openai"))      return "OpenAI";
-      if (s.includes("google"))      return "Google";
-      if (s.includes("gemini"))      return "Gemini";
-      if (s.includes("elevenlabs"))  return "ElevenLabs";
-      if (s.includes("cartesia"))    return "Cartesia";
-      if (s.includes("fishaudio") || s.includes("fish")) return "FishAudio";
-      if (s.includes("sakura"))      return "Sakura";
-      if (s.includes("zakicorp") || s.includes("qwen")) return "ZakiCorp";
-      return undefined;
-    }
 
 
     send(res, "mark", { k: "model", v: ttsKey });
@@ -1093,106 +916,15 @@ import { chatLogEnabled } from "../shared/chat-log.mjs";
       send(res, "done", {});
       trace.mark("done_sent");
 
-      // ---- コスト計算 + usage書き込み + ログ保存 ----
+      // ---- 原価の計算 + usage + 会話ログ + 台帳（backend/shared/turn-record.mjs。ESP32 用の本文と同じ）----
       // 本文が空でも有料の検索を呼んでいれば記録する（ロードマップ30。以前は空だと検索代が記録から漏れた）
       if (sessionId !== "unknown" && (textAll.trim() || Object.keys(toolCalls).length > 0)) {
-        const assistantTimestamp = new Date().toISOString();
-
-        await loadPricingCache();
-        const date = jstDate(assistantTimestamp);  // usage の日付は日本時間（為替の月は従来どおり UTC）
-        const month = assistantTimestamp.slice(0, 7);
-        const usdJpyRate = await getExchangeRate(month);
-
-        // LLM
-        const llmPriceKey = `${llmProvider}#llm`;
-        const llmCost = calcCostJpy({ providerApiType: llmPriceKey, model: llmModelId, tokensIn: llmUsage.in, tokensOut: llmUsage.out, usdJpyRate });
-        if (llmCost) {
-          await addUsage({ ownerId, deviceId, date, apiType: "llm", provider: llmProvider, model: llmModelId, costJpy: llmCost.costJpy, costUsd: llmCost.costUsd, tokensIn: llmUsage.in, tokensOut: llmUsage.out, usdJpyRate: llmCost.usdJpyRate, unitPriceUsd: llmCost.unitPriceUsd, margin: llmCost.margin });
-        }
-
-        // TTS
-        const ttsPriceKey = `${cfg.ttsVendor}#tts`;
-        let ttsCostResult;
-        if (cfg.ttsVendor === "gemini") {
-          ttsCostResult = calcCostJpy({ providerApiType: ttsPriceKey, tokensIn: ttsInputChars, tokensOut: geminiTtsAudioTokens, usdJpyRate });
-        } else if (cfg.ttsVendor === "openai") {
-          ttsCostResult = calcCostJpy({ providerApiType: ttsPriceKey, characters: ttsInputChars, pcmBytes: ttsPcmBytes, usdJpyRate });
-        } else if (cfg.ttsVendor === "fishaudio") {
-          const utf8Bytes = Buffer.byteLength(textAll.trim(), "utf8");
-          ttsCostResult = calcCostJpy({ providerApiType: ttsPriceKey, utf8Bytes, usdJpyRate });
-        } else if (cfg.ttsVendor === "sakura") {
-          const mora = ttsInputChars;
-          ttsCostResult = calcCostJpy({ providerApiType: ttsPriceKey, mora, usdJpyRate });
-        } else {
-          ttsCostResult = calcCostJpy({ providerApiType: ttsPriceKey, characters: ttsInputChars, usdJpyRate });
-        }
-        if (ttsCostResult) {
-          await addUsage({ ownerId, deviceId, date, apiType: "tts", provider: cfg.ttsVendor, model: cfg.ttsModel, costJpy: ttsCostResult.costJpy, costUsd: ttsCostResult.costUsd, ttsCharacters: ttsInputChars, usdJpyRate: ttsCostResult.usdJpyRate, unitPriceUsd: ttsCostResult.unitPriceUsd, margin: ttsCostResult.margin });
-        }
-
-        // フォールバック（ずんだもん）で生成した分は Sakura として別行で記録
-        let fallbackCostResult = null;
-        if (ttsFallbackChars > 0) {
-          fallbackCostResult = calcCostJpy({ providerApiType: "sakura#tts", mora: ttsFallbackChars, usdJpyRate });
-          if (fallbackCostResult) {
-            await addUsage({ ownerId, deviceId, date, apiType: "tts", provider: "sakura", model: "zundamon", costJpy: fallbackCostResult.costJpy, costUsd: fallbackCostResult.costUsd, ttsCharacters: ttsFallbackChars, usdJpyRate: fallbackCostResult.usdJpyRate, unitPriceUsd: fallbackCostResult.unitPriceUsd, margin: fallbackCostResult.margin });
-          }
-        }
-
-        // STT (確定文の文字数から概算)
-        const userMsgChars = lastUserMsg?.content?.length ?? 0;
-        let sttCost = null;
-        if (userMsgChars > 0) {
-          sttCost = calcCostJpy({ providerApiType: "soniox#stt", userMessageChars: userMsgChars, usdJpyRate });
-          if (sttCost) {
-            await addUsage({ ownerId, deviceId, date, apiType: "stt", provider: "soniox", model: "soniox", costJpy: sttCost.costJpy, costUsd: sttCost.costUsd, sttCharacters: userMsgChars, usdJpyRate: sttCost.usdJpyRate, unitPriceUsd: sttCost.unitPriceUsd, margin: sttCost.margin });
-          }
-        }
-
-        // ツール（外部の有料APIを呼ぶものだけ回数課金で記録。無料ツールはLLMトークンに含まれる）
-        const toolUsage = [];
-        let toolCostTotal = 0;
-        let toolCostUsd = 0;
-        for (const [toolName, count] of Object.entries(toolCalls)) {
-          const paid = PAID_TOOLS[toolName];
-          if (!paid || count <= 0) continue;
-          const c = calcCostJpy({ providerApiType: `${paid.provider}#tool`, requests: count, usdJpyRate });
-          if (!c) continue;
-          await addUsage({ ownerId, deviceId, date, apiType: "tool", provider: paid.provider, model: paid.model, costJpy: c.costJpy, costUsd: c.costUsd, requestCount: count, usdJpyRate: c.usdJpyRate, unitPriceUsd: c.unitPriceUsd, margin: c.margin });
-          toolUsage.push({ tool: toolName, provider: paid.provider, requests: count, cost: c.costJpy });
-          toolCostTotal += c.costJpy;
-          toolCostUsd += c.costUsd;
-        }
-
-        // ログ保存（文章だけ。原価は台帳）
-        if (chatLog && textAll.trim()) await saveLog({
-          "owner_id#device_id":   `owner_id#${ownerId}#device_id#${deviceId}`,
-          "session_id#timestamp": `session_id#${sessionId}#timestamp#${assistantTimestamp}`,
-          owner_id: ownerId, device_id: deviceId, source: "app",
-          role: "assistant", content: textAll.trim(),
-          content_type: "text", timestamp: assistantTimestamp, session_id: sessionId,
-          llm_provider: llmProvider, llm_model: llmModelId,
-          tts_provider: cfg.ttsVendor, stt_provider: null,
-          duration_ms: Date.now() - requestAt,
-          character_id: characterId ?? "default",
-          voice_id: voice,
-        });
-        // 1ターンの原価は台帳に書き、残高から引く（chat-logs には文章だけ。docs/pricing-and-cost-model.md 11.6）
-        const costTts = (ttsCostResult?.costJpy ?? 0) + (fallbackCostResult?.costJpy ?? 0);
-        const costTotal = (sttCost?.costJpy ?? 0) + (llmCost?.costJpy ?? 0) + costTts + toolCostTotal;
-        await recordConsume({
-          ownerId, deviceId, timestamp: assistantTimestamp, source: "app", amountJpy: costTotal,
-          detail: {
-            ref: `session_id#${sessionId}#timestamp#${assistantTimestamp}`, session_id: sessionId,
-            cost_usd: (sttCost?.costUsd ?? 0) + (llmCost?.costUsd ?? 0) + (ttsCostResult?.costUsd ?? 0) + (fallbackCostResult?.costUsd ?? 0) + toolCostUsd,
-            cost_stt: sttCost?.costJpy ?? 0, stt_chars: userMsgChars,
-            cost_llm: llmCost?.costJpy ?? 0, llm_provider: llmProvider, llm_model: llmModelId,
-            llm_tokens_in: llmUsage.in, llm_tokens_out: llmUsage.out,
-            cost_tts: costTts, tts_provider: cfg.ttsVendor, tts_chars: ttsInputChars,
-            tts_fallback: ttsFallbackChars > 0 ? { from: cfg.ttsVendor, to: "sakura", chars: ttsFallbackChars } : null,
-            cost_tool: toolCostTotal, tool_usage: toolUsage,
-            character_id: characterId ?? "default",
-          },
+        await recordTurn({
+          source: "app", ownerId, deviceId, sessionId, characterId, voice, text: textAll, chatLog,
+          sttProvider: null, durationMs: Date.now() - requestAt,
+          llm: { provider: llmProvider, model: llmModelId, tokensIn: llmUsage.in, tokensOut: llmUsage.out },
+          tts: { vendor: cfg.ttsVendor, model: cfg.ttsModel, chars: ttsInputChars, fallbackChars: ttsFallbackChars, pcmBytes: ttsPcmBytes, audioTokens: geminiTtsAudioTokens },
+          userMsgChars: lastUserMsg?.content?.length ?? 0, toolCalls,
         });
         trace.mark("usage_saved");
       }

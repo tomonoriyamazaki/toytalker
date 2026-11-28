@@ -1,9 +1,10 @@
-// pcm-tts.mjs — 文を 24kHz・モノラル・16bit の PCM にする（ボイスキーホルダーの声を作る用。keyholder.mjs）。
-// 読み上げ（index.mjs）は mp3 で返すが、本体に入れる声は ADPCM に圧縮するので、mp3 を経ずに各社へ PCM を頼む。
+// tts-pcm.mjs — 文を 24kHz・モノラル・16bit の PCM にする（1文を丸ごと作って返す。ストリーミングはしない）。
+// 使うのは相槌（backchannel.mjs。App 用は WAV に包み、ESP32 用は PCM のまま返す）と、
+// ボイスキーホルダーの声（backend/toytalker-tts-only-lambda/keyholder.mjs。ADPCM に圧縮して本体に入れる）。
 // 頼み方は ESP32 用の会話 Lambda（backend/toytalk-api-stream-for-esp32-lambda）と同じ。
-// 主の声が失敗しても別の声では作らない（本体に残り続ける声なので、失敗として返す）。
-import { secret } from "../shared/secrets.mjs";
-import { SAMPLE_RATE } from "../shared/voice-image.mjs";
+// ここでは別の声へ切り替えない（失敗は投げる。ずんだもんへ切り替えるかは呼ぶ側が決める）。
+import { secret } from "./secrets.mjs";
+import { SAMPLE_RATE } from "./voice-image.mjs";
 
 // WAVバッファをパースして {pcm, sampleRate} を返す（'data'チャンクを走査）
 export function parseWav(wavBuf) {
@@ -70,7 +71,7 @@ async function openai(text, voice, model) {
   return { buf: Buffer.from(await resp.arrayBuffer()), rate: 24000 };
 }
 
-async function google(text, voiceName) {
+async function google(text, voiceName, { speakingRate = 1.3, pitch = 3.0 } = {}) {
   const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
   const parts = String(voiceName).split("-");
@@ -78,11 +79,11 @@ async function google(text, voiceName) {
   const resp = await fetch(`https://texttospeech.googleapis.com/v1/text:synthesize?key=${key}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // 速さと高さは読み上げ（index.mjs の ttsToBase64Google）と同じ
+    // 速さと高さの既定は読み上げ（backend/toytalker-tts-only-lambda/index.mjs の ttsToBase64Google）と同じ
     body: JSON.stringify({
       input: { text },
       voice: { languageCode, name: voiceName },
-      audioConfig: { audioEncoding: "LINEAR16", speakingRate: 1.3, pitch: 3.0, sampleRateHertz: 24000 },
+      audioConfig: { audioEncoding: "LINEAR16", speakingRate, pitch, sampleRateHertz: 24000 },
     }),
   });
   const json = await resp.json();
@@ -91,17 +92,18 @@ async function google(text, voiceName) {
   return { buf: pcm, rate: sampleRate };
 }
 
-async function gemini(text, voiceName, model) {
+// Gemini はたまに音声の無い応答を返す（短い文で起きやすい。2026-11-03）ので、空ならやり直す（attempts 回まで）
+async function gemini(text, voiceName, model, { attempts = 3, readAloudPrompt = true } = {}) {
   const key = secret("GOOGLE_API_KEY");
   if (!key) throw new Error("GOOGLE_API_KEY is not set");
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < attempts; attempt++) {
     const resp = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
       {
         method: "POST",
         headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
         body: JSON.stringify({
-          contents: [{ parts: [{ text: `Read the following text aloud: ${text}` }] }],
+          contents: [{ parts: [{ text: readAloudPrompt ? `Read the following text aloud: ${text}` : text }] }],
           generationConfig: { responseModalities: ["AUDIO"], speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName } } } },
           model,
         }),
@@ -110,7 +112,8 @@ async function gemini(text, voiceName, model) {
     const json = await resp.json();
     if (!resp.ok) throw new Error(json?.error?.message || "Gemini TTS failed");
     const b64 = json?.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data || "";
-    if (b64) return { buf: Buffer.from(b64, "base64"), rate: 24000 };
+    // audioTokens は原価の計算に使う（backend/shared/cost.mjs の calcTtsCost）
+    if (b64) return { buf: Buffer.from(b64, "base64"), rate: 24000, audioTokens: json?.usageMetadata?.candidatesTokenCount ?? 0 };
   }
   throw new Error("Gemini TTS: empty audio after retries");
 }
@@ -190,20 +193,93 @@ async function zakicorp(text, speaker) {
   return { buf: Buffer.from(await resp.arrayBuffer()), rate };
 }
 
+// 声（toytalker-voices の vendor_id）が無い・"default" のときに使う声
+const DEFAULT_VOICES = {
+  openai: "alloy",
+  google: "ja-JP-Neural2-B",
+  gemini: "Kore",
+  elevenlabs: "hMK7c1GPJmptCzI4bQIu",
+  cartesia: "default", // cartesia() が環境変数 CARTESIA_DEFAULT_VOICE_ID に読み替える
+  fishaudio: "e58b0d7efca34eb38d5c4985e9e1e3e6",
+  sakura: "zundamon",
+  zakicorp: "vivian",
+};
+
 /**
- * vendor は index.mjs の TTS_TABLE の ttsVendor、voice は toytalker-voices の vendor_id。
- * 戻り値は 24kHz・モノラルの Int16Array
+ * 各社へ頼んで、返ってきたままの PCM を返す（サンプルレートは会社による）。
+ * @param {object} p
+ * @param {string} p.vendor  TTS_TABLE の ttsVendor
+ * @param {string} p.model   TTS_TABLE の ttsModel
+ * @param {string} [p.voice] toytalker-voices の vendor_id。無い・"default" なら DEFAULT_VOICES
+ * @param {string} p.text
+ * @param {{ google?: { speakingRate?: number, pitch?: number }, gemini?: { attempts?: number, readAloudPrompt?: boolean } }} [p.options]
+ * @returns {Promise<{ buf: Buffer, rate: number, audioTokens?: number }>}
  */
-export async function synthesizePcm({ vendor, model, voice, text }) {
-  let r;
-  if (vendor === "openai") r = await openai(text, voice, model);
-  else if (vendor === "google") r = await google(text, voice);
-  else if (vendor === "gemini") r = await gemini(text, voice, model);
-  else if (vendor === "elevenlabs") r = await elevenlabs(text, voice, model);
-  else if (vendor === "cartesia") r = await cartesia(text, voice, model);
-  else if (vendor === "fishaudio") r = await fishaudio(text, voice);
-  else if (vendor === "sakura") r = await sakura(text, voice === "default" ? "zundamon" : voice);
-  else if (vendor === "zakicorp") r = await zakicorp(text, voice === "default" ? "vivian" : voice);
-  else throw new Error("Unknown ttsVendor");
+async function request({ vendor, model, voice, text, options = {} }) {
+  if (!(vendor in DEFAULT_VOICES)) throw new Error("Unknown ttsVendor");
+  const v = voice && voice !== "default" ? voice : DEFAULT_VOICES[vendor];
+  if (vendor === "openai") return openai(text, v, model);
+  if (vendor === "google") return google(text, v, options.google);
+  if (vendor === "gemini") return gemini(text, v, model, options.gemini);
+  if (vendor === "elevenlabs") return elevenlabs(text, v, model);
+  if (vendor === "cartesia") return cartesia(text, v, model);
+  if (vendor === "fishaudio") return fishaudio(text, v);
+  if (vendor === "sakura") return sakura(text, v);
+  return zakicorp(text, v);
+}
+
+/** 24kHz・モノラルの Int16Array（ボイスキーホルダー用） */
+export async function synthesizePcm(args) {
+  const r = await request(args);
   return resample(toInt16(r.buf), r.rate);
+}
+
+/**
+ * 24kHz・モノラル・16bit の PCM を Buffer で（相槌用）。24kHz で返る会社はそのまま返し、違うときだけ変換する。
+ * @returns {Promise<{ pcm: Buffer, audioTokens: number|null }>} audioTokens は Gemini だけ（応答の usageMetadata）
+ */
+export async function synthesizePcmBuffer(args) {
+  const r = await request(args);
+  let pcm = r.buf;
+  if (r.rate !== SAMPLE_RATE) {
+    const out = resample(toInt16(r.buf), r.rate);
+    pcm = Buffer.from(out.buffer, out.byteOffset, out.byteLength);
+  }
+  return { pcm, audioTokens: r.audioTokens ?? null };
+}
+
+/**
+ * 先頭/末尾の無音を削る（24kHz・16bit・モノラルの PCM。ESP32 用の本文と相槌が使う）。
+ * TTSは前後に数百msの無音を含むことが多く、これを削ると「喋り終わり→録音再開」の体感切替がその分速くなる（先頭側は応答体感の改善）
+ */
+export function trimSilence(pcm, { threshold = 512, padMs = 80, sampleRate = SAMPLE_RATE } = {}) {
+  const total = Math.floor(pcm.length / 2);
+  if (total === 0) return pcm;
+  let start = 0, end = total - 1;
+  while (start < total && Math.abs(pcm.readInt16LE(start * 2)) < threshold) start++;
+  while (end > start && Math.abs(pcm.readInt16LE(end * 2)) < threshold) end--;
+  if (start >= end) return pcm;  // 全体が無音なら触らない
+  const pad = Math.round(sampleRate * padMs / 1000);
+  const headCut = Math.max(0, start - pad);
+  const tailCut = Math.min(total - 1, end + pad);
+  return pcm.slice(headCut * 2, (tailCut + 1) * 2);
+}
+
+/** 24kHz・モノラル・16bit の PCM に WAV の頭（44バイト）を付ける */
+export function pcmToWav(pcm, sampleRate = SAMPLE_RATE) {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + pcm.length, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);            // PCM
+  header.writeUInt16LE(1, 22);            // モノラル
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(pcm.length, 40);
+  return Buffer.concat([header, pcm]);
 }

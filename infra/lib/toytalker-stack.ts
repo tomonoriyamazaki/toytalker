@@ -238,10 +238,13 @@ function resolveNames(spec: FunctionSpec, config: StageConfig): { id: string; na
   return { id, name: `toytalker-${spec.key}-${config.stage}` };
 }
 
-/** 月次レポートが「単価行なし」の警告を拾う記録側Lambda（TTS_FUNCTION_KEYS に含まれる） */
-const RECORDING_FUNCTION_KEYS = ["chat-app", "chat-mcu", "read-aloud-app"] as const;
-/** 月次レポートがずんだもんへの切り替え回数とピーク同時本数を数える、TTSを呼ぶLambda */
-const TTS_FUNCTION_KEYS = [...RECORDING_FUNCTION_KEYS, "backchannel-app", "backchannel-mcu"] as const;
+/**
+ * 原価を usage と台帳に記録する Lambda（相槌は 2026-11-28 から）。月次レポートが「単価行なし」の警告を拾い、
+ * 台帳に書けなかったときの警報（wallet-consume-failed）もこの5本を見る
+ */
+const RECORDING_FUNCTION_KEYS = ["chat-app", "chat-mcu", "read-aloud-app", "backchannel-app", "backchannel-mcu"] as const;
+/** 月次レポートがずんだもんへの切り替え回数とピーク同時本数を数える、TTSを呼ぶLambda（いまは記録側と同じ5本） */
+const TTS_FUNCTION_KEYS = RECORDING_FUNCTION_KEYS;
 
 /**
  * 環境の設定（config/stages.ts）だけで決まる Lambda の環境変数。スタック内の資源から決まる値（Cognito・SNS など）は本体スタックが足す
@@ -312,9 +315,12 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/backchannel-app" },
     warm: true,
     selfWarm: true,
-    readTables: ["characters", "voices", "users"], // users は他人のキャラクターを使わせないための所有者確認（読むだけ）
-    lookupTables: ["wallets"], // 残高0なら相槌を返さない（段階2）
+    // users は他人のキャラクターを使わせないための所有者確認（読むだけ）。単価と為替は原価の計算（backend/shared/cost.mjs）
+    readTables: ["characters", "voices", "users", "api-unit-prices", "exchange-rates"],
     readWriteTables: [],
+    // 相槌の原価を usage に足し、台帳に書いて残高から引く（backend/shared/backchannel.mjs）。始める前に残高を読む（残高0なら返さない）
+    updateTables: ["wallets", "usage"],
+    appendTables: ["wallet-ledger"],
   },
   {
     key: "backchannel-mcu",
@@ -329,9 +335,11 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     url: { invokeMode: "BUFFERED", route: "/backchannel-mcu" },
     warm: true,
     selfWarm: true,
-    readTables: ["devices", "characters", "voices"],
-    lookupTables: ["wallets"], // 残高0なら相槌を返さない（段階2）
+    readTables: ["devices", "characters", "voices", "api-unit-prices", "exchange-rates"], // 単価と為替は原価の計算（backend/shared/cost.mjs）
     readWriteTables: [],
+    // 相槌の原価を usage に足し、台帳に書いて残高から引く（backend/shared/backchannel.mjs）。始める前に残高を読む（残高0なら返さない）
+    updateTables: ["wallets", "usage"],
+    appendTables: ["wallet-ledger"],
   },
   {
     key: "stt-token",
@@ -1355,9 +1363,9 @@ export class ToyTalkerStack extends cdk.Stack {
         unit: cw.Unit.COUNT,
       });
     }
-    // 消費を台帳に書く Lambda（会話2本と読み上げ）。文言は wallet.mjs の recordConsume と揃える
+    // 消費を台帳に書く Lambda（会話2本・読み上げ・相槌2本）。文言は wallet.mjs の recordConsume と揃える
     const consumeFailedMetricName = `wallet-consume-failed-${config.stage}`;
-    for (const key of ["chat-app", "chat-mcu", "read-aloud-app"]) {
+    for (const key of RECORDING_FUNCTION_KEYS) {
       const { id } = resolveNames(FUNCTIONS.find((s) => s.key === key)!, config);
       new logs.MetricFilter(this, `${id}ConsumeFailedFilter`, {
         logGroup: logGroups.get(key)!,

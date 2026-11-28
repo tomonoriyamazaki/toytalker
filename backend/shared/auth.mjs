@@ -81,6 +81,20 @@ export function authGate(identity) {
 }
 
 /**
+ * 機器の行を読む（ESP32 用の本文・相槌が、門とデバイス鍵の前に使う）。
+ * @returns {Promise<{ device: object|null }|null>} { device: 行 } / { device: null }（未登録機。本番では拒む＝deviceGate）/ null（DynamoDB の失敗。従来どおり続ける）
+ */
+export async function loadDeviceRow(deviceId) {
+  try {
+    const res = await ddb.send(new GetCommand({ TableName: DEVICES_TABLE, Key: { device_id: deviceId } }));
+    return { device: res.Item ?? null };
+  } catch (e) {
+    console.error("[DynamoDB] loadDeviceRow error:", e);
+    return null;
+  }
+}
+
+/**
  * ESP32（device_id だけで来る要求）の門。本番では devices テーブルに行が無い機器を拒む
  * （登録はアプリのログイン後にしかできないので、登録済み = 持ち主がいる）。RnD は従来どおり通す。
  */

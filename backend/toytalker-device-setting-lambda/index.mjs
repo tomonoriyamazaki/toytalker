@@ -8,6 +8,7 @@ import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { getBalance, listLedgerBetween } from "../shared/wallet.mjs";
 import { jstDate, jstDayRange } from "../shared/jst.mjs";
+import { loadPricingCache, calcCostJpy, calcTtsCost } from "../shared/cost.mjs";
 import { startTrace, describeClient } from "../shared/trace.mjs";
 import { authenticate, authGate, describeAuth, resolveOwner, ownerGate, publicDeviceRow, touchLogin, AUTH_REQUIRED } from "../shared/auth.mjs";
 
@@ -31,36 +32,6 @@ const CHAT_LOGS_TABLE      = tableName("chat-logs");
 const LLMS_TABLE           = tableName("llms");
 const USAGE_TABLE          = tableName("usage");
 const EXCHANGE_RATES_TABLE = tableName("exchange-rates");
-const UNIT_PRICES_TABLE    = tableName("api-unit-prices");
-
-// ---- 単価キャッシュ（コスト計算用） ----
-let cachedPrices = null;
-let cachedMargin = 1.5;
-let cacheLoadedAt = 0;
-
-async function loadPricingCache() {
-  if (cachedPrices && (Date.now() - cacheLoadedAt) < 3600_000) return;
-  try {
-    const result = await ddb.send(new ScanCommand({
-      TableName: UNIT_PRICES_TABLE,
-      FilterExpression: "version = :v",
-      ExpressionAttributeValues: { ":v": "current" },
-    }));
-    const prices = {};
-    for (const item of (result.Items ?? [])) {
-      const pk = item["provider#api_type"];
-      if (pk === "service#margin") {
-        cachedMargin = Number(item.margin) || 1.5;
-      } else {
-        prices[pk] = item;
-      }
-    }
-    cachedPrices = prices;
-    cacheLoadedAt = Date.now();
-  } catch (e) {
-    console.error("[Pricing] cache load error:", e);
-  }
-}
 
 // 台帳の consume 行から日次詳細の内訳を作る（2026-10-31以降。それより前は chat-logs のコスト列）
 function costsFromLedger(row) {
@@ -74,55 +45,40 @@ function costsFromLedger(row) {
   };
 }
 
+// 台帳にも chat-logs にも金額が無い古いターン（2026-10 より前）の金額を、いまの単価で計算し直す。
+// 計算は backend/shared/cost.mjs（本文と同じ式）。先に loadPricingCache を待っておく
 function calcCostFromLog(assistantItem, userContent, usdJpyRate) {
-  const margin = cachedMargin;
+  const round = (v) => Math.round(v * 1000) / 1000;
   const result = { stt: null, llm: null, tts: null, total: 0 };
 
   // LLM
-  const llmKey = `${assistantItem.llm_provider}#llm`;
-  const llmPrice = cachedPrices?.[llmKey];
-  if (llmPrice && (assistantItem.llm_tokens_in || assistantItem.llm_tokens_out)) {
-    const tokIn = Number(assistantItem.llm_tokens_in) || 0;
-    const tokOut = Number(assistantItem.llm_tokens_out) || 0;
-    let costUsd = tokIn * Number(llmPrice.unit_price_input) + tokOut * Number(llmPrice.unit_price_output);
-    const costJpy = costUsd * usdJpyRate * margin;
-    result.llm = { cost: Math.round(costJpy * 1000) / 1000, tokens_in: tokIn, tokens_out: tokOut, provider: assistantItem.llm_provider, model: assistantItem.llm_model };
-    result.total += costJpy;
+  const tokIn = Number(assistantItem.llm_tokens_in) || 0;
+  const tokOut = Number(assistantItem.llm_tokens_out) || 0;
+  const llm = (tokIn || tokOut) && assistantItem.llm_provider
+    ? calcCostJpy({ providerApiType: `${assistantItem.llm_provider}#llm`, model: assistantItem.llm_model, tokensIn: tokIn, tokensOut: tokOut, usdJpyRate }) : null;
+  if (llm) {
+    result.llm = { cost: round(llm.costJpy), tokens_in: tokIn, tokens_out: tokOut, provider: assistantItem.llm_provider, model: assistantItem.llm_model };
+    result.total += llm.costJpy;
   }
 
-  // TTS
+  // TTS（文字数だけが残っている。音声の長さは分からないので文字ぶんだけ）
   const ttsVendor = assistantItem.tts_provider;
-  const ttsKey = `${ttsVendor}#tts`;
-  const ttsPrice = cachedPrices?.[ttsKey];
-  if (ttsPrice) {
-    const chars = Number(assistantItem.tts_input_units) || 0;
-    let costJpy = 0;
-    if (ttsPrice.currency === "JPY") {
-      costJpy = chars * Number(ttsPrice.unit_price_input) * margin;
-    } else if (ttsPrice.input_unit_type === "utf8_bytes") {
-      const utf8Bytes = chars * 3;
-      costJpy = utf8Bytes * Number(ttsPrice.unit_price_input) * usdJpyRate * margin;
-    } else {
-      costJpy = chars * Number(ttsPrice.unit_price_input) * usdJpyRate * margin;
-    }
-    result.tts = { cost: Math.round(costJpy * 1000) / 1000, characters: chars, provider: ttsVendor, model: assistantItem.tts_provider };
-    result.total += costJpy;
+  const chars = Number(assistantItem.tts_input_units) || 0;
+  const tts = ttsVendor ? calcTtsCost({ vendor: ttsVendor, chars, usdJpyRate }) : null;
+  if (tts) {
+    result.tts = { cost: round(tts.costJpy), characters: chars, provider: ttsVendor, model: ttsVendor };
+    result.total += tts.costJpy;
   }
 
   // STT (確定文の文字数から概算)
   const userChars = userContent?.length ?? 0;
-  const sttPrice = cachedPrices?.["soniox#stt"];
-  if (sttPrice && userChars > 0) {
-    const textTokens = Math.round(userChars * 0.3);
-    const speechSec = userChars / 6;
-    const audioTokens = Math.round(speechSec * (30000 / 3600));
-    const costUsd = audioTokens * Number(sttPrice.unit_price_input) + textTokens * Number(sttPrice.unit_price_output);
-    const costJpy = costUsd * usdJpyRate * margin;
-    result.stt = { cost: Math.round(costJpy * 1000) / 1000, characters: userChars };
-    result.total += costJpy;
+  const stt = userChars > 0 ? calcCostJpy({ providerApiType: "soniox#stt", userMessageChars: userChars, usdJpyRate }) : null;
+  if (stt) {
+    result.stt = { cost: round(stt.costJpy), characters: userChars };
+    result.total += stt.costJpy;
   }
 
-  result.total = Math.round(result.total * 1000) / 1000;
+  result.total = round(result.total);
   return result;
 }
 
@@ -631,13 +587,15 @@ async function route(method, path, event, body, identity, who, trace) {
       } catch (e) {}
 
       // 金額は台帳から（ref で chat-logs の返答の行と結ぶ）。台帳が無い古い行は chat-logs のコスト列、それも無ければ計算し直す
-      // 読み上げは会話ではないので ref が無く、chat-logs にも行が無い。台帳の行だけで出す
+      // 読み上げと相槌は ref が無く、chat-logs にも行が無い。台帳の行だけで出す
       const ledgerByRef = new Map();
       const readAloudRows = [];
+      const backchannelRows = [];
       for (const row of await listLedgerBetween(ownerId, dayStart, dayEnd)) {
         if (row.type !== "consume" || (deviceId && row.device_id !== deviceId)) continue;
         if (row.ref) ledgerByRef.set(`${row.device_id}|${row.ref}`, row);
         else if (row.source === "tts") readAloudRows.push(row);
+        else if (row.source === "backchannel") backchannelRows.push(row);
       }
 
       // user→assistantペアで組み立て
@@ -711,6 +669,21 @@ async function route(method, path, event, body, identity, who, trace) {
           tts: { cost: row.cost_tts ?? 0, characters: row.tts_chars, provider: row.tts_provider, model: row.tts_provider },
           tool: null,
           total: -(Number(row.amount_jpy) || 0),
+        });
+      }
+      // 相槌（source: "backchannel"。2026-11-28 から記録）。LLM と TTS だけで、文章は無い。アプリは source を見て「相槌」と出す
+      for (const row of backchannelRows) {
+        conversations.push({
+          timestamp: row.timestamp,
+          session_id: null,
+          source: "backchannel",
+          device_id: row.device_id,
+          device_name: deviceNameMap[row.device_id] ?? null,
+          user_message: null,
+          assistant_message: null,
+          character_id: row.character_id ?? "default",
+          ...costsFromLedger(row),
+          stt: null,
         });
       }
       conversations.sort((a, b) => (a.timestamp ?? "").localeCompare(b.timestamp ?? ""));
