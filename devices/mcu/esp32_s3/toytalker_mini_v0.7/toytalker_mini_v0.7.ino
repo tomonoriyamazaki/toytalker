@@ -12,6 +12,7 @@
 #include <WiFiClientSecure.h>
 #include <memory>
 #include "LambdaLink.h"
+#include "QuickAck.h"
 #include <mutex>
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
@@ -2494,6 +2495,35 @@ bool playBackchannelIfReady() {
   return true;
 }
 
+// ---- 合いの手（0.7.52、試し）----
+// 相槌を取りに行かなかった発話（7文字に届かなかった時など）で、送ると決めた時に本体の短い声（QuickAck.h）をすぐ鳴らす。
+// 相槌と同じくリングに入れ、本文は後ろに並ぶ。同じ声を続けない（一巡するまで出さない）
+bool playQuickAck() {
+  if (!playRing || quickack::COUNT == 0) return false;
+  static voicekey::Shuffle order;
+  static bool begun = false;
+  if (!begun) { order.begin(quickack::COUNT); begun = true; }
+  const size_t index = order.next();
+  const voicekey::Clip& clip = quickack::CLIPS[index];
+
+  playBcBoundary = (playRingHead + (size_t)clip.samples * 4) % PLAY_RING_SIZE;
+  playBcBoundaryPending = true;
+  static int16_t mono[240], stereo[480];  // 10ms ずつ
+  voicekey::AdpcmDecoder decoder;
+  uint32_t done = 0;
+  while (done < clip.samples && !bargeInRequested) {
+    const uint32_t n = min((uint32_t)240, clip.samples - done);
+    decoder.decode(clip, done, n, mono);
+    monoToStereo(mono, stereo, n);
+    if (!playRingPush((uint8_t*)stereo, n * 4)) break;
+    done += n;
+  }
+  if (done < clip.samples) playBcBoundary = playRingHead;  // 途中でやめた
+  playerPrebuffering = false;  // 短い音なので溜めを待たずに鳴らす
+  Serial.printf("[ACK] quick ack clip=%u ms=%lu\n", (unsigned)index, (unsigned long)clip.samples * 1000 / SAMPLE_RATE_TTS);
+  return true;
+}
+
 // ---- 遅れて届く相槌（0.7.51: 相槌を待たずに本文を送る）----
 // 送ると決めた時に相槌がまだ取得中なら、待たずに本文を送る。相槌は、本文の最初の音声が届く前に着けば鳴らし、
 // 後なら捨てる（最初に鳴るのは相槌か本文の早い方）。loop() だけが触る。本文の応答を待っている間の空き時間に呼ばれる
@@ -2764,8 +2794,10 @@ void sendToLambdaAndPlay(const String& text) {
   // 取得中の相槌は、鳴る見込みとして伝える（本文より遅れて捨てた時は、返答が相槌なしで本題から始まる）
   const bool backchannelPending = !bargeInRequested && !backchannelPlanned && backchannelFetching;
   const bool backchannelForReply = backchannelFired || backchannelPlanned || backchannelPending;
-  Serial.printf("[BC] reply_hint=%d planned=%d pending=%d played=%d\n",
-                backchannelForReply, backchannelPlanned, backchannelPending, (bool)backchannelFired);
+  // 相槌を取りに行かなかった発話は、本体の合いの手を鳴らす。言葉の無い声なので、返答には「相槌は再生済み」と伝えない
+  const bool quickAckPlanned = !bargeInRequested && backchannelEnabled && !backchannelForReply;
+  Serial.printf("[BC] reply_hint=%d planned=%d pending=%d played=%d quick_ack=%d\n",
+                backchannelForReply, backchannelPlanned, backchannelPending, (bool)backchannelFired, quickAckPlanned);
 
   // fw: Lambdaの切り分けログ用（どの版の本体からの要求か）。文章は chat-logs に残り、ログには時刻と識別子だけが出る
   String payload =
@@ -2830,6 +2862,8 @@ void sendToLambdaAndPlay(const String& text) {
   } else if (backchannelPending) {
     lateBackchannelOpen = true;
     lateBackchannelSinceMs = t0;
+  } else if (quickAckPlanned) {
+    playQuickAck();
   }
   Serial.printf("⏱️ [%lums] Backchannel phase done (queued; playing while reading reply)\n", millis() - t0);
 
@@ -2849,7 +2883,7 @@ void sendToLambdaAndPlay(const String& text) {
   }
   if (connParams.failed) {
     lateBackchannelOpen = false;
-    if (backchannelFired && playRing) {
+    if ((backchannelFired || quickAckPlanned) && playRing) {
       // 相槌はもうリングにある。途中で切らずに出し切る（0.7.49 までは鳴り終わってからここへ来ていた）
       playerStreamEnd = true;
       const unsigned long drainStart = millis();
@@ -3161,9 +3195,10 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
           if (utf8Len(fullText) >= BACKCHANNEL_TRIGGER_CHARS && !backchannelFired && !backchannelFetching && !backchannelReady) {
             startBackchannelFetch(fullText);
           }
-          // 猶予が 0（はやい）だと <end> ですぐ送るので、Lambda への TLS を張る間が無い。相槌を取りに行くのと同じ時に張り始める
-          // （話が長くて古くなった接続は、送る時に張り直す。lambdaLinkTask）
-          if (sttGraceMs.load() == 0 && utf8Len(fullText) >= BACKCHANNEL_TRIGGER_CHARS) startLambdaPreconnect();
+          // 猶予が 0（はやい）だと <end> ですぐ送るので、Lambda への TLS を張る間が無い。この発話の最初の文字で張り始める
+          // （0.7.53。0.7.52 までは 7 文字に届いた時で、短い発話は送る時に張って約 0.6 秒遅れていた。
+          //   話が長くて古くなった接続は、送る時に張り直す。lambdaLinkTask）
+          if (sttGraceMs.load() == 0) startLambdaPreconnect();
         }
 
         if (foundEndToken && partialText.length() > 0) {

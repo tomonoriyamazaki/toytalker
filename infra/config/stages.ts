@@ -176,9 +176,11 @@ const common = {
   },
   // ESP32 の待ち。normal はファームの組み込みと同じ（Soniox は既定のまま、猶予 0.6 秒。選んでいない機器もこの動き）。
   // アプリの normal（終端を遅らせる Soniox の値つき）は本体のマイクで試していないので、まだ合わせていない。
-  // fast は猶予なし（相槌も返事も 0.6 秒早い。言葉に詰まる子の話を切りやすい）、slow はアプリの slow と同じ値
+  // fast は猶予なし（相槌も返事も 0.6 秒早い。言葉に詰まる子の話を切りやすい）、slow はアプリの slow と同じ値。
+  // fast の max_endpoint_delay_ms（2026-11-29）: 言いかけに聞こえる短い一言だと、Soniox は終端を上限まで待つ
+  // （既定のままだと約 2.0 秒。試験機の 9 ターン中 5 ターン）。1 秒にして、その回の相槌・合いの手・返事を約 1 秒早くする
   sttDeviceWaits: {
-    fast: { soniox: {}, grace_ms: 0 },
+    fast: { soniox: { max_endpoint_delay_ms: 1000 }, grace_ms: 0 },
     normal: { soniox: {}, grace_ms: 600 },
     slow: { soniox: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 }, grace_ms: 1200 },
   },
