@@ -21,14 +21,19 @@ set -euo pipefail
 
 BUCKET="toytalker-firmware"
 REGION="ap-northeast-1"
-BOARD="esp32s3"
-SKETCH_DIR="${SKETCH_DIR:-devices/mcu/esp32_s3/toytalker_mini_v0.7}"
-SKETCH_NAME="$(basename "$SKETCH_DIR")"
-FQBN="esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=no_fs,CDCOnBoot=cdc"   # sketch.yaml の default_fqbn と同じ
-BUILD_DIR="${TMPDIR:-/tmp}/toytalker_flash_build"
+TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$TOOLS_DIR/firmware-family.sh"
+# 系統（firmware-family.sh）。既定は mini（基板 v0.2・v0.3）。基板 v0.4 以降は --family=wroom1
+FAMILY="mini"
+for arg in "$@"; do
+  case "$arg" in --family=*) FAMILY="${arg#--family=}" ;; esac
+done
+BUILD_DIR="${TMPDIR:-/tmp}/toytalker_flash_build_$FAMILY"
 if command -v cygpath >/dev/null 2>&1; then BUILD_DIR="$(cygpath -m "$BUILD_DIR")"; fi
 
 cd "$(dirname "$0")/../../../.."   # リポジトリルート
+family_config "$FAMILY" || exit $?   # BOARD・SKETCH_DIR・BIN_NAME・FQBN
+SKETCH_NAME="$(basename "$SKETCH_DIR")"
 
 VERSION=""; PORT=""; DRY_RUN=0; HW=""; WANT_HW=0
 for arg in "$@"; do
@@ -37,14 +42,16 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=1 ;;
     --hw) WANT_HW=1 ;;
     --hw=*) HW="${arg#--hw=}" ;;
+    --family=*) ;;   # 上で読んだ
     -*) echo "unknown option: $arg" >&2; exit 2 ;;
     *) if [[ -z "$VERSION" ]]; then VERSION="$arg"; elif [[ -z "$PORT" ]]; then PORT="$arg"; else echo "too many arguments" >&2; exit 2; fi ;;
   esac
 done
 if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ || $WANT_HW -eq 1 ]]; then
-  echo "usage: $0 <版 例 0.7.20> [ポート] [--dry-run] [--hw <基板の版 例 v0.3>]" >&2
+  echo "usage: $0 <版 例 0.7.20> [ポート] [--family=mini|wroom1] [--dry-run] [--hw <基板の版 例 v0.3>]" >&2
   exit 2
 fi
+family_check_version "$FAMILY" "$VERSION" || exit 2
 if [[ -n "$HW" && -z "$PORT" && $DRY_RUN -eq 0 ]]; then
   PORTS_FOR_HW=(/dev/cu.usbmodem*)
   [[ ${#PORTS_FOR_HW[@]} -eq 1 && -e "${PORTS_FOR_HW[0]}" ]] || { echo "❌ --hw はポートの指定が要る" >&2; exit 2; }
@@ -68,7 +75,8 @@ ENTRY="$(node -e '
   console.log([e.key, e.sha256, e.size, JSON.stringify(m.channels || {})].join(" "));
 ' "$MANIFEST" "$VERSION")" || exit 1
 read -r KEY SHA SIZE CHANNELS <<< "$ENTRY"
-echo "🔖 version=$VERSION key=$KEY channels=$CHANNELS"
+[[ "$KEY" == "$BOARD/"* ]] || { echo "❌ 版 $VERSION の置き場（$KEY）が系統 $FAMILY（$BOARD/）の外" >&2; exit 1; }
+echo "🔖 family=$FAMILY version=$VERSION key=$KEY channels=$CHANNELS"
 
 echo "🔨 building (bootloader・パーティション表のため)..."
 BUILD_LOG="$(arduino-cli compile --fqbn "$FQBN" --build-path "$BUILD_DIR" "$SKETCH_DIR" 2>&1)" \

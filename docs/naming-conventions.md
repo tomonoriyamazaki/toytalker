@@ -86,7 +86,7 @@ ToyTalkerで人が付ける名前の規則。AWS資源は2026-10-12決定（根�
 | Lambda環境変数 | UPPER_SNAKE_CASE | `ZAKICORP_TTS_URL`、`SECRET_PARAMS` |
 | ESP32ファームのgitタグ | `fw-<版>`。`publish-firmware.sh` が発行成功時に付ける | `fw-0.7.2` |
 | OTAチャンネル | `stable` / `beta`。`toytalker-devices.fw_channel` の値 | |
-| S3のファーム配置 | `esp32s3/<版>/toytalker_mini.bin`、`esp32s3/manifest.json` | |
+| S3のファーム配置 | 基板の系統ごとに置き場を分ける。`<置き場>/<版>/<名前>.bin`、`<置き場>/manifest.json`。系統の表は `devices/mcu/esp32_s3/tools/firmware-family.sh` と一時キー Lambda の `FIRMWARE_FAMILIES` | mini（基板 v0.2・v0.3）: `esp32s3/0.7.47/toytalker_mini.bin`。wroom1（基板 v0.4 以降）: `esp32s3-wroom1/0.8.0/toytalker.bin` |
 | 作業ブランチとworktree | `.claude/worktrees/<name>`、ブランチ名も `<name>` | `naming` |
 | 調査メモ | `docs/<領域>-<内容>.md`。領域ごとの入口1本に統合し、日付付きの個別メモは統合後に消す | `docs/esp32-v07-aec.md` |
 

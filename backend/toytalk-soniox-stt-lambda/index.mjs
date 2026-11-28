@@ -16,13 +16,33 @@ const DEVICES_TABLE = tableName("devices");
 // 本体は起動時に fw/hw/ota/part を付けてここへ来る。マニフェストのチャネル（既定 stable、
 // デバイス行の fw_channel で beta、fw_target で版固定）が指す版と違えば、S3の署名付きURLを返す。
 // バイナリはLambdaを通さず本体がS3から直接取る。本体側はホスト固定・CA検証・SHA-256で守る。
+// マニフェストは基板の系統（同じ .bin が動く基板のまとまり）ごとに別で、本体が送る hw で選ぶ（firmwareFamily）。
 const FIRMWARE_BUCKET = process.env.FIRMWARE_BUCKET || "toytalker-firmware";
 // アプリの設定画面「音声認識」の選択肢（CDK が infra/config/stages.ts の sttOptions を JSON で渡す）。壊れていたら返さない（アプリは組み込みで動く）
 const STT_OPTIONS = (() => {
   try { return process.env.STT_OPTIONS ? JSON.parse(process.env.STT_OPTIONS) : null; }
   catch (e) { console.warn(`[STT_OPTIONS] invalid JSON: ${e.message}`); return null; }
 })();
-const FIRMWARE_MANIFEST_KEY = "esp32s3/manifest.json";
+// 基板の系統ごとの配布先。置き場（prefix）の下に manifest.json と <版>/….bin がある。
+// 系統が違う .bin は動かない（PSRAM の方式とピンが違う）ので、別の系統の版は決して勧めない。
+const FIRMWARE_FAMILIES = {
+  mini: "esp32s3/",          // ESP32-S3-MINI-1（基板 v0.2・v0.3）。ファーム 0.7.x
+  wroom1: "esp32s3-wroom1/", // ESP32-S3-WROOM-1-N16R8（基板 v0.4 以降）。ファーム 0.8.x
+};
+const WROOM1_FROM_HW = [0, 4]; // 基板 v0.4 から WROOM-1
+
+/**
+ * 本体が送る基板の版（hw。"v0.3" の形）から系統を決める。読めない hw は null（何も勧めない）。
+ * hw が無いのは MINI 機だけ（WROOM 機のファームは必ず hw を送る）。
+ */
+export function firmwareFamily(hw) {
+  if (hw == null || hw === "") return "mini";
+  const m = /^v(\d{1,3})\.(\d{1,3})$/.exec(String(hw));
+  if (!m) return null;
+  const [major, minor] = [Number(m[1]), Number(m[2])];
+  const isWroom1 = major > WROOM1_FROM_HW[0] || (major === WROOM1_FROM_HW[0] && minor >= WROOM1_FROM_HW[1]);
+  return isWroom1 ? "wroom1" : "mini";
+}
 const FIRMWARE_URL_TTL_SEC = 600;
 // Soniox一時キーの寿命。既定は1時間（起動時の1回しか取らない古いファーム・アプリのため変えない）。
 // 期限前に取り直す新しいファーム・アプリは ?ttl=180 のように短い寿命を頼む（60〜3600秒。不正・範囲外は既定）。
@@ -34,18 +54,21 @@ function keyTtlSeconds(query) {
 }
 const MANIFEST_CACHE_MS = 60_000;
 const FIRMWARE_CHANNELS = new Set(["stable", "beta"]);
-let manifestCache = { at: 0, data: null };
+const manifestCache = new Map(); // 系統 → { at, data }
 
-async function loadManifest() {
+async function loadManifest(family) {
+  const prefix = FIRMWARE_FAMILIES[family];
+  if (!prefix) return null;
   const now = Date.now();
-  if (manifestCache.data && now - manifestCache.at < MANIFEST_CACHE_MS) return manifestCache.data;
+  const cached = manifestCache.get(family);
+  if (cached && now - cached.at < MANIFEST_CACHE_MS) return cached.data;
   try {
-    const res = await s3.send(new GetObjectCommand({ Bucket: FIRMWARE_BUCKET, Key: FIRMWARE_MANIFEST_KEY }));
+    const res = await s3.send(new GetObjectCommand({ Bucket: FIRMWARE_BUCKET, Key: `${prefix}manifest.json` }));
     const data = JSON.parse(await res.Body.transformToString());
-    manifestCache = { at: now, data };
+    manifestCache.set(family, { at: now, data });
     return data;
   } catch (err) {
-    console.warn(`[OTA] manifest unavailable: ${err.name}: ${err.message}`);
+    console.warn(`[OTA] manifest unavailable: family=${family} ${err.name}: ${err.message}`);
     return null;
   }
 }
@@ -75,7 +98,7 @@ function otaWord(value, max) {
   return /^[A-Za-z0-9._-]+$/.test(s) ? s : null;
 }
 
-async function buildFirmwareInfo(query, device, manifest) {
+async function buildFirmwareInfo(query, device, manifest, family) {
   if (query.ota !== "1" || !query.fw || !manifest) return null;
   const target = pickTargetVersion(manifest, device);
   if (!target || target === query.fw) return null;
@@ -87,7 +110,12 @@ async function buildFirmwareInfo(query, device, manifest) {
   }
   const entry = manifest.versions?.[target];
   if (!entry?.key || !entry?.sha256 || !entry?.size) {
-    console.warn(`[OTA] target=${target} has no manifest entry`);
+    console.warn(`[OTA] target=${target} has no manifest entry (family=${family})`);
+    return null;
+  }
+  // マニフェストが別の系統の .bin を指していたら勧めない（発行の誤りへの二重の守り）
+  if (!String(entry.key).startsWith(FIRMWARE_FAMILIES[family])) {
+    console.warn(`[OTA] target=${target} key=${entry.key} is outside family=${family}`);
     return null;
   }
   const url = await getSignedUrl(
@@ -186,10 +214,13 @@ export const handler = async (event, context) => {
     // Soniox API呼び出しとデバイス設定取得を並列実行
     const deviceId = query.device_id ?? null;
     const wantsFirmware = query.ota === "1" && !!query.fw;
+    // 基板の系統（配布先）。hw が読めなければ null で、何も勧めない
+    const family = wantsFirmware ? firmwareFamily(query.hw) : null;
+    if (wantsFirmware && !family) console.warn(`[OTA] unknown hw=${String(query.hw).slice(0, 16)}; no firmware offered`);
     trace.set({
       source: deviceId ? "esp" : "app", device_id: deviceId,
       fw: query.fw ? String(query.fw).slice(0, 32) : null, hw: query.hw ? String(query.hw).slice(0, 16) : null,
-      ota_check: wantsFirmware, ua: event.headers?.["user-agent"] ?? null,
+      ota_check: wantsFirmware, ota_family: family, ua: event.headers?.["user-agent"] ?? null,
       // 頼まれた寿命（秒）。null は ttl を付けない古いファーム・アプリ（1時間）。3分キーへの移行状況をログで数えるため
       ttl_sec: body.expires_in_seconds, ttl_requested: query.ttl != null,
       app_version: query.app_version ? String(query.app_version).slice(0, 16) : null,
@@ -226,7 +257,7 @@ export const handler = async (event, context) => {
         TableName: DEVICES_TABLE,
         Key: { device_id: deviceId },
       })).catch((e) => { trace.error("devices_get", e); return null; }) : Promise.resolve(null),
-      wantsFirmware ? loadManifest() : Promise.resolve(null),
+      family ? loadManifest(family) : Promise.resolve(null),
       recordDeviceReport(deviceId, query, event),
     ]);
     trace.mark("parallel_done");
@@ -281,7 +312,7 @@ export const handler = async (event, context) => {
       trace.set({ device_registered: false });
     }
     if (wantsFirmware) {
-      const firmware = await buildFirmwareInfo(query, deviceSettings?.Item, manifest).catch((err) => {
+      const firmware = await buildFirmwareInfo(query, deviceSettings?.Item, manifest, family).catch((err) => {
         trace.error("ota_offer", err);
         return null;
       });

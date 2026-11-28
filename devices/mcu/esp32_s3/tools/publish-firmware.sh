@@ -1,5 +1,5 @@
 #!/bin/bash
-# publish-firmware.sh — ファーム（toytalker_mini_v0.7）をビルドしてS3へ発行し、マニフェストのチャネルを更新する。
+# publish-firmware.sh — ファームをビルドしてS3へ発行し、マニフェストのチャネルを更新する。
 # 設計は docs/esp32-ota-settings-plan.md。Mac と Windows Git Bash の両方で動く（node と aws が要る）。
 #
 # 使い方（リポジトリルートから）:
@@ -10,25 +10,32 @@
 #   --force を付けると同じ版のS3オブジェクトとgitタグを上書きする（既定では拒否。版は不変にする）
 #   --allow-dirty を付けると未コミットの変更があっても発行する（タグは付けない。実機の一時試験用）
 #   bash devices/mcu/esp32_s3/tools/publish-firmware.sh beta --verify     # 照合だけ。チャネルが指す版の .bin を S3 から取り直し、マニフェストの SHA-256・サイズと比べる
+#   --family=wroom1 を付けると基板 v0.4 以降（WROOM-1）用を発行する。既定は mini（基板 v0.2・v0.3）。
+#   系統ごとにソース・ビルド設定・S3 の置き場（マニフェストも別）が決まる（firmware-family.sh）。どの本体がどちらを
+#   受け取るかは、本体が送る基板の版で一時キー Lambda が決める
 #
 # 発行と --promote の最後にも同じ照合をする（2026-11-13）。食い違ったまま配ると全機が sha256 で弾くので、発行した時点で止める。
 #
 # 運用は「1フォルダ + gitタグ」。フォルダには最新のソースだけを置き、配布するときは FirmwareVersion.h の
 # TOYTALKER_FW_VERSION を上げてコミットしてから発行する。発行に成功するとコミットにタグ fw-<版> を付けるので、
-# その版のソースへ戻すのは `git checkout fw-<版> -- devices/mcu/esp32_s3/toytalker_mini_v0.7` の1コマンド。
+# その版のソースへ戻すのは `git checkout fw-<版> -- <ソースのフォルダ>` の1コマンド。
 set -euo pipefail
 
 BUCKET="toytalker-firmware"
 REGION="ap-northeast-1"
-BOARD="esp32s3"
-SKETCH_DIR="${SKETCH_DIR:-devices/mcu/esp32_s3/toytalker_mini_v0.7}"
-FQBN="esp32:esp32:esp32s3:PSRAM=enabled,FlashSize=4M,PartitionScheme=no_fs,CDCOnBoot=cdc"   # sketch.yaml の default_fqbn と同じ
-BUILD_DIR="${TMPDIR:-/tmp}/toytalker_publish_build"
+TOOLS_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "$TOOLS_DIR/firmware-family.sh"
+FAMILY="mini"
+for arg in "$@"; do
+  case "$arg" in --family=*) FAMILY="${arg#--family=}" ;; esac
+done
+BUILD_DIR="${TMPDIR:-/tmp}/toytalker_publish_build_$FAMILY"
 # Windows（Git Bash）では arduino-cli.exe とこのスクリプトが同じ場所を指すよう、C:/... の形にそろえる。
 # MSYS_NO_PATHCONV=1 で /tmp のまま渡すと exe 側は C:\tmp に書き、ここは古い .bin を読んで別の版の中身を発行してしまう（2026-11-08 に 0.7.6 の名前で 0.7.5 を発行した）
 if command -v cygpath >/dev/null 2>&1; then BUILD_DIR="$(cygpath -m "$BUILD_DIR")"; fi
 
 cd "$(dirname "$0")/../../../.."   # リポジトリルート
+family_config "$FAMILY" || exit $?   # BOARD・SKETCH_DIR・BIN_NAME・FQBN
 
 CHANNEL="${1:-}"
 shift || true
@@ -41,11 +48,12 @@ for arg in "$@"; do
     --force) FORCE=1 ;;
     --allow-dirty) ALLOW_DIRTY=1 ;;
     --verify) VERIFY_ONLY=1 ;;
+    --family=*) ;;   # 上で読んだ
     *) echo "unknown option: $arg" >&2; exit 2 ;;
   esac
 done
 if [[ "$CHANNEL" != "beta" && "$CHANNEL" != "stable" ]]; then
-  echo "usage: $0 <beta|stable> [--dry-run] [--no-build] [--promote] [--force] [--allow-dirty] [--verify]" >&2
+  echo "usage: $0 <beta|stable> [--family=mini|wroom1] [--dry-run] [--no-build] [--promote] [--force] [--allow-dirty] [--verify]" >&2
   exit 2
 fi
 
@@ -124,12 +132,13 @@ verify_channel() {  # channel
     console.log([v, e.key, e.sha256, e.size].join(" "));
   ' "$file" "$1")" || { echo "❌ 照合: マニフェストを読めない" >&2; return 1; }
   read -r version key sha size <<< "$entry"
+  [[ "$key" == "$BOARD/"* ]] || { echo "❌ 照合: $1 が指す $version の置き場（$key）が系統 $FAMILY（$BOARD/）の外" >&2; return 1; }
   check_object "$key" "$sha" "$size" || {
     echo "❌ $1 が指す $version は、マニフェストと S3 の .bin が食い違っている。このままだと機器は sha256 で弾く。" >&2
     echo "   直すには、同じ版を --force で発行し直すか、チャネルを前の版へ戻す" >&2
     return 1
   }
-  echo "🔁 verified: $1 -> $version （S3 の .bin とマニフェストの sha256・size が一致）"
+  echo "🔁 verified: $FAMILY $1 -> $version （S3 の .bin とマニフェストの sha256・size が一致）"
 }
 
 if [[ $VERIFY_ONLY -eq 1 ]]; then
@@ -144,7 +153,7 @@ if [[ $PROMOTE -eq 1 ]]; then
   if [[ $DRY_RUN -eq 1 ]]; then echo "(dry-run) manifest not uploaded"; exit 0; fi
   aws s3 cp "$MANIFEST_LOCAL" "s3://$BUCKET/$MANIFEST_KEY" --region "$REGION" --content-type application/json >/dev/null
   verify_channel "$CHANNEL"
-  echo "✅ stable promoted"
+  echo "✅ $FAMILY stable promoted"
   exit 0
 fi
 
@@ -153,6 +162,7 @@ if [[ -z "$VERSION" || ! "$VERSION" =~ ^[A-Za-z0-9._-]+$ ]]; then
   echo "TOYTALKER_FW_VERSION を FirmwareVersion.h から読めない: '$VERSION'" >&2
   exit 1
 fi
+family_check_version "$FAMILY" "$VERSION" || exit 1
 SKETCH_NAME="$(basename "$SKETCH_DIR")"
 BIN="$BUILD_DIR/$SKETCH_NAME.ino.bin"
 TAG="fw-$VERSION"
@@ -168,8 +178,8 @@ if [[ $DRY_RUN -eq 0 && $ALLOW_DIRTY -eq 0 && $FORCE -eq 0 ]] && git rev-parse -
   echo "❌ gitタグ $TAG が既にある。版を上げるか --force を付ける" >&2
   exit 1
 fi
-KEY="$BOARD/$VERSION/toytalker_mini.bin"
-echo "🔖 version=$VERSION channel=$CHANNEL key=$KEY"
+KEY="$BOARD/$VERSION/$BIN_NAME"
+echo "🔖 family=$FAMILY version=$VERSION channel=$CHANNEL key=$KEY"
 
 if [[ $NO_BUILD -eq 0 ]]; then
   echo "🔨 building $SKETCH_DIR ($FQBN)..."
@@ -183,7 +193,7 @@ if [[ $NO_BUILD -eq 0 ]]; then
 fi
 [[ -f "$BIN" ]] || { echo "binary not found: $BIN" >&2; exit 1; }
 # 中身が本当にこの版かを確かめる（--no-build や別の経路で古い .bin が混ざっても止める）。
-# 本文の要求に入る `"fw":"<版>"` は文字列リテラルの連結で .bin にそのまま残る（toytalker_mini_v0.7.ino の payload）
+# 本文の要求に入る `"fw":"<版>"` は文字列リテラルの連結で .bin にそのまま残る（.ino の payload）
 if ! grep -aqF "\"fw\":\"$VERSION\"" "$BIN"; then
   echo "❌ $BIN の中身が $VERSION ではない（\"fw\":\"$VERSION\" が見つからない）。ビルドし直す" >&2
   exit 1
@@ -231,7 +241,7 @@ fetch_manifest
 update_manifest publish "$CHANNEL" "$VERSION" "$KEY" "$SHA" "$SIZE"
 aws s3 cp "$MANIFEST_LOCAL" "s3://$BUCKET/$MANIFEST_KEY" --region "$REGION" --content-type application/json >/dev/null
 verify_channel "$CHANNEL"
-echo "✅ published $VERSION to $CHANNEL"
+echo "✅ published $VERSION to $FAMILY $CHANNEL"
 
 if [[ -n "$DIRTY" ]]; then
   echo "⚠️ 未コミットの変更を含む発行なのでタグ $TAG は付けない"
