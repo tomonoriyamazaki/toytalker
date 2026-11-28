@@ -248,7 +248,7 @@ Sakuraならほぼ半額で、使わない月は0円。ポケともの1回1.24�
 - ホームページ `toytalker.zakicorp.com` に特商法の表記（事業者名・連絡先・返金の条件・有効期限など）を足す
 - Stripe の本番申し込み（本人確認・銀行口座・審査）。明細書表記（statement descriptor）を「TOYTALKER」など親が見て分かる名前にする
 - **Stripe の本番が開通したら入れ直すもの**（2026-11-28 確認。本番は未申し込みで、申し込みの5手順がどれも未着手。sandbox と本番はアカウント ID が別で、sandbox の設定は本番へ引き継がれない。sandbox は「本番でこうする」の下書きとして使い、開通時に同じ内容を手で入れる）:
-  - 支払い方法の有効・無効。Checkout のセッションは `payment_method_types` を指定していないので、出る方法はダッシュボードの設定（Settings → Payments → Payment methods）だけで決まる。sandbox のいまの設定: カード・JCB・Apple Pay・Link が有効、Google Pay・PayPay が無効、分割払い（Japan installments）が有効。本番で決めること: Google Pay と PayPay を有効にするか（11.1 は Google Pay が使えると書いている）、分割払いを外すか（500〜3,000円の購入に要るかは未決定）
+  - 支払い方法の有効・無効。Checkout のセッションは `payment_method_types` を指定していないので、出る方法はダッシュボードの設定（Settings → Payments → Payment methods）だけで決まる。sandbox のいまの設定: カード・JCB・Apple Pay・Google Pay・Link が有効（Google Pay は 2026-11-28 に有効にした。11.1 の記述に合わせた）、PayPay が無効、分割払い（Japan installments）が有効。本番で決めること: PayPay を有効にするか、分割払いを外すか（500〜3,000円の購入に要るかは未決定）
   - API の鍵（`STRIPE_KEY_APP` / `STRIPE_KEY_WORKER`）を本番用に作り直し、本番の SSM に入れる
   - Webhook の受け口を本番側に登録し直す（署名の秘密も新しくなる）
   - 利用規約の URL を Stripe の公開情報に入れる。本番の Checkout は同意のチェックを必須にしている（`consent_collection`）ので、無いとセッションの作成が失敗する
