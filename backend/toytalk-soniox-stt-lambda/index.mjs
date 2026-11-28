@@ -5,6 +5,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { ensureSecrets, secret } from "../shared/secrets.mjs";
 import { tableName } from "../shared/tables.mjs";
 import { startTrace, describeEdge } from "../shared/trace.mjs";
+import { sttForDevice } from "../shared/device-settings.mjs";
 import { authenticate, authGate, checkDeviceKey, describeAuth, deviceGate, deviceKeyWriteCondition } from "../shared/auth.mjs";
 
 const ddbClient = new DynamoDBClient({ region: "ap-northeast-1" });
@@ -304,9 +305,12 @@ export const handler = async (event, context) => {
       // 音量の段階（アプリの選択。low / mid / high）。決めていない機器には返さない（本体は自分の既定のまま）。ファーム 0.7.33 以降が起動時に読む
       const volumeLevel = ["low", "mid", "high"].includes(deviceSettings.Item.volume_level) ? deviceSettings.Item.volume_level : null;
       if (volumeLevel) result.volume_level = volumeLevel;
+      // 話し終わりの待ち（アプリの選択。backend/shared/device-settings.mjs）。選んでいない機器には返さない（本体は組み込みの値のまま）。ファーム 0.7.48 以降が読む
+      const stt = sttForDevice(deviceSettings.Item);
+      if (stt) result.stt = stt;
       trace.set({
         device_registered: true, backchannel_enabled: result.backchannel_enabled,
-        voice_barge_enabled: result.voice_barge_enabled, volume_level: volumeLevel,
+        voice_barge_enabled: result.voice_barge_enabled, volume_level: volumeLevel, stt_wait: stt?.wait ?? null,
       });
     } else if (deviceId) {
       trace.set({ device_registered: false });

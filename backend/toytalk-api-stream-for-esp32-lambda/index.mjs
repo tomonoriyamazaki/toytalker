@@ -13,6 +13,7 @@
   import { checkBalance } from "../shared/wallet.mjs";
   import { chatStream, toolRoundMessages, searchWeb, WEB_SEARCH_TOOL, TOOL_RESULT_INSTRUCTION, SEARCH_TOOL_HINT, searchCallArgs, isSearchPreface, isSearchPromiseOnly, inlineLastToolRound, loadDefaultLlm } from "../shared/llm.mjs";
   import { startTrace, describeClient, describePrevTurn, describeDevice, errorStatus } from "../shared/trace.mjs";
+  import { deviceSettings } from "../shared/device-settings.mjs";
   import { recordDeviceStatus } from "../shared/device-status.mjs";
 import { checkDeviceKey, deviceGate, loadDeviceRow } from "../shared/auth.mjs";
 import { trimSilence } from "../shared/tts-pcm.mjs";
@@ -597,6 +598,14 @@ async function ttsBufferOpenAI(text, voice, ttsModel) {
     const cfg = TTS_TABLE[ttsKey] ?? TTS_TABLE[TTS_DEFAULT];
     trace.set({ llm: `${llmProvider}/${llmModelId}`, tts: cfg.ttsVendor, voice });
     trace.mark("config");
+
+    // 本体へ設定を下ろす（相槌のオン・オフ、話し終わりの待ち。backend/shared/device-settings.mjs）。本体は次の会話から使う。
+    // 古いファームは知らないメタデータとして読み飛ばす
+    if (deviceRow) {
+      const settings = deviceSettings(deviceRow);
+      sendMeta(res, "settings", settings);
+      trace.set({ stt_wait: settings.stt?.wait ?? null });
+    }
 
     sendMeta(res, "mark", { k: "model", v: ttsKey });
     sendMeta(res, "mark", { k: "llm_vendor", v: llmProvider });

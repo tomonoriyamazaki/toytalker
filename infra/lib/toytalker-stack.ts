@@ -261,6 +261,7 @@ export function configEnv(config: StageConfig): Record<string, string> {
     ZAKICORP_TTS_URL: config.zakicorpTtsUrl,
     SONIOX_MODEL: config.sonioxModel,
     STT_OPTIONS: JSON.stringify(config.sttOptions),
+    STT_DEVICE_WAITS: JSON.stringify(config.sttDeviceWaits),
     FIRMWARE_BUCKET: config.firmwareBucketName,
   };
 }
@@ -274,7 +275,7 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     timeoutSeconds: 120,
     format: "esm",
     requireShim: true,
-    env: [...TTS_ENV, ...ESP32_AUTH_ENV, ...WALLET_ENV, ...CHAT_LOG_ENV],
+    env: [...TTS_ENV, ...ESP32_AUTH_ENV, ...WALLET_ENV, ...CHAT_LOG_ENV, "STT_DEVICE_WAITS"],
     secrets: [...TTS_SECRETS, "ANTHROPIC_API_KEY", "BRAVE_API_KEY"],
     url: { invokeMode: "RESPONSE_STREAM", cors: CORS_GET_ONLY, route: "/chat-mcu" },
     warm: true,
@@ -348,7 +349,7 @@ export const FUNCTIONS: readonly FunctionSpec[] = [
     memorySize: 256, // 128ではコールドスタート時のSSM取得が約0.9秒（他は1〜2GBで約0.2秒）。256へ（ロードマップ9、2026-10-28）
     timeoutSeconds: 5, // OTA判定でS3のmanifestを読むため3→5（2026-09-16）
     format: "esm",
-    env: ["SONIOX_MODEL", "STT_OPTIONS", "FIRMWARE_BUCKET", ...AUTH_ENV, "DEVICE_KEY_ENROLL"],
+    env: ["SONIOX_MODEL", "STT_OPTIONS", "STT_DEVICE_WAITS", "FIRMWARE_BUCKET", ...AUTH_ENV, "DEVICE_KEY_ENROLL"],
     secrets: ["SONIOX_API_KEY"],
     url: { invokeMode: "BUFFERED", cors: CORS_GET_ONLY, route: "/stt-token" },
     warm: true,

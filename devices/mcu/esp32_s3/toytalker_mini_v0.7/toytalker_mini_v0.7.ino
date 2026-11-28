@@ -242,12 +242,47 @@ String sonioxFinalBuf = "";
 String lastFinalText = "";
 unsigned long lastPartialMs = 0;
 // 話し終わりの猶予（2026-11-08、ロードマップ6。アプリの「ふつう」と同じ動き: app/app/(tabs)/chat.tsx）。
-// Soniox の終端（<end>）が来ても STT_GRACE_MS 待ち、その間に声（ブロックRMS ≥ STT_GRACE_SPEECH_RMS）か
+// Soniox の終端（<end>）が来ても sttGraceMs 待ち、その間に声（ブロックRMS ≥ STT_GRACE_SPEECH_RMS）か
 // 新しい文字が出たら同じ発話として聞き続ける（Soniox は同じ WS で続きを文字にし、次の <end> を送る）。
 // 声が物音だっただけなら次の <end> が来ないので、STT_GRACE_RESUME_MAX_MS 新しい文字が無ければ送る。
 // 以前の「途中結果が 800ms 更新されなければ送る」予備判定（END_SILENCE_MS）は、Soniox の待ちと関係なく
-// 小さい子の言葉の切れ目で送ってしまうので外した。サーバーから値を受け取る形はロードマップ25（OTA）。
-const unsigned long STT_GRACE_MS = 600;             // 0 なら <end> ですぐ送る（Soniox の既定のまま）
+// 小さい子の言葉の切れ目で送ってしまうので外した。
+const unsigned long STT_GRACE_MS_DEFAULT = 600;     // サーバーから届くまでの値（アプリの「ふつう」）
+const unsigned long STT_GRACE_MS_MAX = 3000;        // サーバーの値の上限（壊れた値で送らなくなるのを防ぐ）
+// 話し終わりの待ち（0.7.48、ロードマップ25）。アプリの「おもちゃ」画面の はやい / ふつう / ゆっくり をサーバーが中身に直して下ろす
+// （起動時は鍵発行の応答の stt、会話中は返事のメタデータ settings。backend/shared/device-settings.mjs）。届かなければ組み込みのまま。
+// sttGraceMs: 終端（<end>）の後に待つ時間。0 なら <end> ですぐ送る。次の発話から効く。
+// sonioxExtra: Soniox の開始メッセージに足す項目（中身は解釈しない）。次に張る Soniox の接続から効く
+// （再生中に次の接続を先に張るので、会話中に変えた分は1ターン遅れる）。返事を読む側が書き、接続する側が読むので鍵をかける
+static std::atomic<uint32_t> sttGraceMs{STT_GRACE_MS_DEFAULT};
+static char sonioxExtra[200] = "";
+static portMUX_TYPE sonioxExtraMux = portMUX_INITIALIZER_UNLOCKED;
+
+void applySttSettings(JsonVariantConst stt, const char* from) {
+  if (!stt.is<JsonObjectConst>()) return;
+  if (stt["grace_ms"].is<uint32_t>()) {
+    uint32_t grace = stt["grace_ms"].as<uint32_t>();
+    if (grace > STT_GRACE_MS_MAX) grace = STT_GRACE_MS_MAX;
+    if (sttGraceMs.exchange(grace) != grace) Serial.printf("[SETTINGS] grace_ms=%lu (%s)\n", (unsigned long)grace, from);
+  }
+  JsonObjectConst soniox = stt["soniox"];
+  if (!soniox.isNull()) {
+    char buf[sizeof(sonioxExtra) + 2];  // { } の分
+    const size_t n = measureJson(soniox);
+    if (n >= 2 && n < sizeof(buf)) {
+      serializeJson(soniox, buf, sizeof(buf));
+      buf[n - 1] = 0;  // 閉じ括弧を落とす。buf + 1 からが中身（空の {} なら空文字）
+      bool changed;
+      portENTER_CRITICAL(&sonioxExtraMux);
+      changed = strcmp(sonioxExtra, buf + 1) != 0;
+      if (changed) strcpy(sonioxExtra, buf + 1);
+      portEXIT_CRITICAL(&sonioxExtraMux);
+      if (changed) Serial.printf("[SETTINGS] soniox={%s} (%s)\n", buf + 1, from);
+    } else {
+      Serial.printf("[SETTINGS] soniox ignored (size=%u)\n", (unsigned)n);
+    }
+  }
+}
 const unsigned long STT_GRACE_RESUME_MAX_MS = 2000;  // 0.7.24: 3000 → 2000
 // 0.7.24: 1200 → 2500。1200 では周りの音（猶予中の最大 1250〜1980）を声と数えて送信が 2〜6 秒遅れた。
 // 声は 3700〜6600 だった（2026-11-13、試験機、ケースなし）。新しい文字が出れば音量に関係なく待つので、小さい声の続きは文字で拾う
@@ -398,10 +433,17 @@ void refreshSonioxKeyIfOld(const char* why) {
 
 // 鍵は入れない（接続時に Authorization ヘッダーで渡す。beginSonioxWs）
 String sonioxStartMessage() {
-  return "{\"model\":\"" + sonioxModel + "\","
-         "\"audio_format\":\"pcm_s16le\",\"sample_rate\":16000,\"num_channels\":1,"
-         "\"enable_partial_results\":true,\"enable_endpoint_detection\":true,"
-         "\"language_hints\":[\"ja\",\"en\"]}";
+  char extra[sizeof(sonioxExtra)];
+  portENTER_CRITICAL(&sonioxExtraMux);
+  strcpy(extra, sonioxExtra);
+  portEXIT_CRITICAL(&sonioxExtraMux);
+  String msg = "{\"model\":\"" + sonioxModel + "\","
+               "\"audio_format\":\"pcm_s16le\",\"sample_rate\":16000,\"num_channels\":1,"
+               "\"enable_partial_results\":true,\"enable_endpoint_detection\":true,"
+               "\"language_hints\":[\"ja\",\"en\"]";
+  if (extra[0]) { msg += ","; msg += extra; }  // サーバーが決めた話し終わりの待ち（applySttSettings）
+  msg += "}";
+  return msg;
 }
 
 // Soniox の WebSocket を証明書の検証つきで設定する（接続は ws.loop() か先行接続ワーカーが行う）。
@@ -704,10 +746,15 @@ void loadPlaybackGain() {
   setPlaybackGain(gain, false);
 }
 
-// アプリの音量（鍵発行の応答の volume_level）。段階を倍率へ直すのは本体側（基板やスピーカーで変わるため）。
-// NVS には書かない（正はサーバー。届かない機器は NVS か既定のまま）。知らない語は無視する
+// アプリの音量（鍵発行の応答と、返事のメタデータ settings の volume_level）。段階を倍率へ直すのは本体側（基板やスピーカーで変わるため）。
+// NVS には書かない（正はサーバー。届かない機器は NVS か既定のまま）。知らない語は無視する。
+// 返事のたびに届くので、前と同じ段階なら何もしない（試験用にシリアルで変えた倍率を、毎ターン戻さないため）。
+// 返事の settings は音声より先に届くので、アプリで変えた音量は次の返事から効く（0.7.48）
 void applyVolumeLevel(const char* level) {
   if (!level) return;
+  static char lastLevel[8] = "";
+  if (strcmp(level, lastLevel) == 0) return;
+  strlcpy(lastLevel, level, sizeof(lastLevel));
   float gain;
   if (strcmp(level, "low") == 0) gain = 2.0f;
   else if (strcmp(level, "mid") == 0) gain = 4.0f;
@@ -1606,6 +1653,20 @@ bool processMetadata(WiFiClientSecure& client, uint32_t length) {
   }
   lambdaCompletion.metadata(eventDoc["event"] | "");
 
+  // サーバーから下りる設定（相槌のオン・オフ、話し終わりの待ち、音量）。相槌と待ちは次の会話から、音量はこの返事から。読めなければ前の値のまま
+  if (strcmp(eventDoc["event"] | "", "settings") == 0) {
+    JsonDocument settingsDoc;
+    if (!deserializeJson(settingsDoc, jsonBuf, length)) {
+      if (settingsDoc["backchannel_enabled"].is<bool>()) {
+        const bool on = settingsDoc["backchannel_enabled"].as<bool>();
+        if (on != backchannelEnabled) Serial.printf("[SETTINGS] backchannel=%d (reply)\n", on);
+        backchannelEnabled = on;
+      }
+      applySttSettings(settingsDoc["stt"], "reply");
+      applyVolumeLevel(settingsDoc["volume_level"] | (const char*)nullptr);
+    }
+  }
+
   if (json.indexOf("\"event\":\"segment\"") >= 0) {
     int p = json.indexOf("\"text\":\"");
     if (p >= 0) {
@@ -2222,7 +2283,7 @@ bool playBackchannelIfReady() {
 }
 
 // ---- Lambda への TLS 接続と要求の送信（Core 0 のタスク）----
-// 1回の接続ごとに LambdaLink を1つ作る。話し終わりの猶予（STT_GRACE_MS）が始まった時に先に張り始め（ロードマップ39。
+// 1回の接続ごとに LambdaLink を1つ作る。話し終わりの猶予（sttGraceMs）が始まった時に先に張り始め（ロードマップ39。猶予が 0 の時は相槌を取りに行く時。
 // TLS の約0.6秒を猶予の間に済ませる）、送ると決まったら同じタスクが要求を送る。送らないと決まったら「やめる」を渡す。
 // 持ち主: 「やめる」を渡した後は loop() は触らず、タスクが自分で片付ける。「送る」を渡した後は finished を待って loop() が片付ける。
 static LambdaLink* lambdaPreconnect = nullptr;  // 猶予の間に張っている接続。loop() だけが触る
@@ -2854,6 +2915,9 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
           if (utf8Len(fullText) >= BACKCHANNEL_TRIGGER_CHARS && !backchannelFired && !backchannelFetching && !backchannelReady) {
             startBackchannelFetch(fullText);
           }
+          // 猶予が 0（はやい）だと <end> ですぐ送るので、Lambda への TLS を張る間が無い。相槌を取りに行くのと同じ時に張り始める
+          // （話が長くて古くなった接続は、送る時に張り直す。lambdaLinkTask）
+          if (sttGraceMs.load() == 0 && utf8Len(fullText) >= BACKCHANNEL_TRIGGER_CHARS) startLambdaPreconnect();
         }
 
         if (foundEndToken && partialText.length() > 0) {
@@ -3144,8 +3208,10 @@ void startNormalOperation() {
   if (doc.containsKey("volume_level")) {
     applyVolumeLevel(doc["volume_level"].as<const char*>());
   }
-  Serial.printf("🔊 Backchannel: %s, STT: %s, voice barge-in: %s\n", backchannelEnabled ? "ON" : "OFF",
-                sonioxModel.c_str(), voiceBargeEnabled ? "ON" : "OFF");
+  // 話し終わりの待ち（スマホの設定。届かなければ組み込みのまま）。会話中は返事のメタデータ settings でも届く
+  applySttSettings(doc["stt"], "boot");
+  Serial.printf("🔊 Backchannel: %s, STT: %s, voice barge-in: %s, grace: %lums\n", backchannelEnabled ? "ON" : "OFF",
+                sonioxModel.c_str(), voiceBargeEnabled ? "ON" : "OFF", (unsigned long)sttGraceMs.load());
 
   playChime(CHIME_BOOT, sizeof(CHIME_BOOT) / sizeof(CHIME_BOOT[0]));  // 起動して聞き取りを始める合図
   startSTTRecording();
@@ -3708,7 +3774,7 @@ void loop() {
         if (raw[i] > rawMax) rawMax = raw[i];
         squares += (int64_t)pcm[i] * pcm[i];
       }
-      // 話し終わりの猶予（STT_GRACE_MS）。猶予中に声が出たら同じ発話として聞き続ける
+      // 話し終わりの猶予（sttGraceMs）。猶予中に声が出たら同じ発話として聞き続ける
       // 録音開始直後の DC 補正の過渡は除く（最初のブロック。[STT_INPUT] と同じ扱い）
       if (samples > 0 && !sttInputFirstBlock) {
         const uint32_t blockRms = (uint32_t)sqrt((double)squares / samples);
@@ -3769,7 +3835,8 @@ void loop() {
     }
   }
 
-  // Sonioxエンドポイント検出 → 猶予（STT_GRACE_MS）。猶予が 0 ならすぐ送る
+  // Sonioxエンドポイント検出 → 猶予（sttGraceMs）。猶予が 0 ならすぐ送る
+  const unsigned long graceMs = sttGraceMs.load();
   if (endpointDetected) {
     endpointDetected = false;
     if (partialText.length() > 0) {
@@ -3779,7 +3846,7 @@ void loop() {
         if (lastTextChangeMs) sttProgress.lastTextToEndMs = now - lastTextChangeMs;
       }
       sttGrace.resumeStartMs = 0;
-      if (STT_GRACE_MS == 0) finishUtterance("no grace");
+      if (graceMs == 0) finishUtterance("no grace");
       else if (!sttGrace.graceStartMs) {
         sttGrace.graceStartMs = now;
         startLambdaPreconnect();  // 猶予の間に Lambda への TLS を先に張る（言い直しが来ても張ったまま待つ）
@@ -3788,7 +3855,7 @@ void loop() {
   }
   if (armed && partialText.length() > 0) {
     const unsigned long now = millis();
-    if (sttGrace.graceStartMs && now - sttGrace.graceStartMs >= STT_GRACE_MS) finishUtterance("quiet");
+    if (sttGrace.graceStartMs && now - sttGrace.graceStartMs >= graceMs) finishUtterance("quiet");
     else if (sttGrace.resumeStartMs && now - sttGrace.resumeStartMs >= STT_GRACE_RESUME_MAX_MS) finishUtterance("no new text");
     else if (!sttGrace.graceStartMs && !sttGrace.resumeStartMs && now - lastPartialMs >= STT_STALL_MS) finishUtterance("stall");
   }
@@ -3813,7 +3880,7 @@ void finishUtterance(const char* why) {
   Serial.printf("[STT_REPORT] {%s}\n", sttReportJson(sttReport).c_str());  // この要求の device.stt と同じ中身
   Serial.printf("[GRACE] sent +%ldms after first end (%s, resumed=%lu, grace=%lums, speech_peak_rms=%lu, grace_peak_rms=%lu, threshold=%lu)\n",
                 g.firstEndMs ? (long)(millis() - g.firstEndMs) : -1L, why, (unsigned long)g.resumes,
-                STT_GRACE_MS, (unsigned long)g.speechPeakRms, (unsigned long)g.gracePeakRms,
+                (unsigned long)sttGraceMs.load(), (unsigned long)g.speechPeakRms, (unsigned long)g.gracePeakRms,
                 (unsigned long)STT_GRACE_SPEECH_RMS);
   String text = partialText;
   armed = false;

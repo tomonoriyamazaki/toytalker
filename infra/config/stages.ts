@@ -37,6 +37,11 @@ export interface StageConfig {
   readonly zakicorpTtsUrl: string;
   /** Soniox STTのモデル名（アプリの「おすすめ」と ESP32 が使う） */
   readonly sonioxModel: string;
+  /**
+   * ESP32 の「話し終わりの待ち」の中身（アプリの「おもちゃ」画面で機器ごとに選ぶ。devices の stt_wait）。
+   * 鍵発行と会話の Lambda が本体へ配る（backend/shared/device-settings.mjs）。値を変えるのにファームの更新は要らない
+   */
+  readonly sttDeviceWaits: Readonly<Record<SttWait, SttWaitSetting>>;
   /** アプリの設定画面「音声認識」の選択肢。一時キーLambdaがアプリへ配る（型と方針は SttOptions） */
   readonly sttOptions: SttOptions;
   /** Cartesiaの既定ボイスID */
@@ -168,6 +173,14 @@ const common = {
       normal: { soniox: { endpoint_sensitivity: -0.3, max_endpoint_delay_ms: 2500 }, grace_ms: 600 },
       slow: { soniox: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 }, grace_ms: 1200 },
     },
+  },
+  // ESP32 の待ち。normal はファームの組み込みと同じ（Soniox は既定のまま、猶予 0.6 秒。選んでいない機器もこの動き）。
+  // アプリの normal（終端を遅らせる Soniox の値つき）は本体のマイクで試していないので、まだ合わせていない。
+  // fast は猶予なし（相槌も返事も 0.6 秒早い。言葉に詰まる子の話を切りやすい）、slow はアプリの slow と同じ値
+  sttDeviceWaits: {
+    fast: { soniox: {}, grace_ms: 0 },
+    normal: { soniox: {}, grace_ms: 600 },
+    slow: { soniox: { endpoint_sensitivity: -0.6, max_endpoint_delay_ms: 3000 }, grace_ms: 1200 },
   },
   cartesiaDefaultVoiceId: "c7eafe22-8b71-40cd-850b-c5a3bbd8f8d2",
   architecture: "x86_64",

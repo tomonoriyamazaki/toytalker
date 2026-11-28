@@ -60,6 +60,8 @@ type RegisteredDevice = {
   voice_barge_enabled?: boolean;
   // 本体の音量の段階。決めていなければ本体の既定（大と同じ）
   volume_level?: "low" | "mid" | "high";
+  // 話し終わりの待ち。決めていなければ本体の組み込み（ふつうと同じ）。中身はサーバーが決める（infra/config/stages.ts の sttDeviceWaits）
+  stt_wait?: "fast" | "normal" | "slow";
 };
 
 type SessionItem = {
@@ -142,6 +144,7 @@ export default function Toy() {
             device_status_at: d.device_status_at ?? null,
             voice_barge_enabled: d.voice_barge_enabled !== false,
             volume_level: d.volume_level ?? "high",
+            stt_wait: d.stt_wait ?? "normal",
           }));
           setRegisteredDevices(devices);
           await AsyncStorage.setItem("registeredDevices", JSON.stringify(devices));
@@ -717,7 +720,7 @@ export default function Toy() {
                     body: JSON.stringify({ backchannel_enabled: val }),
                   });
                 } catch {}
-                Alert.alert("設定を変更しました", "おもちゃの電源を入れ直してください");
+                Alert.alert("設定を変更しました", "次の会話から変わります。変わらないときは、おもちゃの電源を入れ直してください");
               }}
             />
           </View>
@@ -768,7 +771,43 @@ export default function Toy() {
                           body: JSON.stringify({ volume_level: level }),
                         });
                       } catch {}
-                      Alert.alert("設定を変更しました", "おもちゃの電源を入れ直してください");
+                      Alert.alert("設定を変更しました", "次の返事から変わります。変わらないときは、おもちゃの電源を入れ直してください");
+                    }}
+                  >
+                    <Text style={[s.levelButtonText, selected && s.levelButtonTextSelected]}>{label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+          </View>
+          {/* ボタン3つが横に並びきらないので、見出しの下に置く */}
+          <View style={[s.settingRow, { flexDirection: "column", alignItems: "flex-start", gap: 10 }]}>
+            <View>
+              <Text style={s.settingLabel}>話し終わりの待ち</Text>
+              <Text style={s.settingValue}>はやいほど返事が早く、話の途中で切れやすい</Text>
+            </View>
+            <View style={s.levelRow}>
+              {([["fast", "はやい"], ["normal", "ふつう"], ["slow", "ゆっくり"]] as const).map(([wait, label]) => {
+                const selected = (currentDevice?.stt_wait ?? "normal") === wait;
+                return (
+                  <TouchableOpacity
+                    key={wait}
+                    style={[s.levelButton, selected && s.levelButtonSelected]}
+                    onPress={async () => {
+                      if (selected) return;
+                      setRegisteredDevices((prev) => {
+                        const updated = prev.map((d) => (d.device_id === deviceId ? { ...d, stt_wait: wait } : d));
+                        AsyncStorage.setItem("registeredDevices", JSON.stringify(updated));
+                        return updated;
+                      });
+                      // 本体は次の会話の返事と一緒に受け取り、その次の会話から使う（電源の入れ直しは要らない）
+                      try {
+                        await apiFetch(`/devices/${encodeURIComponent(deviceId!)}`, {
+                          method: "PUT",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ stt_wait: wait }),
+                        });
+                      } catch {}
                     }}
                   >
                     <Text style={[s.levelButtonText, selected && s.levelButtonTextSelected]}>{label}</Text>
