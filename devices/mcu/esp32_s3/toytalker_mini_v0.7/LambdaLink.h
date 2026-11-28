@@ -17,3 +17,9 @@ struct LambdaLink {
   uint32_t connectStartMs = 0, connectMs = 0, connectedAtMs = 0, sendMs = 0;
   TaskHandle_t task = nullptr;
 };
+
+// 相槌の接続（0.7.49）。タスクが最後まで自分で持ち、応答を読み終えたら自分で片付けるので、要求の文もここに持つ
+struct BackchannelLink : LambdaLink {
+  uint32_t generation = 0;  // 取りに行くと決めた時の世代（.ino の backchannelGeneration）
+  String requestText;
+};

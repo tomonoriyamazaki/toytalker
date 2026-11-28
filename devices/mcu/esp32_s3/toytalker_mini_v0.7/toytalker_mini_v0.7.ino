@@ -12,6 +12,7 @@
 #include <WiFiClientSecure.h>
 #include <memory>
 #include "LambdaLink.h"
+#include <mutex>
 #include <HTTPClient.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
@@ -683,7 +684,10 @@ int utf8Len(const String& s) {
 volatile bool backchannelFetching = false;
 volatile bool backchannelReady = false;
 volatile bool backchannelFired = false;
-volatile bool backchannelAbort = false;
+// 相槌の取得の世代（0.7.51）。clearBackchannelCache が進める。取得のタスクは始めた時の世代を持ち、世代が変わっていたら
+// 結果を置かずに捨てる（前のターンの相槌や、本文より遅れて届いた相槌を鳴らさない）。置く・取り出す・捨てるは backchannelMutex の中
+static std::atomic<uint32_t> backchannelGeneration{0};
+static std::mutex backchannelMutex;
 uint8_t* backchannelPcm = NULL;
 size_t backchannelPcmSize = 0;
 String backchannelText = "";
@@ -1557,9 +1561,10 @@ bool setupI2SPlay() {
 // ==== HTTP chunked body: one decoder per response ====
 static ChunkedBodyDecoder lambdaBody;
 static StreamCompletion lambdaCompletion;
+void pollLateBackchannel();
 struct LambdaReadRuntime {
   uint32_t now() { return millis(); }
-  void idle() { delay(1); }
+  void idle() { pollLateBackchannel(); delay(1); }
   bool cancelled() { return bargeInRequested; }
 };
 
@@ -1584,6 +1589,7 @@ bool readLambdaResponseHeaders(WiFiClientSecure& client) {
     if (millis() - lastProgress >= 10000) break;
     if (client.available() <= 0) {
       if (!client.connected()) break;
+      pollLateBackchannel();
       delay(1);
       continue;
     }
@@ -1733,6 +1739,12 @@ static inline void notePlayDmaWrite(size_t bytes) {
   playDmaEndUs += (int64_t)bytes * 1000000LL / (SAMPLE_RATE_TTS * 4);
 }
 static volatile bool playerParked = true;     // タスクがI2Sに触っていない状態
+// 相槌もリングに入れて鳴らす（0.7.50）。loop() は相槌を入れたらすぐ本文の受信に進み、届いた音声は相槌の後ろに並ぶ。
+// 境目（相槌の終わりのリング位置）まで渡し終えたら、返答の鳴り始めと同じ溜め（PLAY_PREBUFFER_START）を待ってから続ける。
+// 相槌と返答のあいだが空いても途切れ（underruns）には数えない
+static volatile bool playBcBoundaryPending = false;  // 境目より前（相槌）を渡している間 true。loop() が立て、再生タスクが下ろす
+static volatile size_t playBcBoundary = 0;
+static volatile bool playBcFirstWriteLogged = false;
 // 一時停止のとき巻き戻す量: アンプを切った時点で DMA に入っていた分（8 本 × 4092 バイト ≈ 0.34 秒、満杯と仮定）
 static constexpr size_t PLAY_REWIND_BYTES = PLAY_DMA_COUNT * PLAY_DMA_FRAMES * 4;
 static size_t playConsumedBytes = 0;          // 再生タスクだけが書く。このセッションでリングから I2S へ渡した量
@@ -1866,6 +1878,14 @@ void playbackTask(void* param) {
 
     size_t avail = playRingAvail();
 
+    if (playBcBoundaryPending && playRingTail == playBcBoundary) {
+      // 相槌を渡し終えた。返答は溜めを待ってから（相槌の残りは DMA で鳴っているので、その間に溜まれば切れ目は出ない）
+      playBcBoundaryPending = false;
+      playerPrebufferBytes = PLAY_PREBUFFER_START;
+      playerPrebuffering = true;
+      Serial.printf("[PLAYER] backchannel handed to I2S; reply buffered=%u bytes\n", (unsigned)avail);
+    }
+
     if (playerPrebuffering) {
       // プリバッファ: 一定量溜まるまで再生開始を待つ（ストリーム終了時は即出し切る）
       if (avail >= playerPrebufferBytes || (playerStreamEnd && avail > 0)) {
@@ -1918,12 +1938,20 @@ void playbackTask(void* param) {
     size_t t = playRingTail;
     size_t n = min(avail, (size_t)PLAY_WRITE_CHUNK);
     n = min(n, PLAY_RING_SIZE - t);  // 折返し前まで
+    const bool inBackchannel = playBcBoundaryPending;
+    if (inBackchannel) n = min(n, (playBcBoundary + PLAY_RING_SIZE - t) % PLAY_RING_SIZE);  // 境目をまたがない
     size_t written = 0;
     writePlaybackI2s(playRing + t, n, &written, portMAX_DELAY);
     notePlayDmaWrite(written);
     if (written > 0) {
       lastI2sWriteMs.store(millis(), std::memory_order_relaxed);
-      logFirstTtsWrite();
+      if (!inBackchannel) {
+        logFirstTtsWrite();  // 返答の鳴り始め（相槌は数えない）
+      } else if (!playBcFirstWriteLogged) {
+        playBcFirstWriteLogged = true;
+        Serial.printf("[LATENCY] bc_first_i2s_ms=%lu (copy completion, not acoustic start)\n",
+                      (unsigned long)(millis() - ttsTurnStartMs.load()));
+      }
     }
     playRingTail = (t + written) % PLAY_RING_SIZE;
     playConsumedBytes += written;
@@ -1942,6 +1970,8 @@ void playerStart() {
   playerPrebufferBytes = PLAY_PREBUFFER_START;
   playDmaEndUs = 0;
   playerPrebuffering = true;
+  playBcBoundaryPending = false;
+  playBcFirstWriteLogged = false;
   statUnderrunPending = false;  // 前セッション(相槌等)の終端レースを持ち越さない
   playerActive = true;
 }
@@ -2097,36 +2127,268 @@ bool processPCM(WiFiClientSecure& client, uint32_t length) {
 }
 
 // ==== 相槌キャッシュクリア ====
+void abortBackchannelPreconnect(const char* why);
 void clearBackchannelCache() {
-  if (backchannelPcm) { free(backchannelPcm); backchannelPcm = NULL; }
-  backchannelPcmSize = 0;
-  backchannelText = "";
-  backchannelReady = false;
-  backchannelFetching = false;
+  abortBackchannelPreconnect("cache cleared");
+  uint8_t* pcm = NULL;
+  {
+    std::lock_guard<std::mutex> lock(backchannelMutex);
+    ++backchannelGeneration;  // 取得中のタスクがあれば、その結果は捨てられる
+    pcm = backchannelPcm;
+    backchannelPcm = NULL;
+    backchannelPcmSize = 0;
+    backchannelText = "";
+    backchannelReady = false;
+    backchannelFetching = false;
+    backchannelTaskHandle = NULL;
+  }
+  if (pcm) free(pcm);
   backchannelFired = false;
-  backchannelAbort = false;
 }
 
-// ==== 相槌フェッチ用FreeRTOSタスク ====
-struct BackchannelParams {
-  String partialText;
-  String characterId;
+// ==== 相槌の取得（0.7.49: 接続を先に張る）====
+// 相槌の接続は本文と同じ作り（LambdaLink.h）で、この発話の最初の文字が来た時に張り始める（ロードマップ52。TLS の約0.35秒を
+// 相槌を取りに行く前に済ませる）。7文字に届いたら同じタスクが要求を送り、応答を読んで backchannelPcm に置く。
+// 持ち主: 張って待っている間は loop() の backchannelPreconnect が指す。「送る」「やめる」を渡した後は loop() は触らず、
+// タスクが接続ごと片付ける（本文の接続と違い、応答を読み終えるまでタスクが持つ）。
+static BackchannelLink* backchannelPreconnect = nullptr;  // 張って待っている接続。loop() だけが触る
+
+static bool backchannelLinkConnect(BackchannelLink* p) {
+  p->client.setCACert(AMAZON_ROOT_CAS);  // 証明書を検証する
+  const uint32_t connectStart = millis();
+  const bool connected = p->client.connect(BACKCHANNEL_HOST, 443);
+  p->connectMs = millis() - connectStart;
+  p->connectedAtMs = millis();
+  Serial.printf("[LATENCY] bc_connect_ms=%lu ok=%d\n", (unsigned long)p->connectMs, connected);
+  return connected;
+}
+
+// 応答のヘッダーを読む。200 なら true。長さ（無ければ -1）・チャンク形式か・相槌の文を返す
+static inline bool backchannelStale(uint32_t generation) { return generation != backchannelGeneration.load(); }
+
+static bool readBackchannelHeaders(WiFiClientSecure& client, uint32_t generation, int& contentLength, bool& chunked, String& text) {
+  String line;
+  bool firstLine = true;
+  size_t total = 0;
+  uint32_t lastProgress = millis();
+  contentLength = -1;
+  chunked = false;
+  while (!backchannelStale(generation) && total < 16384 && millis() - lastProgress < 8000) {
+    if (client.available() <= 0) {
+      if (!client.connected()) break;
+      delay(1);
+      continue;
+    }
+    uint8_t c;
+    if (client.read(&c, 1) != 1) { delay(1); continue; }
+    lastProgress = millis();
+    ++total;
+    if (c == '\r') continue;
+    if (c != '\n') {
+      if (line.length() >= 1024) break;
+      line += (char)c;
+      continue;
+    }
+    if (firstLine) {
+      if (!line.startsWith("HTTP/1.1 200")) {
+        Serial.printf("[BC] HTTP status: %s\n", line.c_str());
+        return false;
+      }
+      firstLine = false;
+    } else if (line.length() == 0) {
+      return true;
+    } else {
+      const int colon = line.indexOf(':');
+      if (colon > 0) {
+        String name = line.substring(0, colon);
+        name.toLowerCase();
+        String value = line.substring(colon + 1);
+        value.trim();
+        if (name == "content-length") contentLength = value.toInt();
+        else if (name == "x-backchannel-text") text = value;
+        else if (name == "transfer-encoding") { value.toLowerCase(); chunked = value == "chunked"; }
+      }
+    }
+    line = "";
+  }
+  if (!backchannelStale(generation)) Serial.println("[BC] incomplete/invalid HTTP headers");
+  return false;
+}
+
+struct BackchannelReadRuntime {
+  uint32_t generation;
+  uint32_t now() { return millis(); }
+  void idle() { delay(1); }
+  bool cancelled() { return backchannelStale(generation); }
 };
 
-// 通常の関数として戻り、ローカルStringをタスク削除前に破棄する。
-void fetchBackchannel(void* param) {
-  BackchannelParams* p = (BackchannelParams*)param;
-  String partial = p->partialText;
-  String charId = p->characterId;
-  delete p;
+// 応答の本体（PCM）を読んで backchannelPcm に置く。長さつきでもチャンク形式でも読める
+static void readBackchannelBody(WiFiClientSecure& client, uint32_t generation, int contentLength, bool chunked, const String& text, uint32_t fetchStart) {
+  const size_t INIT_SIZE = 32768;
+  const size_t MAX_SIZE = 256000;
+  if (contentLength > (int)MAX_SIZE) contentLength = MAX_SIZE;
+  size_t bufSize = (contentLength > 0) ? (size_t)contentLength : INIT_SIZE;
+  uint8_t* pcm = (uint8_t*)ps_malloc(bufSize);
+  if (!pcm) pcm = (uint8_t*)malloc(bufSize);
+  if (!pcm) {
+    Serial.println("[BC] malloc failed");
+    return;
+  }
+
+  ChunkedBodyDecoder decoder;
+  BackchannelReadRuntime runtime{generation};
+  size_t totalRead = 0;
+  const uint32_t startTime = millis();
+  uint32_t lastProgress = startTime;
+  while (!backchannelStale(generation) && millis() - startTime < 15000 && millis() - lastProgress < 8000) {
+    if (contentLength > 0 && (int)totalRead >= contentLength) break;
+    if (totalRead == bufSize) {
+      size_t newSize = min(bufSize * 2, MAX_SIZE);
+      if (newSize <= bufSize) break;
+      uint8_t* newBuf = (uint8_t*)ps_realloc(pcm, newSize);
+      if (!newBuf) newBuf = (uint8_t*)realloc(pcm, newSize);
+      if (!newBuf) break;
+      pcm = newBuf;
+      bufSize = newSize;
+    }
+    if (chunked) {
+      const size_t rd = decoder.read(client, runtime, pcm + totalRead, bufSize - totalRead, 8000);
+      totalRead += rd;
+      if (decoder.done() || decoder.failed()) break;
+      continue;
+    }
+    const int avail = client.available();
+    if (avail <= 0) {
+      if (!client.connected()) break;
+      delay(1);
+      continue;
+    }
+    const int rd = client.read(pcm + totalRead, min((size_t)avail, bufSize - totalRead));
+    if (rd <= 0) { delay(1); continue; }
+    totalRead += rd;
+    lastProgress = millis();
+  }
+
+  const bool complete = chunked ? decoder.done() : (contentLength <= 0 || (int)totalRead >= contentLength);
+  bool published = false;
+  if (totalRead > 0 && complete) {
+    std::lock_guard<std::mutex> lock(backchannelMutex);
+    if (!backchannelStale(generation)) {
+      backchannelText = text;
+      backchannelPcm = pcm;
+      backchannelPcmSize = totalRead & ~(size_t)1;  // 16bit の途中で切れた分は鳴らさない
+      backchannelReady = true;
+      published = true;
+    }
+  }
+  if (published) {
+    Serial.printf("[BC] Ready: pcm=%d bytes fetch_ms=%lu\n", (int)totalRead, (unsigned long)(millis() - fetchStart));
+  } else {
+    free(pcm);
+    Serial.printf("[BC] %s (read=%u length=%d fetch_ms=%lu)\n",
+                  backchannelStale(generation) ? "Dropped (no longer wanted)" : "No PCM data / incomplete",
+                  (unsigned)totalRead, contentLength, (unsigned long)(millis() - fetchStart));
+  }
+}
+
+void backchannelLinkTask(void* param) {
+  BackchannelLink* p = (BackchannelLink*)param;
+  bool connected = backchannelLinkConnect(p);
+  // 取りに行くか・やめるかが決まるまで待つ（通知を取りこぼしても 20ms で見直す）
+  const bool waited = p->command.load() == 0;
+  uint8_t command;
+  while ((command = p->command.load()) == 0) ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(20));
+  if (command == LAMBDA_LINK_ABORT) {
+    delete p;  // 接続も閉じる
+    vTaskDelete(NULL);
+    return;
+  }
+  const uint32_t fetchStart = millis();
+  if (waited) {
+    // 先に張った接続。待っている間に切れた・古くなった・張れなかったものは使わず、ここで張り直す（従来と同じ速さに戻るだけ）
+    const uint32_t idleMs = millis() - p->connectedAtMs;
+    if (connected && p->client.connected() && idleMs <= LAMBDA_LINK_MAX_IDLE_MS) {
+      Serial.printf("[LATENCY] bc_preconnect reused idle_ms=%lu\n", (unsigned long)idleMs);
+    } else {
+      Serial.printf("[LATENCY] bc_preconnect not usable (ok=%d idle_ms=%lu); reconnecting\n", connected, (unsigned long)idleMs);
+      p->client.stop();
+      connected = backchannelLinkConnect(p);
+    }
+  }
+  const uint32_t generation = p->generation;
+  if (!connected || backchannelStale(generation)) {
+    Serial.printf("[BC] %s\n", connected ? "Dropped before request (no longer wanted)" : "connect failed");
+  } else if (p->client.print(p->requestText) != p->requestText.length()) {
+    Serial.println("[BC] request send failed");
+  } else {
+    int contentLength = -1;
+    bool chunked = false;
+    String text;
+    if (readBackchannelHeaders(p->client, generation, contentLength, chunked, text)) {
+      readBackchannelBody(p->client, generation, contentLength, chunked, text, fetchStart);
+    }
+  }
+  delete p;  // 接続を閉じ、要求の文も解放する
+  Serial.printf("[BC] Free heap after: %d\n", ESP.getFreeHeap());
+  {
+    // 世代が変わっていたら、いまの取得は別のタスクのもの。その印には触らない
+    std::lock_guard<std::mutex> lock(backchannelMutex);
+    if (!backchannelStale(generation)) {
+      backchannelFetching = false;
+      backchannelTaskHandle = NULL;
+    }
+  }
+  vTaskDelete(NULL);
+}
+
+// 接続のタスクを始める。作れなければ nullptr
+static BackchannelLink* startBackchannelLink() {
+  BackchannelLink* link = new BackchannelLink();
+  if (xTaskCreatePinnedToCore(backchannelLinkTask, "bc_fetch", 16384, link, 1, &link->task, 1) != pdPASS) {
+    delete link;
+    return nullptr;
+  }
+  return link;
+}
+
+// 相槌を取りに行けるか（取得中・取得済み・再生済みなら行かない）
+static bool backchannelWanted() {
+  return backchannelEnabled && !backchannelFetching && !backchannelReady && !backchannelFired &&
+         strlen(BACKCHANNEL_HOST) > 0;
+}
+
+// この発話の最初の文字が来た時に呼ぶ。もう張っていれば何もしない
+void startBackchannelPreconnect() {
+  if (backchannelPreconnect || !backchannelWanted() || WiFi.status() != WL_CONNECTED) return;
+  if (ESP.getFreeHeap() < 60000) return;
+  backchannelPreconnect = startBackchannelLink();
+  Serial.printf("[LATENCY] bc_preconnect started=%d\n", backchannelPreconnect != nullptr);
+}
+
+// 先に張った接続を使わないと決まった時に呼ぶ（7文字に届かず送った・聞き取りのやり直し・休み）
+void abortBackchannelPreconnect(const char* why) {
+  if (!backchannelPreconnect) return;
+  BackchannelLink* link = backchannelPreconnect;
+  backchannelPreconnect = nullptr;
+  Serial.printf("[LATENCY] bc_preconnect aborted (%s)\n", why);
+  link->command = LAMBDA_LINK_ABORT;  // 以後は触らない（タスクが片付ける）
+  xTaskNotifyGive(link->task);
+}
+
+// ==== 相槌フェッチ開始 ====
+void startBackchannelFetch(const String& partial) {
+  if (!backchannelWanted()) return;
+  if (ESP.getFreeHeap() < 60000) {
+    Serial.printf("[BC] Not enough heap: %d bytes, skipping\n", ESP.getFreeHeap());
+    return;
+  }
 
   Serial.printf("[BC] Fetching backchannel for: %s\n", partial.c_str());
   Serial.printf("[BC] Free heap before: %d\n", ESP.getFreeHeap());
 
-  String url = String("https://") + BACKCHANNEL_HOST + BACKCHANNEL_PATH;
   String payload = "{\"partial_text\":\"" + partial + "\",\"fw\":\"" TOYTALKER_FW_VERSION "\"";
-  if (charId.length() > 0) {
-    payload += ",\"device_id\":\"" + charId + "\"";
+  if (deviceMacAddress.length() > 0) {
+    payload += ",\"device_id\":\"" + deviceMacAddress + "\"";
   }
   if (historyCount > 0) {
     payload += ",\"history\":[";
@@ -2147,139 +2409,117 @@ void fetchBackchannel(void* param) {
   }
   payload += "}";
 
-  {
-    HTTPClient http;
-    http.begin(url, AMAZON_ROOT_CAS);  // 証明書を検証する
-    http.addHeader("Content-Type", "application/json");
-    http.addHeader("x-amz-content-sha256", sha256Hex(payload));
-    if (device_auth::available()) http.addHeader(device_auth::KEY_HEADER, device_auth::value());
-    http.setTimeout(8000);
-    const char* headerKeys[] = {"X-Backchannel-Text", "x-backchannel-text"};
-    http.collectHeaders(headerKeys, 2);
-
-    int httpCode = http.POST(payload);
-
-    if (backchannelAbort || httpCode != 200) {
-      Serial.printf("[BC] %s (code=%d)\n", backchannelAbort ? "Aborted" : "HTTP error", httpCode);
-      http.end();
-    } else {
-      if (http.hasHeader("X-Backchannel-Text")) {
-        backchannelText = http.header("X-Backchannel-Text");
-      } else if (http.hasHeader("x-backchannel-text")) {
-        backchannelText = http.header("x-backchannel-text");
-      }
-
-      int len = http.getSize();
-      WiFiClient* stream = http.getStreamPtr();
-
-      const size_t INIT_SIZE = 32768;
-      const size_t MAX_SIZE = 256000;
-      size_t bufSize = (len > 0) ? (size_t)len : INIT_SIZE;
-      uint8_t* pcm = (uint8_t*)ps_malloc(bufSize);
-      if (!pcm) pcm = (uint8_t*)malloc(bufSize);
-
-      if (pcm) {
-        size_t totalRead = 0;
-        unsigned long startTime = millis();
-        while (http.connected() && (millis() - startTime < 15000) && !backchannelAbort) {
-          size_t avail = stream->available();
-          if (avail > 0) {
-            if (totalRead + avail > bufSize) {
-              size_t newSize = min(bufSize * 2, MAX_SIZE);
-              if (newSize <= bufSize) break;
-              uint8_t* newBuf = (uint8_t*)ps_realloc(pcm, newSize);
-              if (!newBuf) newBuf = (uint8_t*)realloc(pcm, newSize);
-              if (!newBuf) break;
-              pcm = newBuf;
-              bufSize = newSize;
-            }
-            size_t rd = stream->readBytes(pcm + totalRead, avail);
-            totalRead += rd;
-          } else {
-            if (len > 0 && (int)totalRead >= len) break;
-            delay(1);
-          }
-        }
-
-        if (totalRead > 0 && !backchannelAbort) {
-          backchannelPcm = pcm;
-          backchannelPcmSize = totalRead;
-          backchannelReady = true;
-          Serial.printf("[BC] Ready: pcm=%d bytes\n", totalRead);
-        } else {
-          free(pcm);
-          Serial.printf("[BC] %s\n", backchannelAbort ? "Aborted" : "No PCM data");
-        }
-      } else {
-        Serial.println("[BC] malloc failed");
-      }
-      http.end();
-    }
-  }
-
-}
-
-void fetchBackchannelTask(void* param) {
-  fetchBackchannel(param);
-  // partial / charId / url / payload はここでは解放済み。
-  Serial.printf("[BC] Free heap after: %d\n", ESP.getFreeHeap());
-  backchannelFetching = false;
-  backchannelTaskHandle = NULL;
-  vTaskDelete(NULL);
-}
-
-// ==== 相槌フェッチ開始 ====
-void startBackchannelFetch(const String& partial) {
-  if (!backchannelEnabled) return;
-  if (backchannelFetching || backchannelReady || backchannelFired) return;
-  if (strlen(BACKCHANNEL_HOST) == 0) return;
-  if (ESP.getFreeHeap() < 60000) {
-    Serial.printf("[BC] Not enough heap: %d bytes, skipping\n", ESP.getFreeHeap());
+  BackchannelLink* link = backchannelPreconnect;
+  backchannelPreconnect = nullptr;
+  const bool preconnected = link != nullptr;
+  if (!link) link = startBackchannelLink();
+  if (!link) {
+    Serial.println("[BC] task allocation failed");
     return;
   }
-
+  link->requestText =
+    String("POST ") + BACKCHANNEL_PATH + " HTTP/1.1\r\n"
+    "Host: " + BACKCHANNEL_HOST + "\r\n"
+    "Content-Type: application/json\r\n"
+    "x-amz-content-sha256: " + sha256Hex(payload) + "\r\n"
+    + (device_auth::available() ? String(device_auth::KEY_HEADER) + ": " + device_auth::value() + "\r\n" : String("")) +
+    "Connection: close\r\n"
+    "Content-Length: " + payload.length() + "\r\n\r\n"
+    + payload;
+  link->generation = backchannelGeneration.load();
   backchannelFetching = true;
-
-  BackchannelParams* params = new BackchannelParams();
-  params->partialText = partial;
-  params->characterId = deviceMacAddress;
-
-  xTaskCreatePinnedToCore(fetchBackchannelTask, "bc_fetch", 16384, params, 1, &backchannelTaskHandle, 1);
+  backchannelTaskHandle = link->task;
+  link->command = LAMBDA_LINK_GO;  // 以後は触らない（タスクが片付ける）
+  xTaskNotifyGive(link->task);
+  Serial.printf("[BC] task %s\n", preconnected ? "told to send (preconnected)" : "started");
 }
 
 // ==== 相槌再生 ====
+// リングに入れてすぐ戻る（鳴らすのは再生タスク）。loop() はこの後すぐ本文の応答を読み、届いた音声は相槌の後ろに並ぶ（0.7.50）。
+// 0.7.49 までは鳴り終わるまでここで待ち、その間は本文を読んでいなかった（相槌の後に 0.3〜0.5 秒の間ができていた）
 bool playBackchannelIfReady() {
-  if (!backchannelReady || !backchannelPcm || backchannelPcmSize == 0) return false;
+  uint8_t* pcm = NULL;
+  size_t pcmSize = 0;
+  String text;
+  {
+    std::lock_guard<std::mutex> lock(backchannelMutex);
+    if (!backchannelReady || !backchannelPcm || backchannelPcmSize == 0) return false;
+    pcm = backchannelPcm;
+    pcmSize = backchannelPcmSize;
+    text = backchannelText;
+    backchannelPcm = NULL;
+    backchannelPcmSize = 0;
+    backchannelReady = false;
+  }
 
-  Serial.printf("[BC] Playing backchannel: %d bytes\n", backchannelPcmSize);
+  Serial.printf("[BC] Playing backchannel: %d bytes\n", (int)pcmSize);
 
-  size_t samples = backchannelPcmSize / 2;
+  size_t samples = pcmSize / 2;
   const size_t PLAY_CHUNK = 4096;
   size_t offset = 0;
 
+  if (playRing) {
+    // 境目を先に知らせてから入れる（再生タスクは 32KB 溜まった時点で鳴らし始める）
+    playBcBoundary = (playRingHead + samples * 4) % PLAY_RING_SIZE;
+    playBcBoundaryPending = true;
+  }
   while (offset < samples && !bargeInRequested) {
     size_t chunkSamples = min(PLAY_CHUNK, samples - offset);
     size_t stereoBytes = chunkSamples * 4;
     int16_t* stereo = (int16_t*)malloc(stereoBytes);
     if (!stereo) break;
 
-    monoToStereo((int16_t*)(backchannelPcm + offset * 2), stereo, chunkSamples);
-    size_t written = 0;
-    writePlaybackI2s((uint8_t*)stereo, stereoBytes, &written, portMAX_DELAY);
+    monoToStereo((int16_t*)(pcm + offset * 2), stereo, chunkSamples);
+    bool ok = true;
+    if (playRing) {
+      ok = playRingPush((uint8_t*)stereo, stereoBytes);
+    } else {
+      size_t written = 0;
+      writePlaybackI2s((uint8_t*)stereo, stereoBytes, &written, portMAX_DELAY);  // リングが無い時は従来どおり直接
+    }
     free(stereo);
+    if (!ok) break;  // 割り込み
     offset += chunkSamples;
+  }
+  if (playRing) {
+    if (offset < samples) playBcBoundary = playRingHead;  // 途中でやめた。入れた所までが相槌
+    playerPrebuffering = false;  // 短い相槌でも溜めを待たずに鳴らす
   }
 
   backchannelFired = true;
-  if (backchannelText.length() > 0) addPastBackchannel(backchannelText);
-  Serial.println("[BC] Backchannel playback done");
+  if (text.length() > 0) addPastBackchannel(text);
+  Serial.printf("[BC] Backchannel %s\n", playRing ? "queued" : "playback done");
 
-  free(backchannelPcm);
-  backchannelPcm = NULL;
-  backchannelPcmSize = 0;
-  backchannelReady = false;
-
+  free(pcm);
   return true;
+}
+
+// ---- 遅れて届く相槌（0.7.51: 相槌を待たずに本文を送る）----
+// 送ると決めた時に相槌がまだ取得中なら、待たずに本文を送る。相槌は、本文の最初の音声が届く前に着けば鳴らし、
+// 後なら捨てる（最初に鳴るのは相槌か本文の早い方）。loop() だけが触る。本文の応答を待っている間の空き時間に呼ばれる
+static bool lateBackchannelOpen = false;
+static uint32_t lateBackchannelSinceMs = 0;
+
+void pollLateBackchannel() {
+  if (!lateBackchannelOpen) return;
+  if (bargeInRequested) { lateBackchannelOpen = false; return; }
+  if (backchannelReady) {
+    lateBackchannelOpen = false;
+    Serial.printf("[BC] arrived +%lums after send; playing before reply\n", (unsigned long)(millis() - lateBackchannelSinceMs));
+    playBackchannelIfReady();
+  } else if (!backchannelFetching) {
+    lateBackchannelOpen = false;
+    Serial.printf("[BC] fetch ended without audio +%lums after send\n", (unsigned long)(millis() - lateBackchannelSinceMs));
+  }
+}
+
+// 本文の最初の音声が先に届いた。取得中の相槌は捨てる（届いても鳴らさない）
+void closeLateBackchannel() {
+  pollLateBackchannel();  // ちょうど届いていれば鳴らす
+  if (!lateBackchannelOpen) return;
+  lateBackchannelOpen = false;
+  Serial.printf("[BC] discarded: reply audio arrived first (+%lums after send)\n", (unsigned long)(millis() - lateBackchannelSinceMs));
+  clearBackchannelCache();
 }
 
 // ---- Lambda への TLS 接続と要求の送信（Core 0 のタスク）----
@@ -2469,20 +2709,11 @@ void sendToLambdaAndPlay(const String& text) {
   sttWanted = false;  // 返答の間は見張らない（戻るときに startSTTRecording が立てる）
   logMemoryCheckpoint("before_playback");
 
-  // バックチャネルタスク完了待ち
-  if (backchannelFetching && backchannelTaskHandle != NULL) {
-    Serial.println("[BC] Waiting for backchannel task to finish...");
-    unsigned long waitStart = millis();
-    while (backchannelTaskHandle != NULL && (millis() - waitStart < 10000)) delay(10);
-    if (backchannelTaskHandle != NULL) {
-      Serial.println("[BC] Timeout - aborting task");
-      backchannelAbort = true;
-      unsigned long abortStart = millis();
-      while (backchannelTaskHandle != NULL && (millis() - abortStart < 3000)) delay(10);
-      backchannelAbort = false;
-    }
-  }
-  Serial.printf("⏱️ [%lums] BC wait done\n", millis() - t0);
+  abortBackchannelPreconnect("sent before trigger");  // 7文字に届かないまま送る。張った接続は使わない
+  // 相槌の取得が途中でも待たない（0.7.51）。届いたら鳴らす（pollLateBackchannel）
+  lateBackchannelOpen = false;
+  Serial.printf("⏱️ [%lums] BC not waited (fetching=%d ready=%d)\n", millis() - t0,
+                (bool)backchannelFetching, (bool)backchannelReady);
 
   // タイマー再開（再生中のLEDアニメーション用）
   timerAlarm(ledTimer, 30000, true, 0);
@@ -2529,12 +2760,12 @@ void sendToLambdaAndPlay(const String& text) {
   // POST precedes local backchannel playback. Tell Lambda about the ready PCM
   // committed to play before its reply, without marking it as already played.
   // Use the same snapshot below so late-arriving PCM cannot change the plan.
-  const bool backchannelPlanned = !bargeInRequested && backchannelReady &&
-                                 backchannelPcm && backchannelPcmSize > 0;
-  const bool backchannelForReply = backchannelFired || backchannelPlanned;
-  Serial.printf("[BC] reply_hint=%d planned=%d played=%d pcm_bytes=%u\n",
-                backchannelForReply, backchannelPlanned, (bool)backchannelFired,
-                (unsigned)(backchannelPlanned ? backchannelPcmSize : 0));
+  const bool backchannelPlanned = !bargeInRequested && backchannelReady;
+  // 取得中の相槌は、鳴る見込みとして伝える（本文より遅れて捨てた時は、返答が相槌なしで本題から始まる）
+  const bool backchannelPending = !bargeInRequested && !backchannelPlanned && backchannelFetching;
+  const bool backchannelForReply = backchannelFired || backchannelPlanned || backchannelPending;
+  Serial.printf("[BC] reply_hint=%d planned=%d pending=%d played=%d\n",
+                backchannelForReply, backchannelPlanned, backchannelPending, (bool)backchannelFired);
 
   // fw: Lambdaの切り分けログ用（どの版の本体からの要求か）。文章は chat-logs に残り、ログには時刻と識別子だけが出る
   String payload =
@@ -2596,12 +2827,15 @@ void sendToLambdaAndPlay(const String& text) {
   if (backchannelPlanned) {
     Serial.println("[BC] Playing backchannel while Lambda connects...");
     playBackchannelIfReady();
+  } else if (backchannelPending) {
+    lateBackchannelOpen = true;
+    lateBackchannelSinceMs = t0;
   }
-  Serial.printf("⏱️ [%lums] Backchannel phase done\n", millis() - t0);
+  Serial.printf("⏱️ [%lums] Backchannel phase done (queued; playing while reading reply)\n", millis() - t0);
 
   // Lambda接続完了待ち
   // タスクがclient/reqを使い終わるまで寿命を保持する。音声検出時のミュートは監視側で行う。
-  while (!connParams.finished) delay(1);
+  while (!connParams.finished) { pollLateBackchannel(); delay(1); }
   Serial.printf("⏱️ [%lums] Lambda request sent (ok=%d)\n", millis() - t0, !connParams.failed);
 
   if (connParams.connectStartMs) {
@@ -2614,6 +2848,13 @@ void sendToLambdaAndPlay(const String& text) {
     turnReport.sendMs = connParams.sendMs;
   }
   if (connParams.failed) {
+    lateBackchannelOpen = false;
+    if (backchannelFired && playRing) {
+      // 相槌はもうリングにある。途中で切らずに出し切る（0.7.49 までは鳴り終わってからここへ来ていた）
+      playerStreamEnd = true;
+      const unsigned long drainStart = millis();
+      while (!bargeInRequested && playerActive && (millis() - drainStart < 5000)) delay(10);
+    }
     stopVoiceMonitor();
     turnReport.aec = aecMonitor.report();
     finishTurnReport("connect_failed", t0);
@@ -2683,6 +2924,7 @@ void sendToLambdaAndPlay(const String& text) {
         break;
       }
     } else if (type == 0x02) {
+      closeLateBackchannel();  // 本文の音声が届いた。ここまでに着かなかった相槌は捨てる
       lambdaCompletion.pcmStarted();
       if (!processPCM(client, length)) {
         responseFailed = !bargeInRequested;
@@ -2691,6 +2933,7 @@ void sendToLambdaAndPlay(const String& text) {
     }
   }
 
+  lateBackchannelOpen = false;
   unsigned long tEnd = millis();
   Serial.printf("[STREAM_END] done=%d server_error=%d http_complete=%d failed=%d\n",
                 lambdaCompletion.doneSeen(), lambdaCompletion.errorSeen(), lambdaBody.done(), responseFailed);
@@ -2906,7 +3149,10 @@ void webSocketEvent(WStype_t type, uint8_t *payload, size_t length) {
         if (fullText.length() > 0) {
           // <end> と同じメッセージの確定（途中結果の差し替え）は数えない。数えると last_text_to_end_ms がいつも 0 付近になる
           if (!foundEndToken && fullText != partialText) lastTextChangeMs = millis();
-          if (partialText.length() == 0 && isRecording) ledBlip();  // この発話の最初の文字
+          if (partialText.length() == 0 && isRecording) {
+            ledBlip();  // この発話の最初の文字
+            startBackchannelPreconnect();  // 相槌の接続を先に張る（7文字に届いたら、これで取りに行く）
+          }
           partialText = fullText;
           lastPartialMs = millis();
           armed = true;
@@ -3892,5 +4138,6 @@ void finishUtterance(const char* why) {
     sendToLambdaAndPlay(text);
   } else {
     abortLambdaPreconnect("same text");
+    abortBackchannelPreconnect("same text");
   }
 }
