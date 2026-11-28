@@ -1,0 +1,8 @@
+# Arduino IDE 2 / arduino-cli がこのスケッチを開いたときに選ぶボード設定。基板 v0.4 以降（ESP32-S3-WROOM-1-N16R8）用。
+# 実機の書き込み設定: ESP32S3 Dev Module, OPI PSRAM, Flash 16MB, USB CDC On Boot。区画表はこのフォルダの partitions.csv
+# （PartitionScheme は arduino-cli が出す「Maximum is …」の上限に使われるだけ。アプリの枠 4MB に近い上限（4,096,000 バイト）を持つ
+#  rainmaker_8MB を借りている。RainMaker は使っていない。枠に収まるかは publish-firmware.sh が partitions.csv の app0 で確かめる）。
+# PSRAM の方式（opi）が MINI-1 の基板（v0.3 以前。toytalker_mini_v0.7）と違うので、.bin は互いに動かない。
+# 発行と USB 書き込みの道具（tools/publish-firmware.sh・flash-published.sh の --family=wroom1）はこの default_fqbn を読む。
+# ポートは環境ごとに違うので書かない。ビルド確認: arduino-cli compile devices/mcu/esp32_s3/toytalker
+default_fqbn: esp32:esp32:esp32s3:PSRAM=opi,FlashSize=16M,PartitionScheme=rainmaker_8MB,CDCOnBoot=cdc

@@ -1,0 +1,16 @@
+# ToyTalker（基板 v0.4 以降、フラッシュ 16MB）の区画表。スケッチのフォルダにあるこのファイルが、ボード設定の区画表より優先される。
+# 区画表は USB 書き込みでしか変わらない（OTA は .bin だけを入れ替える）。**配った後は変えられないので、売る前に決め切る**（いまは仮。2026-11-28）。
+# 考え方: 後から増やせないファームの枠を厚く取る（4MB ×2。0.8.0 の .bin は約 1.6MB）。枠が大きくても OTA の時間は .bin の大きさで決まる。
+#   tts    本体の中で作る声の重み（別リポジトリ zakicorp-tts-esp32 の研究。1 つの声で約 654KB、3 つ入る）。まだ使っていない
+#   voices ボイスキーホルダーの声（ADPCM で約 5 分。v0.3 以前は 384KB で約 30 秒）
+#   memory 本体の記憶（docs/device-memory.md）。まだ使っていない
+# 末尾の 832KB（0xF30000〜）は空き（NVS の鍵など、後から要るもの用）。
+# Name,   Type, SubType, Offset,   Size, Flags
+nvs,      data, nvs,     0x9000,   0x10000,
+otadata,  data, ota,     0x19000,  0x2000,
+app0,     app,  ota_0,   0x20000,  0x400000,
+app1,     app,  ota_1,   0x420000, 0x400000,
+tts,      data, 0x41,    0x820000, 0x200000,
+voices,   data, spiffs,  0xA20000, 0x400000,
+memory,   data, 0x40,    0xE20000, 0x100000,
+coredump, data, coredump,0xF20000, 0x10000,
